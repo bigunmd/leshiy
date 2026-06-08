@@ -1,4 +1,4 @@
-use leshiy_quic::{client::run_quic_client, server::run_quic_server};
+use leshiy_quic::{client::run_quic_client, masquerade::Masquerade, server::run_quic_server};
 use leshiy_reality::user::{InMemoryUserStore, User, UserStore};
 use std::sync::Arc;
 use std::time::Duration;
@@ -68,7 +68,7 @@ async fn start_server(store: Arc<dyn UserStore>) -> std::net::SocketAddr {
     let (certs, key) = self_signed();
     let bound = free_udp_addr();
     tokio::spawn(async move {
-        let _ = run_quic_server(bound, certs, key, store).await;
+        let _ = run_quic_server(bound, certs, key, store, Masquerade::default()).await;
     });
     bound
 }

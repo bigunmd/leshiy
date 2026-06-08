@@ -13,6 +13,11 @@ rustls.workspace = true
 tokio = { workspace = true, features = ["full"] }
 thiserror.workspace = true
 leshiy-reality = { path = "../leshiy-reality" }
+h3.workspace = true
+h3-quinn.workspace = true
+http.workspace = true
+bytes.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true

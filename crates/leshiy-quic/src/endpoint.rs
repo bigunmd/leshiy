@@ -20,8 +20,19 @@ pub fn server_endpoint(
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .ok();
-    let mut cfg = ServerConfig::with_single_cert(certs, key)
-        .map_err(|e| crate::QuicError::Conn(format!("server cfg: {e}")))?;
+    let mut tls = rustls::ServerConfig::builder_with_provider(
+        rustls::crypto::aws_lc_rs::default_provider().into(),
+    )
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .map_err(|e| crate::QuicError::Conn(format!("server tls: {e}")))?
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .map_err(|e| crate::QuicError::Conn(format!("server cert: {e}")))?;
+    tls.alpn_protocols = vec![b"h3".to_vec()];
+    tls.max_early_data_size = u32::MAX;
+    let quic_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls)
+        .map_err(|e| crate::QuicError::Conn(format!("quic server cfg: {e}")))?;
+    let mut cfg = ServerConfig::with_crypto(Arc::new(quic_crypto));
     cfg.transport_config(bbr_transport());
     Endpoint::server(cfg, listen).map_err(Into::into)
 }
@@ -46,7 +57,7 @@ pub fn client_endpoint(insecure_skip_verify: bool) -> Result<Endpoint> {
 #[cfg(feature = "dangerous-insecure-skip-verify")]
 fn build_insecure_client_endpoint() -> Result<Endpoint> {
     let mut ep = Endpoint::client("0.0.0.0:0".parse().unwrap())?;
-    let crypto = rustls::ClientConfig::builder_with_provider(
+    let mut crypto = rustls::ClientConfig::builder_with_provider(
         rustls::crypto::aws_lc_rs::default_provider().into(),
     )
     .with_safe_default_protocol_versions()
@@ -54,6 +65,7 @@ fn build_insecure_client_endpoint() -> Result<Endpoint> {
     .dangerous()
     .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
     .with_no_client_auth();
+    crypto.alpn_protocols = vec![b"h3".to_vec()];
     let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
         .map_err(|e| crate::QuicError::Conn(format!("{e}")))?;
     let mut ccfg = quinn::ClientConfig::new(Arc::new(quic_crypto));

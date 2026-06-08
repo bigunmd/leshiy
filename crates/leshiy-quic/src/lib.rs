@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 pub mod client;
-pub mod codec;
 pub mod endpoint;
+pub mod masquerade;
 pub mod server;
 
 #[derive(Debug, thiserror::Error)]
