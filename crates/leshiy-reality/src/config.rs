@@ -6,6 +6,14 @@ use zeroize::Zeroizing;
 
 use crate::error::{RealityError, Result};
 
+/// Optional QUIC endpoint carried in a `leshiy://` URI.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuicEndpoint {
+    pub addr: String,
+    pub sni: String,
+    pub cert_sha256: Option<[u8; 32]>,
+}
+
 pub struct ServerAuthConfig {
     pub static_secret: Zeroizing<[u8; 32]>,
     pub server_names: HashSet<String>,
@@ -37,18 +45,37 @@ pub fn format_reality_uri(
     sni: &str,
     short_id: &[u8; 8],
 ) -> String {
-    format!(
+    format_reality_uri_full(server_public, host_port, sni, short_id, None)
+}
+
+/// Like `format_reality_uri` but optionally appends `&quic=<addr>&qsni=<sni>[&qcert=<hex>]`.
+pub fn format_reality_uri_full(
+    server_public: &[u8; 32],
+    host_port: &str,
+    sni: &str,
+    short_id: &[u8; 8],
+    quic: Option<&QuicEndpoint>,
+) -> String {
+    let mut s = format!(
         "leshiy://{}@{}?sni={}&sid={}",
         URL_SAFE_NO_PAD.encode(server_public),
         host_port,
         sni,
         hex::encode(short_id),
-    )
+    );
+    if let Some(q) = quic {
+        s.push_str(&format!("&quic={}&qsni={}", q.addr, q.sni));
+        if let Some(c) = &q.cert_sha256 {
+            s.push_str(&format!("&qcert={}", hex::encode(c)));
+        }
+    }
+    s
 }
 
 pub struct RealityUri {
     pub server_addr: String,
     pub client: ClientAuthConfig,
+    pub quic: Option<QuicEndpoint>,
 }
 
 impl RealityUri {
@@ -71,10 +98,16 @@ impl RealityUri {
             .ok_or_else(|| RealityError::Malformed("missing query".into()))?;
         let mut sni = None;
         let mut sid = None;
+        let mut quic_addr = None;
+        let mut quic_sni = None;
+        let mut quic_cert = None;
         for kv in query.split('&') {
             match kv.split_once('=') {
                 Some(("sni", v)) => sni = Some(v.to_string()),
                 Some(("sid", v)) => sid = Some(v.to_string()),
+                Some(("quic", v)) => quic_addr = Some(v.to_string()),
+                Some(("qsni", v)) => quic_sni = Some(v.to_string()),
+                Some(("qcert", v)) => quic_cert = Some(v.to_string()),
                 _ => {}
             }
         }
@@ -86,6 +119,29 @@ impl RealityUri {
             .as_slice()
             .try_into()
             .map_err(|_| RealityError::Malformed("sid must be 8 bytes".into()))?;
+
+        let quic = if let Some(addr) = quic_addr {
+            let cert_sha256 = match quic_cert {
+                None => None,
+                Some(hex_str) => {
+                    let bytes = hex::decode(&hex_str)
+                        .map_err(|_| RealityError::Malformed("bad qcert hex".into()))?;
+                    let arr: [u8; 32] = bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| RealityError::Malformed("qcert must be 32 bytes".into()))?;
+                    Some(arr)
+                }
+            };
+            Some(QuicEndpoint {
+                addr,
+                sni: quic_sni.unwrap_or_default(),
+                cert_sha256,
+            })
+        } else {
+            None
+        };
+
         Ok(RealityUri {
             server_addr: host_port.to_string(),
             client: ClientAuthConfig {
@@ -93,6 +149,7 @@ impl RealityUri {
                 short_id,
                 sni,
             },
+            quic,
         })
     }
 }
@@ -120,5 +177,34 @@ mod tests {
         // valid 32-byte pubkey but no ?sni=&sid= query → missing params
         let pk = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 32]);
         assert!(RealityUri::parse(&format!("leshiy://{pk}@h:1")).is_err());
+    }
+
+    #[test]
+    fn reality_uri_with_quic_roundtrip() {
+        let pk = [7u8; 32];
+        let sid = [1, 2, 3, 4, 0, 0, 0, 0];
+        let qc = [9u8; 32];
+        let q = QuicEndpoint {
+            addr: "vps:8443".into(),
+            sni: "www.example.com".into(),
+            cert_sha256: Some(qc),
+        };
+        let uri = format_reality_uri_full(&pk, "vps:443", "www.example.com", &sid, Some(&q));
+        let p = RealityUri::parse(&uri).unwrap();
+        let pq = p.quic.unwrap();
+        assert_eq!(pq.addr, "vps:8443");
+        assert_eq!(pq.sni, "www.example.com");
+        assert_eq!(pq.cert_sha256, Some(qc));
+    }
+
+    #[test]
+    fn reality_uri_without_quic() {
+        let uri = format_reality_uri(
+            &[7u8; 32],
+            "vps:443",
+            "www.example.com",
+            &[1, 2, 3, 4, 0, 0, 0, 0],
+        );
+        assert!(RealityUri::parse(&uri).unwrap().quic.is_none());
     }
 }
