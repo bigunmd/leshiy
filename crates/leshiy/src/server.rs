@@ -93,6 +93,12 @@ pub fn init(opts: InitOptions<'_>) -> Result<()> {
 
     // --- Optional QUIC provisioning ---
     let quic_endpoint: Option<QuicEndpoint> = if let Some(ql) = quic_listen {
+        // Require cert+key to be provided together; one without the other is a footgun.
+        if quic_cert.is_some() != quic_key.is_some() {
+            return Err(anyhow::anyhow!(
+                "--quic-cert and --quic-key must be provided together"
+            ));
+        }
         let domain = quic_domain.unwrap_or("cdn.example.com").to_string();
         let (_cert_path_str, _key_path_str, cert_sha256_hex) =
             if let (Some(cp), Some(kp)) = (quic_cert, quic_key) {
@@ -302,11 +308,23 @@ pub async fn run(config: &str) -> Result<()> {
             .quic_domain
             .clone()
             .unwrap_or_else(|| "cdn.example.com".into());
-        let cert_sha256 = cfg.quic_cert_sha256.as_deref().and_then(|h| {
-            hex::decode(h)
+
+        // Always derive the pin from the cert we actually loaded, so issued URIs stay
+        // consistent even if the operator rotated the cert without updating the config hash.
+        let pin = leshiy_quic::endpoint::cert_sha256(certs[0].as_ref());
+        // Warn if the operator's config hash is present but doesn't match the real cert.
+        if let Some(config_hash) = cfg.quic_cert_sha256.as_deref() {
+            let config_bytes: Option<[u8; 32]> = hex::decode(config_hash)
                 .ok()
-                .and_then(|v| v.as_slice().try_into().ok())
-        });
+                .and_then(|v| v.as_slice().try_into().ok());
+            if config_bytes.as_ref() != Some(&pin) {
+                tracing::warn!(
+                    "config quic_cert_sha256 does not match the loaded cert; \
+                     using the loaded cert's fingerprint"
+                );
+            }
+        }
+        let cert_sha256 = Some(pin);
 
         // Spawn QUIC server with the SAME store.
         let qstore: Arc<dyn UserStore> = user_store.clone();

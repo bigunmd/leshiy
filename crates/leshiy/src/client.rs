@@ -13,9 +13,7 @@ pub async fn run(uri: &str, socks: &str, transport: Transport) -> Result<()> {
                 .ok_or_else(|| anyhow!("--transport quic but the URI has no quic= endpoint"))?;
             let verification = match q.cert_sha256 {
                 Some(pin) => leshiy_quic::endpoint::CertVerification::Pinned(pin),
-                None => leshiy_quic::endpoint::CertVerification::Roots {
-                    server_name: q.sni.clone(),
-                },
+                None => leshiy_quic::endpoint::CertVerification::Roots,
             };
             let addr: std::net::SocketAddr = tokio::net::lookup_host(&q.addr)
                 .await

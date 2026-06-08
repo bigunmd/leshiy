@@ -18,8 +18,8 @@ fn bbr_transport() -> Arc<TransportConfig> {
 /// How the client verifies the server's TLS certificate.
 #[derive(Clone)]
 pub enum CertVerification {
-    /// Verify against the Mozilla webpki roots for this DNS name.
-    Roots { server_name: String },
+    /// Verify against the Mozilla webpki roots (SNI is threaded via `ep.connect` call-site).
+    Roots,
     /// Trust exactly the cert whose end-entity DER SHA-256 equals this pin (self-signed self-host).
     Pinned([u8; 32]),
 }
@@ -64,7 +64,7 @@ pub fn client_endpoint(verification: CertVerification) -> Result<Endpoint> {
         .ok();
     let mut ep = Endpoint::client("0.0.0.0:0".parse().unwrap())?;
     let mut crypto = match verification {
-        CertVerification::Roots { .. } => {
+        CertVerification::Roots => {
             let mut roots = rustls::RootCertStore::empty();
             roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
             rustls::ClientConfig::builder()
