@@ -5,6 +5,7 @@ use std::time::Duration;
 
 const HEAD_START: Duration = Duration::from_millis(200);
 const QUIC_TIMEOUT: Duration = Duration::from_secs(3);
+const REALITY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn run(uri: &str, socks: &str, transport: crate::cli::Transport) -> Result<()> {
     use crate::cli::Transport;
@@ -24,7 +25,15 @@ pub async fn run(uri: &str, socks: &str, transport: crate::cli::Transport) -> Re
             );
             let reality = tokio::spawn(async move {
                 tokio::time::sleep(HEAD_START).await;
-                leshiy_reality::client::connect_reality(&raddr, rcfg).await
+                match tokio::time::timeout(
+                    REALITY_CONNECT_TIMEOUT,
+                    leshiy_reality::client::connect_reality(&raddr, rcfg),
+                )
+                .await
+                {
+                    Ok(r) => r.map_err(|e| anyhow::anyhow!("reality connect: {e}")),
+                    Err(_) => Err(anyhow::anyhow!("reality connect timed out")),
+                }
             });
             let qconn =
                 tokio::time::timeout(QUIC_TIMEOUT, connect_quic_from(&q, parsed.client.short_id))
@@ -42,10 +51,7 @@ pub async fn run(uri: &str, socks: &str, transport: crate::cli::Transport) -> Re
                 _ => {
                     // QUIC blocked/failed → REALITY (pre-warmed)
                     tracing::info!("transport=auto: QUIC unavailable, falling back to REALITY");
-                    let conn = reality
-                        .await
-                        .context("reality task")?
-                        .map_err(|e| anyhow!("reality connect: {e}"))?;
+                    let conn = reality.await.context("reality task")??;
                     leshiy_reality::client::serve_socks5(conn, &rsocks)
                         .await
                         .map_err(|e| anyhow!("reality: {e}"))

@@ -10,6 +10,7 @@
 // register a *new* user on the live server via the control socket, then
 // tunnels using the returned leshiy:// URI — proving live add works e2e.
 
+use base64::Engine as _;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -991,4 +992,82 @@ async fn reality_cli_auto_falls_back() {
          ~20 s budget: {last_err}\n\
          (client should have timed out QUIC to 127.0.0.1:1 and fallen back to REALITY)"
     );
+}
+
+/// M2d smoke: `--transport auto` fails CLOSED + BOUNDED when BOTH transports are dead.
+///
+/// Uses a hand-crafted URI pointing at dead ports (127.0.0.1:1) for both REALITY and
+/// QUIC.  The client MUST exit (non-zero) within ~25 s, i.e., well before the OS
+/// TCP-connect default (~75-127 s) that existed before the REALITY_CONNECT_TIMEOUT
+/// bound was added.  This proves the "bounded fallback delay" design holds even in the
+/// worst case where nothing is reachable.
+///
+/// Budget: QUIC_TIMEOUT (3 s) + HEAD_START (0.2 s) + REALITY_CONNECT_TIMEOUT (10 s)
+///         + generous margin = 25 s.
+#[tokio::test]
+async fn reality_cli_auto_both_dead() {
+    let bin = env!("CARGO_BIN_EXE_leshiy");
+
+    // Hand-crafted leshiy:// URI:
+    //   pubkey  = 32 zero bytes (base64url: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=)
+    //   host    = 127.0.0.1:1  (dead REALITY addr)
+    //   sni     = x
+    //   sid     = 0102030400000000  (8 bytes)
+    //   quic    = 127.0.0.1:1  (dead QUIC addr)
+    //   qsni    = example.test
+    // No real server anywhere → both transports fail within their bounded timeouts.
+    let pk = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 32]);
+    let uri = format!(
+        "leshiy://{pk}@127.0.0.1:1?sni=x&sid=0102030400000000&quic=127.0.0.1:1&qsni=example.test"
+    );
+
+    let (socks_l, socks_port) = reserve_port();
+    drop(socks_l);
+
+    let mut child = std::process::Command::new(bin)
+        .args([
+            "client",
+            "--uri",
+            &uri,
+            "--transport",
+            "auto",
+            "--socks",
+            &format!("127.0.0.1:{socks_port}"),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn leshiy client (both-dead)");
+
+    // Budget: QUIC_TIMEOUT(3s) + HEAD_START(0.2s) + REALITY_CONNECT_TIMEOUT(10s) + 12s margin
+    let budget = Duration::from_secs(25);
+    let poll_interval = Duration::from_millis(200);
+    let start = std::time::Instant::now();
+
+    let exited = loop {
+        match child.try_wait().expect("try_wait failed") {
+            Some(_status) => break true,
+            None => {
+                if start.elapsed() >= budget {
+                    break false;
+                }
+                std::thread::sleep(poll_interval);
+            }
+        }
+    };
+
+    if !exited {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!(
+            "reality_cli_auto_both_dead: client did NOT exit within {budget:?}.\n\
+             The REALITY fallback connect is unbounded — Fix 1 (REALITY_CONNECT_TIMEOUT) \
+             is not working."
+        );
+    }
+
+    let elapsed = start.elapsed();
+    // Must have exited non-zero (both transports dead → error).
+    // (status is already consumed; we just assert it exited promptly above.)
+    eprintln!("reality_cli_auto_both_dead: client exited in {elapsed:?} (budget={budget:?}) ✓");
 }

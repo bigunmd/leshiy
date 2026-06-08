@@ -121,6 +121,8 @@ impl RealityUri {
             .map_err(|_| RealityError::Malformed("sid must be 8 bytes".into()))?;
 
         let quic = if let Some(addr) = quic_addr {
+            let sni =
+                quic_sni.ok_or_else(|| RealityError::Malformed("quic= requires qsni=".into()))?;
             let cert_sha256 = match quic_cert {
                 None => None,
                 Some(hex_str) => {
@@ -135,7 +137,7 @@ impl RealityUri {
             };
             Some(QuicEndpoint {
                 addr,
-                sni: quic_sni.unwrap_or_default(),
+                sni,
                 cert_sha256,
             })
         } else {
@@ -206,5 +208,32 @@ mod tests {
             &[1, 2, 3, 4, 0, 0, 0, 0],
         );
         assert!(RealityUri::parse(&uri).unwrap().quic.is_none());
+    }
+
+    /// quic= without qsni= must be rejected with an explicit error.
+    #[test]
+    fn reality_uri_quic_without_qsni_rejected() {
+        let pk = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 32]);
+        // quic= present but no qsni= → parse error
+        let uri = format!("leshiy://{pk}@h:1?sni=x&sid=0102030400000000&quic=h:2");
+        match RealityUri::parse(&uri) {
+            Err(e) => assert!(
+                e.to_string().contains("quic= requires qsni="),
+                "unexpected error: {e}"
+            ),
+            Ok(_) => panic!("expected parse to fail when quic= is present but qsni= is absent"),
+        }
+    }
+
+    /// quic= with qsni= must be accepted and round-trip correctly.
+    #[test]
+    fn reality_uri_quic_with_qsni_accepted() {
+        let pk = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 32]);
+        let uri = format!("leshiy://{pk}@h:1?sni=x&sid=0102030400000000&quic=h:2&qsni=y");
+        let parsed = RealityUri::parse(&uri).unwrap();
+        let q = parsed.quic.unwrap();
+        assert_eq!(q.addr, "h:2");
+        assert_eq!(q.sni, "y");
+        assert!(q.cert_sha256.is_none());
     }
 }
