@@ -1,0 +1,32 @@
+[package]
+name = "leshiy"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "leshiy"
+path = "src/main.rs"
+
+[dependencies]
+leshiy-core = { path = "../leshiy-core" }
+leshiy-reality = { path = "../leshiy-reality" }
+tokio = { workspace = true, features = ["full"] }
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+toml.workspace = true
+base64.workspace = true
+hex.workspace = true
+zeroize.workspace = true
+rand.workspace = true
+x25519-dalek.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+rustls.workspace = true
+tokio-rustls.workspace = true
+rcgen.workspace = true

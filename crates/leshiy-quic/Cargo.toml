@@ -1,0 +1,19 @@
+[package]
+name = "leshiy-quic"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[features]
+dangerous-insecure-skip-verify = []
+
+[dependencies]
+quinn.workspace = true
+rustls.workspace = true
+tokio = { workspace = true, features = ["full"] }
+thiserror.workspace = true
+leshiy-reality = { path = "../leshiy-reality" }
+
+[dev-dependencies]
+rcgen.workspace = true
+leshiy-quic = { path = ".", features = ["dangerous-insecure-skip-verify"] }

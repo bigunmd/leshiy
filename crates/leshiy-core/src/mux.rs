@@ -1,0 +1,274 @@
+//! Stream multiplexer over one Session. OPEN carries the target as UTF-8 in its payload.
+use crate::error::{Error, Result};
+use crate::frame::{Frame, FrameType, MAX_PLAINTEXT, base_type, is_critical};
+use crate::transport::{FrameRead, FrameWrite};
+use crate::version::{Hello, Negotiated, negotiate};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
+
+/// Which side of the connection owns this mux.
+/// Clients allocate odd stream ids; servers allocate even ids.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Client,
+    Server,
+}
+
+/// Internal commands sent from Stream/Mux to the writer task.
+enum Command {
+    /// Register a new outgoing stream and send an OPEN frame.
+    Open(u32, String, mpsc::Sender<Vec<u8>>),
+    /// Write an arbitrary frame (DATA, CLOSE, …).
+    Write(Frame),
+}
+
+/// A logical stream inside a [`Mux`].
+pub struct Stream {
+    /// The target string that was carried in the OPEN frame.
+    pub target: String,
+    id: u32,
+    tx: mpsc::Sender<Command>,
+    rx: mpsc::Receiver<Vec<u8>>,
+}
+
+impl Stream {
+    /// Send payload bytes, chunked to fit within one Noise frame.
+    pub async fn send(&self, data: Vec<u8>) -> Result<()> {
+        // Each plaintext frame = 5-byte header + payload. Cap the payload so the encoded
+        // frame fits any transport's per-record overhead: Noise adds a 16-byte tag, the
+        // TLS app-data path adds a 1-byte inner-type + 16-byte tag (the larger). Leaving
+        // 6 bytes (header 5 + the extra inner-type byte) below MAX_PLAINTEXT is safe for both.
+        for chunk in data.chunks(MAX_PLAINTEXT - 6) {
+            self.tx
+                .send(Command::Write(Frame {
+                    stream_id: self.id,
+                    ftype: FrameType::Data as u8,
+                    payload: chunk.to_vec(),
+                }))
+                .await
+                .map_err(|_| Error::Closed)?;
+        }
+        Ok(())
+    }
+
+    /// Receive the next payload chunk from the peer.
+    pub async fn recv(&mut self) -> Result<Vec<u8>> {
+        self.rx.recv().await.ok_or(Error::Closed)
+    }
+
+    /// Send a CLOSE frame and remove the stream from the registry.
+    pub async fn close(&self) -> Result<()> {
+        self.tx
+            .send(Command::Write(Frame {
+                stream_id: self.id,
+                ftype: FrameType::Close as u8,
+                payload: vec![],
+            }))
+            .await
+            .map_err(|_| Error::Closed)
+    }
+}
+
+/// Shared map of active streams: stream_id → data sender.
+type Streams = Arc<Mutex<HashMap<u32, mpsc::Sender<Vec<u8>>>>>;
+
+/// Multiplexer: owns the background reader/writer tasks for one [`Session`].
+pub struct Mux {
+    cmd_tx: mpsc::Sender<Command>,
+    incoming: mpsc::Receiver<Stream>,
+    next_id: u32,
+    pub negotiated: Negotiated,
+}
+
+impl Mux {
+    /// Start the mux over a completed session:
+    /// 1. Exchange HELLO frames (write own, then read peer's) — deadlock-free on
+    ///    full-duplex because both sides write before reading.
+    /// 2. Spawn a writer task and a reader task.
+    pub async fn start<R, W>(
+        mut reader: R,
+        mut writer: W,
+        local_hello: Hello,
+        role: Role,
+    ) -> Result<Mux>
+    where
+        R: FrameRead + Send + 'static,
+        W: FrameWrite + Send + 'static,
+    {
+        // --- HELLO exchange (before spawning tasks) ---
+        writer
+            .write_frame(&Frame {
+                stream_id: 0,
+                ftype: FrameType::Hello as u8,
+                payload: local_hello.encode(),
+            })
+            .await?;
+
+        let peer_frame = reader.read_frame().await?;
+        if base_type(peer_frame.ftype) != FrameType::Hello as u8 {
+            return Err(Error::Version("expected HELLO first".into()));
+        }
+        let negotiated = negotiate(&local_hello, &Hello::decode(&peer_frame.payload)?)?;
+
+        // --- shared state ---
+        let streams: Streams = Arc::new(Mutex::new(HashMap::new()));
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(256);
+        let (inc_tx, incoming) = mpsc::channel::<Stream>(32);
+
+        // --- writer task: drains cmd_rx, registers streams, sends frames ---
+        {
+            let w_streams = streams.clone();
+            tokio::spawn(async move {
+                while let Some(cmd) = cmd_rx.recv().await {
+                    match cmd {
+                        Command::Open(id, target, data_tx) => {
+                            w_streams.lock().unwrap().insert(id, data_tx);
+                            if writer
+                                .write_frame(&Frame {
+                                    stream_id: id,
+                                    ftype: FrameType::Open as u8,
+                                    payload: target.into_bytes(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Command::Write(f) => {
+                            if base_type(f.ftype) == FrameType::Close as u8 {
+                                w_streams.lock().unwrap().remove(&f.stream_id);
+                            }
+                            if writer.write_frame(&f).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // --- reader task: dispatches inbound frames to per-stream senders ---
+        {
+            let r_streams = streams.clone();
+            let r_cmd_tx = cmd_tx.clone();
+            tokio::spawn(async move {
+                loop {
+                    let f = match reader.read_frame().await {
+                        Ok(f) => f,
+                        Err(_) => break,
+                    };
+                    let bt = base_type(f.ftype);
+                    if bt == FrameType::Open as u8 {
+                        let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(64);
+                        r_streams.lock().unwrap().insert(f.stream_id, data_tx);
+                        let target = String::from_utf8_lossy(&f.payload).into_owned();
+                        let stream = Stream {
+                            target,
+                            id: f.stream_id,
+                            tx: r_cmd_tx.clone(),
+                            rx: data_rx,
+                        };
+                        if inc_tx.send(stream).await.is_err() {
+                            break;
+                        }
+                    } else if bt == FrameType::Data as u8 {
+                        // Clone the sender out of the map BEFORE awaiting the send
+                        // so we never hold the Mutex guard across an .await.
+                        let tx = r_streams.lock().unwrap().get(&f.stream_id).cloned();
+                        if let Some(tx) = tx {
+                            let _ = tx.send(f.payload).await;
+                        }
+                    } else if bt == FrameType::Close as u8 {
+                        r_streams.lock().unwrap().remove(&f.stream_id);
+                    } else if is_critical(f.ftype) {
+                        break; // unknown critical frame → abort session
+                    }
+                    // unknown non-critical frame → silently ignore (continue)
+                }
+            });
+        }
+
+        let next_id = if role == Role::Client { 1 } else { 2 };
+        Ok(Mux {
+            cmd_tx,
+            incoming,
+            next_id,
+            negotiated,
+        })
+    }
+
+    /// Open a new outgoing stream to `target`.
+    /// Clients get odd ids, servers get even ids.
+    pub async fn open(&mut self, target: &str) -> Result<Stream> {
+        let id = self.next_id;
+        self.next_id += 2;
+        let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(64);
+        self.cmd_tx
+            .send(Command::Open(id, target.to_string(), data_tx))
+            .await
+            .map_err(|_| Error::Closed)?;
+        Ok(Stream {
+            target: target.to_string(),
+            id,
+            tx: self.cmd_tx.clone(),
+            rx: data_rx,
+        })
+    }
+
+    /// Wait for the next inbound stream opened by the peer.
+    pub async fn accept(&mut self) -> Result<Stream> {
+        self.incoming.recv().await.ok_or(Error::Closed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handshake::{PROTOCOL_MAJOR, generate_keypair};
+    use crate::session::Session;
+    use crate::version::Hello;
+
+    fn hello() -> Hello {
+        Hello {
+            version: 1,
+            min_supported: 1,
+            capabilities: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn open_data_close_one_stream() {
+        let server = generate_keypair().unwrap();
+        let server_pub = server.public.clone();
+        let server_priv = server.private.clone();
+        let (c_io, s_io) = tokio::io::duplex(16384);
+
+        // server: accept first inbound stream, echo until close
+        let srv = tokio::spawn(async move {
+            let sess = Session::accept(s_io, &server_priv, PROTOCOL_MAJOR)
+                .await
+                .unwrap();
+            let (r, w) = sess.into_halves();
+            let mut mux = Mux::start(r, w, hello(), Role::Server).await.unwrap();
+            let mut stream = mux.accept().await.unwrap();
+            assert_eq!(stream.target, "echo:0");
+            let data = stream.recv().await.unwrap();
+            stream.send(data).await.unwrap();
+            stream.close().await.unwrap();
+        });
+
+        let client = generate_keypair().unwrap();
+        let sess = Session::connect(c_io, &server_pub, &client.private, PROTOCOL_MAJOR)
+            .await
+            .unwrap();
+        let (r, w) = sess.into_halves();
+        let mut mux = Mux::start(r, w, hello(), Role::Client).await.unwrap();
+        let mut s = mux.open("echo:0").await.unwrap();
+        s.send(b"ping".to_vec()).await.unwrap();
+        let echoed = s.recv().await.unwrap();
+        assert_eq!(echoed, b"ping");
+        srv.await.unwrap();
+    }
+}

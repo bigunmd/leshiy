@@ -1,0 +1,16 @@
+[package]
+name = "leshiy-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+snow.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["full"] }

@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = ["crates/leshiy-core", "crates/leshiy", "crates/leshiy-tls", "crates/leshiy-reality", "crates/leshiy-quic"]
+
+[workspace.package]
+edition = "2024"
+version = "0.0.0"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
+snow = "0.9"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
+zeroize = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+base64 = "0.22"
+proptest = "1"
+sha2 = "0.10"
+md-5 = "0.10"
+hex = "0.4"
+rustls = "0.23"
+tokio-rustls = "0.26"
+rcgen = "0.13"
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+subtle = "2"
+ml-kem = { version = "0.3", features = ["getrandom", "zeroize"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+quinn = { version = "0.11", features = ["rustls-aws-lc-rs"] }
