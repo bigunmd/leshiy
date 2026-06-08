@@ -36,6 +36,14 @@ fn reserve_port() -> (std::net::TcpListener, u16) {
     (l, port)
 }
 
+/// Reserve a free UDP port, keeping the socket bound until the caller drops it.
+/// Used for the QUIC listen port (QUIC is UDP-based).
+fn reserve_udp_port() -> (std::net::UdpSocket, u16) {
+    let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = s.local_addr().unwrap().port();
+    (s, port)
+}
+
 /// Spawn a rustls TLS 1.3 "dest" server (self-signed cert for www.example.com).
 /// Uses the DEFAULT rustls CryptoProvider (aws-lc-rs, PQ-preferring: X25519MLKEM768).
 async fn spawn_rustls_dest() -> String {
@@ -591,4 +599,141 @@ async fn reality_cli_user_survives_restart() {
         "reality_cli_user_survives_restart: user A failed to tunnel after server restart: \
          {last_err}\n(definition did not survive restart)"
     );
+}
+
+/// M2c smoke: real binary tunnels SOCKS5 over the verified, pinned QUIC path.
+///
+/// 1. Start an in-process echo server.
+/// 2. Reserve REALITY TCP port, QUIC UDP port, and SOCKS port.
+/// 3. `leshiy server-init --quic-listen` → config with self-signed cert + pinned qcert in URI.
+/// 4. `leshiy server --config` → starts REALITY + QUIC (shared UserStore).
+/// 5. Wait for REALITY TCP port (server readiness proxy), then brief sleep for QUIC UDP bind.
+/// 6. `leshiy client --uri '<uri>' --transport quic --socks` → QUIC client.
+/// 7. Drive SOCKS5 CONNECT → echo server → assert payload round-trips over the pinned QUIC path.
+#[tokio::test]
+async fn reality_cli_quic_end_to_end() {
+    let bin = env!("CARGO_BIN_EXE_leshiy");
+
+    // ── 1. In-process rustls dest + echo server ───────────────────────────
+    // The QUIC path never uses `dest`, but server-init requires it.
+    // Reuse spawn_rustls_dest so the REALITY side is well-formed.
+    let dest = spawn_rustls_dest().await;
+    let echo = spawn_echo().await;
+
+    // ── 2. Reserve ports ──────────────────────────────────────────────────
+    let (server_l, server_port) = reserve_port();
+    let (quic_sock, quic_port) = reserve_udp_port();
+    let (socks_l, socks_port) = reserve_port();
+
+    // ── 3. server-init → config + URI (includes quic= and qcert=) ─────────
+    let cfg_dir = make_temp_dir("quic-e2e");
+    let cfg_path = cfg_dir.join("server.toml");
+    let cfg_str = cfg_path.to_str().unwrap();
+
+    // Release the UDP socket just before server-init so it can bind that port.
+    drop(quic_sock);
+
+    let out = std::process::Command::new(bin)
+        .args([
+            "server-init",
+            "--host",
+            &format!("127.0.0.1:{server_port}"),
+            "--dest",
+            &dest,
+            "--listen",
+            &format!("127.0.0.1:{server_port}"),
+            "--quic-listen",
+            &format!("127.0.0.1:{quic_port}"),
+            "--quic-domain",
+            "example.test",
+            "--out",
+            cfg_str,
+        ])
+        .output()
+        .expect("failed to run server-init");
+    assert!(
+        out.status.success(),
+        "server-init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let uri = stdout
+        .lines()
+        .find(|l| l.starts_with("leshiy://"))
+        .unwrap_or_else(|| panic!("no leshiy:// URI in server-init output:\n{stdout}"))
+        .to_string();
+
+    // Assert the URI carries the QUIC endpoint and pinned cert fingerprint.
+    assert!(uri.contains("quic="), "URI missing quic= param: {uri}");
+    assert!(
+        uri.contains("qcert="),
+        "URI missing qcert= param (pin not provisioned): {uri}"
+    );
+
+    // ── 4. Spawn server (REALITY + QUIC) ──────────────────────────────────
+    drop(server_l);
+    let _server = Kill(
+        std::process::Command::new(bin)
+            .args(["server", "--config", cfg_str])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn leshiy server"),
+    );
+
+    // Wait for the REALITY TCP port as a server-ready signal (up to 10 s).
+    // The QUIC server is spawned concurrently; we add a brief extra sleep after
+    // the TCP port is up to let the QUIC UDP socket bind.
+    let server_addr = format!("127.0.0.1:{server_port}");
+    for i in 0..100 {
+        match TcpStream::connect(&server_addr).await {
+            Ok(_) => break,
+            Err(_) => {
+                if i == 99 {
+                    let _ = std::fs::remove_dir_all(&cfg_dir);
+                    panic!("leshiy server never came up on {server_addr}");
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    // Brief pause for the QUIC server task to bind its UDP socket.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // ── 5. Spawn QUIC client ──────────────────────────────────────────────
+    drop(socks_l);
+    let _client = Kill(
+        std::process::Command::new(bin)
+            .args([
+                "client",
+                "--uri",
+                &uri,
+                "--transport",
+                "quic",
+                "--socks",
+                &format!("127.0.0.1:{socks_port}"),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn leshiy client --transport quic"),
+    );
+
+    // ── 6. Retry SOCKS5 → echo until the QUIC tunnel is ready ────────────
+    let socks_addr = format!("127.0.0.1:{socks_port}");
+    let mut last_err = String::from("(no attempt yet)");
+    for _ in 0..60 {
+        match try_socks(&socks_addr, &echo).await {
+            Ok(()) => {
+                let _ = std::fs::remove_dir_all(&cfg_dir);
+                return; // payload round-tripped over the verified, pinned QUIC path
+            }
+            Err(e) => {
+                last_err = e;
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&cfg_dir);
+    panic!("reality_cli_quic_end_to_end failed after retries: {last_err}");
 }
