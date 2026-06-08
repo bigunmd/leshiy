@@ -1,5 +1,5 @@
 //! CLI subcommand definitions via clap derive.
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -29,6 +29,19 @@ pub enum Cmd {
         listen: Option<String>,
         #[arg(long, default_value = "leshiy-server.toml")]
         out: String,
+        /// QUIC listen address (e.g. 0.0.0.0:8443). When set, generates a self-signed QUIC cert
+        /// and pins its fingerprint in the URI.
+        #[arg(long)]
+        quic_listen: Option<String>,
+        /// SNI domain for the QUIC TLS cert / endpoint (default: cdn.example.com).
+        #[arg(long)]
+        quic_domain: Option<String>,
+        /// Path to an existing QUIC TLS certificate PEM (skips self-signed generation).
+        #[arg(long)]
+        quic_cert: Option<String>,
+        /// Path to an existing QUIC TLS private key PEM (skips self-signed generation).
+        #[arg(long)]
+        quic_key: Option<String>,
     },
     /// Run the REALITY server from a config file.
     Server {
@@ -41,12 +54,26 @@ pub enum Cmd {
         uri: String,
         #[arg(long, default_value = "127.0.0.1:1080")]
         socks: String,
+        /// Transport to use: auto (default, same as tcp), quic, or tcp.
+        #[arg(long, default_value = "auto")]
+        transport: Transport,
     },
     /// Manage users on a running leshiy server via its control socket.
     User {
         #[command(subcommand)]
         cmd: UserCmd,
     },
+}
+
+/// Transport selection for the client subcommand.
+#[derive(Clone, ValueEnum)]
+pub enum Transport {
+    /// Use REALITY (TCP) transport — same as `tcp`.
+    Auto,
+    /// Use QUIC/H3 transport (requires `quic=` in the URI).
+    Quic,
+    /// Use REALITY (TCP) transport.
+    Tcp,
 }
 
 /// Default server config path (same default as `server --config`).

@@ -25,6 +25,21 @@ pub struct RealityServerConfig {
     /// If absent, falls back to in-memory store seeded from `short_ids`.
     #[serde(default)]
     pub user_db: Option<String>,
+    /// QUIC listen address (e.g. "0.0.0.0:8443"). When set, the QUIC server also starts.
+    #[serde(default)]
+    pub quic_listen: Option<String>,
+    /// Path to the QUIC TLS certificate PEM file.
+    #[serde(default)]
+    pub quic_cert_path: Option<String>,
+    /// Path to the QUIC TLS private key PEM file.
+    #[serde(default)]
+    pub quic_key_path: Option<String>,
+    /// SNI domain for the QUIC endpoint (used in the URI's qsni param).
+    #[serde(default)]
+    pub quic_domain: Option<String>,
+    /// Hex-encoded SHA-256 fingerprint of the QUIC cert (for pinned verification).
+    #[serde(default)]
+    pub quic_cert_sha256: Option<String>,
 }
 
 impl RealityServerConfig {
@@ -72,6 +87,11 @@ mod tests {
             host: "www.example.com:443".into(),
             control_socket: None,
             user_db: None,
+            quic_listen: None,
+            quic_cert_path: None,
+            quic_key_path: None,
+            quic_domain: None,
+            quic_cert_sha256: None,
         };
         let ac = c.to_auth_config().unwrap();
         assert_eq!(ac.dest, "www.microsoft.com:443");

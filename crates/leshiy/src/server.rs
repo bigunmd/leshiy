@@ -2,7 +2,7 @@
 use crate::reality_config::RealityServerConfig;
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use leshiy_reality::config::format_reality_uri;
+use leshiy_reality::config::{QuicEndpoint, format_reality_uri_full};
 use leshiy_reality::control::{UriIssuer, serve_control};
 use leshiy_reality::handshake::ServerCert;
 use leshiy_reality::server::run_reality_server;
@@ -15,7 +15,30 @@ use std::sync::Arc;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
-pub fn init(host: &str, dest: &str, listen: Option<&str>, out: &str) -> Result<()> {
+/// Options for `server-init`. Bundles all the CLI args into one struct to avoid
+/// clippy::too-many-arguments on the `init` function.
+pub struct InitOptions<'a> {
+    pub host: &'a str,
+    pub dest: &'a str,
+    pub listen: Option<&'a str>,
+    pub out: &'a str,
+    pub quic_listen: Option<&'a str>,
+    pub quic_domain: Option<&'a str>,
+    pub quic_cert: Option<&'a str>,
+    pub quic_key: Option<&'a str>,
+}
+
+pub fn init(opts: InitOptions<'_>) -> Result<()> {
+    let InitOptions {
+        host,
+        dest,
+        listen,
+        out,
+        quic_listen,
+        quic_domain,
+        quic_cert,
+        quic_key,
+    } = opts;
     // server static x25519 keypair (raw bytes zeroized on drop)
     let mut sk_bytes = Zeroizing::new([0u8; 32]);
     rand::rngs::OsRng.fill_bytes(&mut *sk_bytes);
@@ -68,6 +91,53 @@ pub fn init(host: &str, dest: &str, listen: Option<&str>, out: &str) -> Result<(
         let _ = std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600));
     }
 
+    // --- Optional QUIC provisioning ---
+    let quic_endpoint: Option<QuicEndpoint> = if let Some(ql) = quic_listen {
+        let domain = quic_domain.unwrap_or("cdn.example.com").to_string();
+        let (_cert_path_str, _key_path_str, cert_sha256_hex) =
+            if let (Some(cp), Some(kp)) = (quic_cert, quic_key) {
+                // Operator-provided cert/key: compute the fingerprint from the PEM.
+                let cert_pem = std::fs::read(cp).with_context(|| format!("read quic cert {cp}"))?;
+                let mut reader = std::io::BufReader::new(cert_pem.as_slice());
+                let der = rustls_pemfile::certs(&mut reader)
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("no cert in {cp}"))?
+                    .with_context(|| format!("parse cert {cp}"))?;
+                let fingerprint = leshiy_quic::endpoint::cert_sha256(der.as_ref());
+                (cp.to_string(), kp.to_string(), hex::encode(fingerprint))
+            } else {
+                // Self-signed: generate with rcgen.
+                let cert_key = rcgen::generate_simple_self_signed(vec![domain.clone()])
+                    .context("generate self-signed QUIC cert")?;
+                let cert_pem = cert_key.cert.pem();
+                let key_pem = cert_key.key_pair.serialize_pem();
+                let cert_path = out_dir.join("leshiy-quic.crt");
+                let key_path = out_dir.join("leshiy-quic.key");
+                let cert_path_str = cert_path.to_string_lossy().into_owned();
+                let key_path_str = key_path.to_string_lossy().into_owned();
+                // Write cert (world-readable is fine; it's a public cert).
+                std::fs::write(&cert_path, &cert_pem)
+                    .with_context(|| format!("write quic cert {cert_path_str}"))?;
+                // Write key with 0600 permissions.
+                write_secret_file(&key_path_str, &key_pem)?;
+                // Compute SHA-256 fingerprint from the DER bytes.
+                let fingerprint = leshiy_quic::endpoint::cert_sha256(cert_key.cert.der().as_ref());
+                println!("QUIC cert written to {cert_path_str}");
+                println!("QUIC key written to {key_path_str}");
+                (cert_path_str, key_path_str, hex::encode(fingerprint))
+            };
+        let fingerprint_bytes = hex::decode(&cert_sha256_hex)
+            .ok()
+            .and_then(|v| v.as_slice().try_into().ok());
+        Some(QuicEndpoint {
+            addr: ql.to_string(),
+            sni: domain,
+            cert_sha256: fingerprint_bytes,
+        })
+    } else {
+        None
+    };
+
     let cfg = RealityServerConfig {
         listen,
         dest: dest.to_string(),
@@ -78,11 +148,48 @@ pub fn init(host: &str, dest: &str, listen: Option<&str>, out: &str) -> Result<(
         host: host.to_string(),
         control_socket: None,
         user_db: Some(db_path_str),
+        quic_listen: quic_endpoint.as_ref().map(|q| q.addr.clone()),
+        quic_cert_path: quic_endpoint.as_ref().and_then(|_| {
+            if quic_cert.is_some() {
+                quic_cert.map(|s| s.to_string())
+            } else {
+                // self-signed path: derive from out_dir
+                Some(
+                    out_path
+                        .parent()
+                        .unwrap_or(Path::new("."))
+                        .join("leshiy-quic.crt")
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            }
+        }),
+        quic_key_path: quic_endpoint.as_ref().and_then(|_| {
+            if quic_key.is_some() {
+                quic_key.map(|s| s.to_string())
+            } else {
+                Some(
+                    out_path
+                        .parent()
+                        .unwrap_or(Path::new("."))
+                        .join("leshiy-quic.key")
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            }
+        }),
+        quic_domain: quic_endpoint.as_ref().map(|q| q.sni.clone()),
+        quic_cert_sha256: quic_endpoint
+            .as_ref()
+            .and_then(|q| q.cert_sha256.as_ref().map(hex::encode)),
     };
     write_secret_file(out, &toml::to_string_pretty(&cfg)?)?;
     println!("REALITY server config written to {out}");
     println!("Share this URI with clients:");
-    println!("{}", format_reality_uri(&pk, host, &sni, &short_id));
+    println!(
+        "{}",
+        format_reality_uri_full(&pk, host, &sni, &short_id, quic_endpoint.as_ref())
+    );
     Ok(())
 }
 
@@ -160,6 +267,68 @@ pub async fn run(config: &str) -> Result<()> {
         (store.clone(), store)
     };
 
+    // --- Optional QUIC server (shares the SAME UserStore) ---
+    let quic_endpoint_cfg: Option<QuicEndpoint> = if let Some(ref ql) = cfg.quic_listen {
+        let qaddr: std::net::SocketAddr = ql
+            .parse()
+            .with_context(|| format!("quic_listen addr: {ql}"))?;
+        let cert_path = cfg
+            .quic_cert_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("quic_listen set but quic_cert_path missing"))?;
+        let key_path = cfg
+            .quic_key_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("quic_listen set but quic_key_path missing"))?;
+
+        // Parse PEM cert chain.
+        let cert_pem =
+            std::fs::read(cert_path).with_context(|| format!("read quic cert {cert_path}"))?;
+        let mut cert_reader = std::io::BufReader::new(cert_pem.as_slice());
+        let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut cert_reader)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .with_context(|| format!("parse quic cert PEM {cert_path}"))?;
+
+        // Parse PEM private key.
+        let key_pem =
+            std::fs::read(key_path).with_context(|| format!("read quic key {key_path}"))?;
+        let mut key_reader = std::io::BufReader::new(key_pem.as_slice());
+        let key = rustls_pemfile::private_key(&mut key_reader)
+            .with_context(|| format!("parse quic key PEM {key_path}"))?
+            .ok_or_else(|| anyhow::anyhow!("no private key found in {key_path}"))?;
+
+        let domain = cfg
+            .quic_domain
+            .clone()
+            .unwrap_or_else(|| "cdn.example.com".into());
+        let cert_sha256 = cfg.quic_cert_sha256.as_deref().and_then(|h| {
+            hex::decode(h)
+                .ok()
+                .and_then(|v| v.as_slice().try_into().ok())
+        });
+
+        // Spawn QUIC server with the SAME store.
+        let qstore: Arc<dyn UserStore> = user_store.clone();
+        let masq = leshiy_quic::masquerade::Masquerade::default();
+        tokio::spawn(async move {
+            if let Err(e) =
+                leshiy_quic::server::run_quic_server(qaddr, certs, key, qstore, masq).await
+            {
+                tracing::error!(error = %e, "QUIC server exited");
+            }
+        });
+        tracing::info!(quic_listen = %qaddr, "leshiy QUIC server up");
+
+        Some(QuicEndpoint {
+            addr: ql.clone(),
+            sni: domain,
+            cert_sha256,
+        })
+    } else {
+        None
+    };
+
     let cert = Arc::new(ServerCert::generate());
     let listener = tokio::net::TcpListener::bind(&cfg.listen)
         .await
@@ -174,6 +343,7 @@ pub async fn run(config: &str) -> Result<()> {
     let issuer = UriIssuer {
         server_public,
         host: cfg.host.clone(),
+        quic: quic_endpoint_cfg,
     };
     {
         let sp = sock_path.clone();

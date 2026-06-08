@@ -11,6 +11,11 @@ path = "src/main.rs"
 [dependencies]
 leshiy-core = { path = "../leshiy-core" }
 leshiy-reality = { path = "../leshiy-reality" }
+leshiy-quic = { path = "../leshiy-quic" }
+rcgen.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["full"] }
 clap.workspace = true
 tracing.workspace = true

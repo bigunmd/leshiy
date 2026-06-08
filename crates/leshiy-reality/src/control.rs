@@ -1,5 +1,5 @@
 //! Local control socket (ADR-0020): newline-delimited JSON over a 0600 Unix socket.
-use crate::config::format_reality_uri;
+use crate::config::{QuicEndpoint, format_reality_uri_full};
 use crate::user::{User, UserAdmin};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -11,6 +11,8 @@ use tokio::net::{UnixListener, UnixStream};
 pub struct UriIssuer {
     pub server_public: [u8; 32],
     pub host: String,
+    /// Optional QUIC endpoint to embed in the issued URIs.
+    pub quic: Option<QuicEndpoint>,
 }
 
 #[derive(Deserialize)]
@@ -191,7 +193,13 @@ fn dispatch(req: Req, store: &Arc<dyn UserAdmin>, issuer: &UriIssuer) -> Resp {
                 rate_down,
             });
             let sni = sni.unwrap_or_default();
-            let uri = format_reality_uri(&issuer.server_public, &issuer.host, &sni, &id);
+            let uri = format_reality_uri_full(
+                &issuer.server_public,
+                &issuer.host,
+                &sni,
+                &id,
+                issuer.quic.as_ref(),
+            );
             Resp {
                 uri: Some(uri),
                 ..Resp::ok()
@@ -243,11 +251,12 @@ fn dispatch(req: Req, store: &Arc<dyn UserAdmin>, issuer: &UriIssuer) -> Resp {
         },
         Req::Uri { short_id, sni } => match hexid(&short_id) {
             Some(id) => Resp {
-                uri: Some(format_reality_uri(
+                uri: Some(format_reality_uri_full(
                     &issuer.server_public,
                     &issuer.host,
                     &sni.unwrap_or_default(),
                     &id,
+                    issuer.quic.as_ref(),
                 )),
                 ..Resp::ok()
             },
@@ -298,6 +307,7 @@ mod tests {
         let issuer = UriIssuer {
             server_public: [9u8; 32],
             host: "h:443".into(),
+            quic: None,
         };
         let s2 = store.clone();
         let path = sock.clone();
