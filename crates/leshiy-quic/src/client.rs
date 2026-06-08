@@ -19,10 +19,9 @@ pub async fn run_quic_client(
         .map_err(|e| QuicError::Conn(e.to_string()))?
         .await
         .map_err(|e| QuicError::Conn(e.to_string()))?;
-    let (mut driver, send_req) =
-        h3::client::new(h3_quinn::Connection::new(conn))
-            .await
-            .map_err(|e| QuicError::Conn(e.to_string()))?;
+    let (mut driver, send_req) = h3::client::new(h3_quinn::Connection::new(conn))
+        .await
+        .map_err(|e| QuicError::Conn(e.to_string()))?;
     // The driver MUST stay alive for the whole connection — poll it forever.
     tokio::spawn(async move {
         let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
@@ -66,10 +65,7 @@ async fn tunnel_one(
         .await
         .map_err(|e| QuicError::Conn(e.to_string()))?;
     if resp.status() != 200 {
-        return Err(QuicError::Conn(format!(
-            "connect status {}",
-            resp.status()
-        )));
+        return Err(QuicError::Conn(format!("connect status {}", resp.status())));
     }
     let (mut send, mut recv) = stream.split();
     let (mut cr, mut cw) = cli.into_split();

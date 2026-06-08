@@ -85,7 +85,9 @@ async fn serve_masquerade(
     masq: Masquerade,
 ) -> Result<()> {
     let Masquerade::Page(html) = masq;
-    let (status, body) = if req.uri().path() == "/" {
+    // CONNECT requests that failed auth get the masquerade, but they must NOT get a 200
+    // (a 200 would look like a tunnel to the client). Serve 200+page only for GET "/".
+    let (status, body) = if *req.method() != Method::CONNECT && req.uri().path() == "/" {
         (StatusCode::OK, html)
     } else {
         (StatusCode::NOT_FOUND, "Not Found".to_string())

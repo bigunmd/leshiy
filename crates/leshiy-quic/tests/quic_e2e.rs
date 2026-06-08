@@ -1,3 +1,4 @@
+use bytes::Buf;
 use leshiy_quic::{client::run_quic_client, masquerade::Masquerade, server::run_quic_server};
 use leshiy_reality::user::{InMemoryUserStore, User, UserStore};
 use std::sync::Arc;
@@ -315,4 +316,100 @@ async fn data_cap_enforced_over_quic() {
     );
 
     println!("data_cap_enforced_over_quic: echoed {echoed} bytes (cap={CAP}, payload={PAYLOAD})");
+}
+
+// ---------------------------------------------------------------------------
+// Test 4: prober GET gets masquerade page
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn prober_get_gets_masquerade() {
+    let store = Arc::new(InMemoryUserStore::new(vec![])); // no users
+    let server = start_server(store).await;
+
+    // Wait briefly for the server to start listening.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Raw h3 client: connect, GET "/", expect 200 + body containing "It works".
+    let ep = leshiy_quic::endpoint::client_endpoint(true).unwrap();
+    let conn = ep.connect(server, "example.test").unwrap().await.unwrap();
+    let (mut driver, mut send_req) = h3::client::new(h3_quinn::Connection::new(conn))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
+    });
+
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://example.test/")
+        .body(())
+        .unwrap();
+    let mut stream = send_req.send_request(req).await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "prober GET / should receive 200 masquerade"
+    );
+
+    let mut body = Vec::new();
+    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+        while chunk.has_remaining() {
+            let c = chunk.chunk();
+            body.extend_from_slice(c);
+            let n = c.len();
+            chunk.advance(n);
+        }
+    }
+    assert!(
+        String::from_utf8_lossy(&body).contains("It works"),
+        "prober should get the masquerade page, got: {:?}",
+        String::from_utf8_lossy(&body)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: unauthorized CONNECT does not get a tunnel (gets masquerade, not 200)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn unauthorized_connect_no_tunnel() {
+    let store = Arc::new(InMemoryUserStore::new(vec![User {
+        short_id: [1; 8],
+        enabled: true,
+        expires_at: None,
+        data_cap: None,
+        rate_up: None,
+        rate_down: None,
+    }]));
+    let server = start_server(store).await;
+
+    // Wait briefly for the server to start listening.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let ep = leshiy_quic::endpoint::client_endpoint(true).unwrap();
+    let conn = ep.connect(server, "example.test").unwrap().await.unwrap();
+    let (mut driver, mut send_req) = h3::client::new(h3_quinn::Connection::new(conn))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
+    });
+
+    // CONNECT with a short_id NOT in the store → masquerade, not a tunnel.
+    let req = http::Request::builder()
+        .method("CONNECT")
+        .uri("example.com:80")
+        .header("leshiy-auth", hex::encode([9u8; 8]))
+        .body(())
+        .unwrap();
+    let mut stream = send_req.send_request(req).await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_ne!(
+        resp.status(),
+        200,
+        "unauthorized CONNECT must NOT get a 200 tunnel (got {})",
+        resp.status()
+    );
 }
