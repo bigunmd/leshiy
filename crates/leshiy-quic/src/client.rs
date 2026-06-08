@@ -6,16 +6,23 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-/// Run the QUIC client: connect to `server_addr` using the given `verification` strategy,
-/// then listen on `socks_addr` and proxy SOCKS5 CONNECT requests over the QUIC connection.
-/// The `short_id` is sent as a hex `leshiy-auth` header on each tunnel request.
-pub async fn run_quic_client(
+/// A live QUIC connection, ready to issue HTTP/3 CONNECT tunnels.
+/// The embedded driver task lives as long as this value is alive.
+/// Dropping `QuicConn` lets the connection close gracefully.
+pub struct QuicConn {
+    pub(crate) send_req: h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
+    pub(crate) short_id: [u8; 8],
+}
+
+/// Establish a QUIC connection to `server_addr` and return a [`QuicConn`].
+/// The HTTP/3 connection driver is spawned onto the Tokio runtime and runs
+/// for the lifetime of the returned handle.
+pub async fn connect_quic(
     server_addr: SocketAddr,
     server_name: &str,
-    socks_addr: SocketAddr,
     short_id: [u8; 8],
     verification: crate::endpoint::CertVerification,
-) -> Result<()> {
+) -> Result<QuicConn> {
     let ep = crate::endpoint::client_endpoint(verification)?;
     let conn = ep
         .connect(server_addr, server_name)
@@ -29,8 +36,14 @@ pub async fn run_quic_client(
     tokio::spawn(async move {
         let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
     });
-    let auth = hex::encode(short_id);
+    Ok(QuicConn { send_req, short_id })
+}
 
+/// Bind a SOCKS5 listener on `socks_addr` and forward every CONNECT request
+/// over the established QUIC connection.
+pub async fn serve_socks5(conn: QuicConn, socks_addr: SocketAddr) -> Result<()> {
+    let auth = hex::encode(conn.short_id);
+    let send_req = conn.send_req;
     let listener = TcpListener::bind(socks_addr).await?;
     loop {
         let (cli, _) = listener.accept().await?;
@@ -45,6 +58,25 @@ pub async fn run_quic_client(
             let _ = tunnel_one(send_req, &auth, &target, cli).await;
         });
     }
+}
+
+/// Run the QUIC client: connect to `server_addr` using the given `verification` strategy,
+/// then listen on `socks_addr` and proxy SOCKS5 CONNECT requests over the QUIC connection.
+/// The `short_id` is sent as a hex `leshiy-auth` header on each tunnel request.
+///
+/// This is a convenience compose of [`connect_quic`] + [`serve_socks5`].
+pub async fn run_quic_client(
+    server_addr: SocketAddr,
+    server_name: &str,
+    socks_addr: SocketAddr,
+    short_id: [u8; 8],
+    verification: crate::endpoint::CertVerification,
+) -> Result<()> {
+    serve_socks5(
+        connect_quic(server_addr, server_name, short_id, verification).await?,
+        socks_addr,
+    )
+    .await
 }
 
 async fn tunnel_one(
