@@ -737,3 +737,258 @@ async fn reality_cli_quic_end_to_end() {
     let _ = std::fs::remove_dir_all(&cfg_dir);
     panic!("reality_cli_quic_end_to_end failed after retries: {last_err}");
 }
+
+/// M2d smoke: `--transport auto` selects a working transport (QUIC preferred).
+///
+/// Mirror of `reality_cli_quic_end_to_end` but uses `--transport auto` instead of
+/// `--transport quic`.  With both REALITY and QUIC up, auto should settle on QUIC;
+/// the assertion only requires a working SOCKS5→echo round-trip regardless of which
+/// transport was ultimately chosen.
+#[tokio::test]
+async fn reality_cli_auto_uses_quic() {
+    let bin = env!("CARGO_BIN_EXE_leshiy");
+
+    // ── 1. In-process rustls dest + echo server ───────────────────────────
+    let dest = spawn_rustls_dest().await;
+    let echo = spawn_echo().await;
+
+    // ── 2. Reserve ports ──────────────────────────────────────────────────
+    let (server_l, server_port) = reserve_port();
+    let (quic_sock, quic_port) = reserve_udp_port();
+    let (socks_l, socks_port) = reserve_port();
+
+    // ── 3. server-init → config + URI (includes quic= and qcert=) ─────────
+    let cfg_dir = make_temp_dir("auto-quic");
+    let cfg_path = cfg_dir.join("server.toml");
+    let cfg_str = cfg_path.to_str().unwrap();
+
+    // Release the UDP socket just before server-init so it can bind that port.
+    drop(quic_sock);
+
+    let out = std::process::Command::new(bin)
+        .args([
+            "server-init",
+            "--host",
+            &format!("127.0.0.1:{server_port}"),
+            "--dest",
+            &dest,
+            "--listen",
+            &format!("127.0.0.1:{server_port}"),
+            "--quic-listen",
+            &format!("127.0.0.1:{quic_port}"),
+            "--quic-domain",
+            "example.test",
+            "--out",
+            cfg_str,
+        ])
+        .output()
+        .expect("failed to run server-init");
+    assert!(
+        out.status.success(),
+        "server-init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let uri = stdout
+        .lines()
+        .find(|l| l.starts_with("leshiy://"))
+        .unwrap_or_else(|| panic!("no leshiy:// URI in server-init output:\n{stdout}"))
+        .to_string();
+
+    assert!(uri.contains("quic="), "URI missing quic= param: {uri}");
+    assert!(uri.contains("qcert="), "URI missing qcert= param: {uri}");
+
+    // ── 4. Spawn server (REALITY + QUIC) ──────────────────────────────────
+    drop(server_l);
+    let _server = Kill(
+        std::process::Command::new(bin)
+            .args(["server", "--config", cfg_str])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn leshiy server"),
+    );
+
+    // Wait for REALITY TCP port (server-ready proxy), then brief pause for QUIC UDP bind.
+    let server_addr = format!("127.0.0.1:{server_port}");
+    for i in 0..100 {
+        match TcpStream::connect(&server_addr).await {
+            Ok(_) => break,
+            Err(_) => {
+                if i == 99 {
+                    let _ = std::fs::remove_dir_all(&cfg_dir);
+                    panic!("leshiy server never came up on {server_addr}");
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // ── 5. Spawn client with --transport auto ─────────────────────────────
+    drop(socks_l);
+    let _client = Kill(
+        std::process::Command::new(bin)
+            .args([
+                "client",
+                "--uri",
+                &uri,
+                "--transport",
+                "auto",
+                "--socks",
+                &format!("127.0.0.1:{socks_port}"),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn leshiy client --transport auto"),
+    );
+
+    // ── 6. Retry SOCKS5 → echo until the tunnel is ready ─────────────────
+    let socks_addr = format!("127.0.0.1:{socks_port}");
+    let mut last_err = String::from("(no attempt yet)");
+    for _ in 0..60 {
+        match try_socks(&socks_addr, &echo).await {
+            Ok(()) => {
+                let _ = std::fs::remove_dir_all(&cfg_dir);
+                return;
+            }
+            Err(e) => {
+                last_err = e;
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&cfg_dir);
+    panic!("reality_cli_auto_uses_quic failed after retries: {last_err}");
+}
+
+/// M2d smoke: `--transport auto` falls back to REALITY when QUIC endpoint is unreachable.
+///
+/// Construction:
+///  - Run a normal REALITY-only server (no --quic-listen).
+///  - Capture the printed `leshiy://` URI and append `&quic=127.0.0.1:1&qsni=example.test`
+///    so the URI looks like it has a QUIC endpoint, but port 1 has nothing listening (or
+///    connection-refused, which is equally fine — both trigger the fallback path).
+///  - Run `leshiy client --transport auto` with this modified URI.
+///  - The client attempts QUIC to 127.0.0.1:1 (times out or gets ICMP-refused), then falls
+///    back to REALITY, which tunnels normally.
+///  - Assert SOCKS5→echo works with a generous retry budget (≥20 s) to absorb the 3 s
+///    QUIC timeout before fallback establishes.
+#[tokio::test]
+async fn reality_cli_auto_falls_back() {
+    let bin = env!("CARGO_BIN_EXE_leshiy");
+
+    // ── 1. In-process rustls dest + echo server ───────────────────────────
+    let dest = spawn_rustls_dest().await;
+    let echo = spawn_echo().await;
+
+    // ── 2. Reserve ports ──────────────────────────────────────────────────
+    let (server_l, server_port) = reserve_port();
+    let (socks_l, socks_port) = reserve_port();
+
+    // ── 3. server-init (REALITY only, no --quic-listen) → config + URI ────
+    let cfg_dir = make_temp_dir("auto-fallback");
+    let cfg_path = cfg_dir.join("server.toml");
+    let cfg_str = cfg_path.to_str().unwrap();
+
+    let out = std::process::Command::new(bin)
+        .args([
+            "server-init",
+            "--host",
+            &format!("127.0.0.1:{server_port}"),
+            "--dest",
+            &dest,
+            "--listen",
+            &format!("127.0.0.1:{server_port}"),
+            "--out",
+            cfg_str,
+        ])
+        .output()
+        .expect("failed to run server-init");
+    assert!(
+        out.status.success(),
+        "server-init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let reality_uri = stdout
+        .lines()
+        .find(|l| l.starts_with("leshiy://"))
+        .unwrap_or_else(|| panic!("no leshiy:// URI in server-init output:\n{stdout}"))
+        .to_string();
+
+    // Build the modified URI: append a dead QUIC endpoint (port 1, nothing listening).
+    // No qcert= means CertVerification::Roots — that's fine, the connect will fail
+    // before any cert exchange.
+    let dead_quic_uri = format!("{reality_uri}&quic=127.0.0.1:1&qsni=example.test");
+
+    // ── 4. Spawn REALITY-only server ──────────────────────────────────────
+    drop(server_l);
+    let _server = Kill(
+        std::process::Command::new(bin)
+            .args(["server", "--config", cfg_str])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn leshiy server"),
+    );
+
+    // Wait for the server to be ready (up to 10 s).
+    let server_addr = format!("127.0.0.1:{server_port}");
+    for i in 0..100 {
+        match TcpStream::connect(&server_addr).await {
+            Ok(_) => break,
+            Err(_) => {
+                if i == 99 {
+                    let _ = std::fs::remove_dir_all(&cfg_dir);
+                    panic!("leshiy server never came up on {server_addr}");
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+
+    // ── 5. Spawn client with dead QUIC + --transport auto ─────────────────
+    drop(socks_l);
+    let _client = Kill(
+        std::process::Command::new(bin)
+            .args([
+                "client",
+                "--uri",
+                &dead_quic_uri,
+                "--transport",
+                "auto",
+                "--socks",
+                &format!("127.0.0.1:{socks_port}"),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn leshiy client --transport auto (fallback)"),
+    );
+
+    // ── 6. Retry with a generous budget covering the 3 s QUIC timeout ─────
+    // 80 attempts × 250 ms = 20 s total, well past the QUIC_TIMEOUT (3 s) +
+    // REALITY connection + SOCKS5 listener bind time.
+    let socks_addr = format!("127.0.0.1:{socks_port}");
+    let mut last_err = String::from("(no attempt yet)");
+    for _ in 0..80 {
+        match try_socks(&socks_addr, &echo).await {
+            Ok(()) => {
+                let _ = std::fs::remove_dir_all(&cfg_dir);
+                return; // fallback to REALITY succeeded
+            }
+            Err(e) => {
+                last_err = e;
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&cfg_dir);
+    panic!(
+        "reality_cli_auto_falls_back: REALITY fallback never succeeded after \
+         ~20 s budget: {last_err}\n\
+         (client should have timed out QUIC to 127.0.0.1:1 and fallen back to REALITY)"
+    );
+}
