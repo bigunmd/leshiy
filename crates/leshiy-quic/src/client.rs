@@ -6,14 +6,17 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+/// Run the QUIC client: connect to `server_addr` using the given `verification` strategy,
+/// then listen on `socks_addr` and proxy SOCKS5 CONNECT requests over the QUIC connection.
+/// The `short_id` is sent as a hex `leshiy-auth` header on each tunnel request.
 pub async fn run_quic_client(
     server_addr: SocketAddr,
     server_name: &str,
     socks_addr: SocketAddr,
     short_id: [u8; 8],
-    insecure_skip_verify: bool,
+    verification: crate::endpoint::CertVerification,
 ) -> Result<()> {
-    let ep = crate::endpoint::client_endpoint(insecure_skip_verify)?;
+    let ep = crate::endpoint::client_endpoint(verification)?;
     let conn = ep
         .connect(server_addr, server_name)
         .map_err(|e| QuicError::Conn(e.to_string()))?

@@ -4,9 +4,6 @@ version = "0.0.0"
 edition = "2024"
 license = "Apache-2.0"
 
-[features]
-dangerous-insecure-skip-verify = []
-
 [dependencies]
 quinn.workspace = true
 rustls.workspace = true
@@ -18,10 +15,11 @@ h3-quinn.workspace = true
 http.workspace = true
 bytes.workspace = true
 hex.workspace = true
+sha2.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
-leshiy-quic = { path = ".", features = ["dangerous-insecure-skip-verify"] }
 h3.workspace = true
 h3-quinn.workspace = true
 http.workspace = true

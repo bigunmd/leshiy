@@ -1,5 +1,10 @@
 use bytes::Buf;
-use leshiy_quic::{client::run_quic_client, masquerade::Masquerade, server::run_quic_server};
+use leshiy_quic::{
+    client::run_quic_client,
+    endpoint::{CertVerification, cert_sha256},
+    masquerade::Masquerade,
+    server::run_quic_server,
+};
 use leshiy_reality::user::{InMemoryUserStore, User, UserStore};
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,14 +69,16 @@ fn free_tcp_addr() -> std::net::SocketAddr {
     a
 }
 
-/// Spawn `run_quic_server` and return the UDP address it is listening on.
-async fn start_server(store: Arc<dyn UserStore>) -> std::net::SocketAddr {
+/// Spawn `run_quic_server` and return the UDP address it is listening on plus the SHA-256 pin
+/// of the server's end-entity certificate.
+async fn start_server(store: Arc<dyn UserStore>) -> (std::net::SocketAddr, [u8; 32]) {
     let (certs, key) = self_signed();
+    let pin = cert_sha256(certs[0].as_ref());
     let bound = free_udp_addr();
     tokio::spawn(async move {
         let _ = run_quic_server(bound, certs, key, store, Masquerade::default()).await;
     });
-    bound
+    (bound, pin)
 }
 
 /// Drive a full SOCKS5 CONNECT over the given SOCKS proxy to the echo address,
@@ -127,14 +134,21 @@ async fn socks5_over_quic_echo() {
         rate_up: None,
         rate_down: None,
     }]));
-    let server = start_server(store).await;
+    let (server, pin) = start_server(store).await;
     let socks = free_tcp_addr();
 
     {
         let echo2 = echo.clone();
         let _ = echo2; // suppress unused warning
         tokio::spawn(async move {
-            let _ = run_quic_client(server, "example.test", socks, [1; 8], true).await;
+            let _ = run_quic_client(
+                server,
+                "example.test",
+                socks,
+                [1; 8],
+                CertVerification::Pinned(pin),
+            )
+            .await;
         });
     }
 
@@ -166,12 +180,19 @@ async fn unknown_short_id_refused() {
         rate_up: None,
         rate_down: None,
     }]));
-    let server = start_server(store).await;
+    let (server, pin) = start_server(store).await;
     let socks = free_tcp_addr();
 
     // Client uses short_id [9;8] which is NOT in the store.
     tokio::spawn(async move {
-        let _ = run_quic_client(server, "example.test", socks, [9; 8], true).await;
+        let _ = run_quic_client(
+            server,
+            "example.test",
+            socks,
+            [9; 8],
+            CertVerification::Pinned(pin),
+        )
+        .await;
     });
 
     // First confirm the client's SOCKS listener is actually up (TCP-connectable) — so a
@@ -287,11 +308,18 @@ async fn data_cap_enforced_over_quic() {
         rate_up: None,
         rate_down: None,
     }]));
-    let server = start_server(store).await;
+    let (server, pin) = start_server(store).await;
     let socks = free_tcp_addr();
 
     tokio::spawn(async move {
-        let _ = run_quic_client(server, "example.test", socks, [2; 8], true).await;
+        let _ = run_quic_client(
+            server,
+            "example.test",
+            socks,
+            [2; 8],
+            CertVerification::Pinned(pin),
+        )
+        .await;
     });
 
     // Wait for client to come up.
@@ -362,11 +390,18 @@ async fn data_cap_enforced_upload() {
         rate_up: None,
         rate_down: None,
     }]));
-    let server = start_server(store).await;
+    let (server, pin) = start_server(store).await;
     let socks = free_tcp_addr();
 
     tokio::spawn(async move {
-        let _ = run_quic_client(server, "example.test", socks, [3; 8], true).await;
+        let _ = run_quic_client(
+            server,
+            "example.test",
+            socks,
+            [3; 8],
+            CertVerification::Pinned(pin),
+        )
+        .await;
     });
 
     // Wait for client to come up.
@@ -455,13 +490,13 @@ async fn data_cap_enforced_upload() {
 #[tokio::test]
 async fn prober_get_gets_masquerade() {
     let store = Arc::new(InMemoryUserStore::new(vec![])); // no users
-    let server = start_server(store).await;
+    let (server, pin) = start_server(store).await;
 
     // Wait briefly for the server to start listening.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Raw h3 client: connect, GET "/", expect 200 + body containing "It works".
-    let ep = leshiy_quic::endpoint::client_endpoint(true).unwrap();
+    let ep = leshiy_quic::endpoint::client_endpoint(CertVerification::Pinned(pin)).unwrap();
     let conn = ep.connect(server, "example.test").unwrap().await.unwrap();
     let (mut driver, mut send_req) = h3::client::new(h3_quinn::Connection::new(conn))
         .await
@@ -513,12 +548,12 @@ async fn unauthorized_connect_no_tunnel() {
         rate_up: None,
         rate_down: None,
     }]));
-    let server = start_server(store).await;
+    let (server, pin) = start_server(store).await;
 
     // Wait briefly for the server to start listening.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let ep = leshiy_quic::endpoint::client_endpoint(true).unwrap();
+    let ep = leshiy_quic::endpoint::client_endpoint(CertVerification::Pinned(pin)).unwrap();
     let conn = ep.connect(server, "example.test").unwrap().await.unwrap();
     let (mut driver, mut send_req) = h3::client::new(h3_quinn::Connection::new(conn))
         .await
@@ -542,4 +577,53 @@ async fn unauthorized_connect_no_tunnel() {
         "unauthorized CONNECT must NOT get a 200 tunnel (got {})",
         resp.status()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: wrong cert pin is rejected (no tunnel established)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn wrong_pin_rejected() {
+    let echo = spawn_echo().await;
+    let store = Arc::new(InMemoryUserStore::new(vec![User {
+        short_id: [1; 8],
+        enabled: true,
+        expires_at: None,
+        data_cap: None,
+        rate_up: None,
+        rate_down: None,
+    }]));
+    let (server, _pin) = start_server(store).await;
+    let socks = free_tcp_addr();
+    tokio::spawn(async move {
+        let _ = run_quic_client(
+            server,
+            "example.test",
+            socks,
+            [1; 8],
+            CertVerification::Pinned([0xAB; 32]),
+        )
+        .await;
+    });
+    // wrong pin → QUIC handshake fails → SOCKS never tunnels
+    let mut client_up = false;
+    for _ in 0..15 {
+        if tokio::net::TcpStream::connect(socks).await.is_ok() {
+            client_up = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // client may not even bind SOCKS (connect fails first); either way no tunnel:
+    let mut ok = false;
+    for _ in 0..10 {
+        if socks_connect_echo(socks, &echo, b"x").await.is_ok() {
+            ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!ok, "wrong cert pin must not tunnel");
+    let _ = client_up;
 }

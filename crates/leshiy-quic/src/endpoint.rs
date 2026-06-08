@@ -1,5 +1,6 @@
-//! quinn endpoint construction: BBR server + a test client that accepts a pinned/self-signed cert.
+//! quinn endpoint construction: BBR server + a client with SHA-256 cert pinning or webpki roots.
 use crate::Result;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use quinn::{Endpoint, ServerConfig, TransportConfig};
@@ -12,6 +13,22 @@ fn bbr_transport() -> Arc<TransportConfig> {
         quinn::IdleTimeout::try_from(std::time::Duration::from_secs(30)).unwrap(),
     ));
     Arc::new(transport)
+}
+
+/// How the client verifies the server's TLS certificate.
+#[derive(Clone)]
+pub enum CertVerification {
+    /// Verify against the Mozilla webpki roots for this DNS name.
+    Roots { server_name: String },
+    /// Trust exactly the cert whose end-entity DER SHA-256 equals this pin (self-signed self-host).
+    Pinned([u8; 32]),
+}
+
+/// Compute the SHA-256 digest of a certificate DER encoding.
+pub fn cert_sha256(der: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(der);
+    h.finalize().into()
 }
 
 /// Server endpoint with BBR congestion control.
@@ -40,34 +57,25 @@ pub fn server_endpoint(
     Endpoint::server(cfg, listen).map_err(Into::into)
 }
 
-/// Client endpoint. `insecure_skip_verify` accepts ANY server cert — TEST ONLY (M2c adds real
-/// verification). Requires the `dangerous-insecure-skip-verify` feature when `true`.
-pub fn client_endpoint(insecure_skip_verify: bool) -> Result<Endpoint> {
+/// Client endpoint using the specified certificate verification strategy.
+pub fn client_endpoint(verification: CertVerification) -> Result<Endpoint> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .ok();
-
-    if !insecure_skip_verify {
-        return Err(crate::QuicError::Conn(
-            "real certificate verification is not implemented until M2c".into(),
-        ));
-    }
-
-    // insecure_skip_verify == true path
-    build_insecure_client_endpoint()
-}
-
-#[cfg(feature = "dangerous-insecure-skip-verify")]
-fn build_insecure_client_endpoint() -> Result<Endpoint> {
     let mut ep = Endpoint::client("0.0.0.0:0".parse().unwrap())?;
-    let mut crypto = rustls::ClientConfig::builder_with_provider(
-        rustls::crypto::aws_lc_rs::default_provider().into(),
-    )
-    .with_safe_default_protocol_versions()
-    .expect("bad protocol versions")
-    .dangerous()
-    .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
-    .with_no_client_auth();
+    let mut crypto = match verification {
+        CertVerification::Roots { .. } => {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth()
+        }
+        CertVerification::Pinned(pin) => rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinnedVerifier { pin }))
+            .with_no_client_auth(),
+    };
     crypto.alpn_protocols = vec![b"h3".to_vec()];
     let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
         .map_err(|e| crate::QuicError::Conn(format!("{e}")))?;
@@ -77,47 +85,64 @@ fn build_insecure_client_endpoint() -> Result<Endpoint> {
     Ok(ep)
 }
 
-#[cfg(not(feature = "dangerous-insecure-skip-verify"))]
-fn build_insecure_client_endpoint() -> Result<Endpoint> {
-    Err(crate::QuicError::Conn(
-        "insecure skip-verify requires the 'dangerous-insecure-skip-verify' feature (test-only)"
-            .into(),
-    ))
+/// A [`rustls::client::danger::ServerCertVerifier`] that accepts exactly the cert whose
+/// end-entity DER SHA-256 matches the stored pin.
+///
+/// # Security
+/// This verifier skips CA-chain, hostname, and expiry checks (appropriate for a self-signed cert
+/// that is pinned out-of-band). It DOES verify the TLS handshake signatures, proving that the
+/// server possesses the pinned cert's private key. Blanket-accepting signatures without
+/// verification would be an authentication bypass.
+#[derive(Debug)]
+struct PinnedVerifier {
+    pin: [u8; 32],
 }
 
-#[cfg(feature = "dangerous-insecure-skip-verify")]
-#[derive(Debug)]
-struct AcceptAnyServerCert;
-
-#[cfg(feature = "dangerous-insecure-skip-verify")]
-impl rustls::client::danger::ServerCertVerifier for AcceptAnyServerCert {
+impl rustls::client::danger::ServerCertVerifier for PinnedVerifier {
     fn verify_server_cert(
         &self,
-        _end_entity: &CertificateDer,
+        end_entity: &CertificateDer,
         _intermediates: &[CertificateDer],
         _server_name: &rustls::pki_types::ServerName,
         _ocsp_response: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
+        if cert_sha256(end_entity.as_ref()) == self.pin {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General("certificate pin mismatch".into()))
+        }
     }
 
+    // CRITICAL: still verify the handshake signatures (proves the server holds the pinned
+    // cert's private key); we only skip CA-chain / hostname / expiry (fine — we pinned the
+    // exact cert).
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer,
+        dss: &rustls::DigitallySignedStruct,
     ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer,
+        dss: &rustls::DigitallySignedStruct,
     ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
