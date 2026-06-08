@@ -141,12 +141,17 @@ pub async fn socks5_accept<S: AsyncRead + AsyncWrite + Unpin>(
     Ok((format!("{host}:{port}"), io))
 }
 
-/// Connect to the REALITY server, authenticate, establish the tunnel, and serve SOCKS5.
-pub async fn run_reality_client(
+/// An established REALITY tunnel, ready for SOCKS5 serving.
+pub struct RealityConn {
+    pub(crate) mux: Arc<Mutex<Mux>>,
+}
+
+/// Connect to the REALITY server, authenticate, and establish the mux tunnel.
+/// Returns a [`RealityConn`] that can be passed to [`serve_socks5`].
+pub async fn connect_reality(
     server_addr: &str,
     cfg: ClientAuthConfig,
-    socks_addr: &str,
-) -> crate::Result<()> {
+) -> crate::Result<RealityConn> {
     let sock = TcpStream::connect(server_addr)
         .await
         .map_err(crate::RealityError::Io)?;
@@ -189,6 +194,12 @@ pub async fn run_reality_client(
             .map_err(|e| crate::RealityError::Malformed(e.to_string()))?,
     ));
 
+    Ok(RealityConn { mux })
+}
+
+/// Bind a SOCKS5 listener on `socks_addr` and serve tunneled connections over `conn`.
+pub async fn serve_socks5(conn: RealityConn, socks_addr: &str) -> crate::Result<()> {
+    let mux = conn.mux;
     let listener = TcpListener::bind(socks_addr)
         .await
         .map_err(crate::RealityError::Io)?;
@@ -204,6 +215,16 @@ pub async fn run_reality_client(
             }
         });
     }
+}
+
+/// Connect to the REALITY server, authenticate, establish the tunnel, and serve SOCKS5.
+/// Back-compat wrapper: equivalent to `serve_socks5(connect_reality(server_addr, cfg).await?, socks_addr).await`.
+pub async fn run_reality_client(
+    server_addr: &str,
+    cfg: ClientAuthConfig,
+    socks_addr: &str,
+) -> crate::Result<()> {
+    serve_socks5(connect_reality(server_addr, cfg).await?, socks_addr).await
 }
 
 /// Bidirectional copy between a SOCKS5 TCP socket and a mux Stream.
