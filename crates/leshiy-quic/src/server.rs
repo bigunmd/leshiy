@@ -85,9 +85,11 @@ async fn serve_masquerade(
     masq: Masquerade,
 ) -> Result<()> {
     let Masquerade::Page(html) = masq;
-    // CONNECT requests that failed auth get the masquerade, but they must NOT get a 200
-    // (a 200 would look like a tunnel to the client). Serve 200+page only for GET "/".
-    let (status, body) = if *req.method() != Method::CONNECT && req.uri().path() == "/" {
+    let is_head = *req.method() == Method::HEAD;
+    // Serve 200 only for GET or HEAD "/"; unauthorized CONNECT and everything else gets 404.
+    // HEAD gets the correct status but NO body (RFC 9110 §9.3.2).
+    let path_root = req.uri().path() == "/" && *req.method() != Method::CONNECT;
+    let (status, body) = if (*req.method() == Method::GET || is_head) && path_root {
         (StatusCode::OK, html)
     } else {
         (StatusCode::NOT_FOUND, "Not Found".to_string())
@@ -97,10 +99,12 @@ async fn serve_masquerade(
         .send_response(resp)
         .await
         .map_err(|e| QuicError::Conn(e.to_string()))?;
-    stream
-        .send_data(Bytes::from(body))
-        .await
-        .map_err(|e| QuicError::Conn(e.to_string()))?;
+    if !is_head {
+        stream
+            .send_data(Bytes::from(body))
+            .await
+            .map_err(|e| QuicError::Conn(e.to_string()))?;
+    }
     stream
         .finish()
         .await
@@ -115,15 +119,33 @@ async fn tunnel(
     limits: UserLimits,
     store: Arc<dyn UserStore>,
 ) -> Result<()> {
-    // SSRF guard + dial.
-    let addr: SocketAddr = resolve_checked(target)
-        .await
-        .map_err(|e| QuicError::Conn(e.to_string()))?;
-    let upstream = TcpStream::connect(addr).await?;
+    let mut stream = stream;
+
+    // SSRF guard + dial.  On failure send 502 so the legitimate client gets a
+    // clean proxy error instead of a hard stream reset.
+    let addr: SocketAddr = match resolve_checked(target).await {
+        Ok(a) => a,
+        Err(_) => {
+            let _ = stream
+                .send_response(http::Response::builder().status(502).body(()).unwrap())
+                .await;
+            let _ = stream.finish().await;
+            return Ok(());
+        }
+    };
+    let upstream = match TcpStream::connect(addr).await {
+        Ok(u) => u,
+        Err(_) => {
+            let _ = stream
+                .send_response(http::Response::builder().status(502).body(()).unwrap())
+                .await;
+            let _ = stream.finish().await;
+            return Ok(());
+        }
+    };
     upstream.set_nodelay(true).ok();
 
     // Send 200, then bidirectional relay over the split h3 stream.
-    let mut stream = stream;
     stream
         .send_response(http::Response::builder().status(200).body(()).unwrap())
         .await
@@ -170,7 +192,7 @@ async fn tunnel(
     // UP: client (recv_data) -> target.
     let up = async move {
         let mut acc = 0u64;
-        while let Some(mut chunk) = recv
+        'up: while let Some(mut chunk) = recv
             .recv_data()
             .await
             .map_err(|e| QuicError::Conn(e.to_string()))?
@@ -178,17 +200,18 @@ async fn tunnel(
             while chunk.has_remaining() {
                 let c = chunk.chunk();
                 let n = c.len();
-                uw.write_all(c).await?;
+                // Rate-gate BEFORE forwarding (matches DOWN direction).
                 if let Some(tb) = &limits.up {
                     tb.consume(n as u64).await;
                 }
+                uw.write_all(c).await?;
                 chunk.advance(n);
                 acc += n as u64;
                 if acc >= FLUSH {
                     store.add_usage(&sid, acc, 0);
                     acc = 0;
                     if !store.still_allowed(&sid, now_secs()) {
-                        break;
+                        break 'up;
                     }
                 }
             }

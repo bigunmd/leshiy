@@ -8,6 +8,9 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 fn bbr_transport() -> Arc<TransportConfig> {
     let mut transport = TransportConfig::default();
     transport.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+    transport.max_idle_timeout(Some(
+        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(30)).unwrap(),
+    ));
     Arc::new(transport)
 }
 

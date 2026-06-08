@@ -319,6 +319,136 @@ async fn data_cap_enforced_over_quic() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 3b: data cap is enforced on the UPLOAD (UP) direction specifically
+// ---------------------------------------------------------------------------
+
+/// Spawn a TCP sink that reads and discards all incoming bytes (never echoes).
+/// Returns its "host:port" address string.
+async fn spawn_sink() -> String {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let a = l.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        loop {
+            if let Ok((mut s, _)) = l.accept().await {
+                tokio::spawn(async move {
+                    let mut b = [0u8; 4096];
+                    loop {
+                        match s.read(&mut b).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {} // discard
+                        }
+                    }
+                });
+            }
+        }
+    });
+    a
+}
+
+#[tokio::test]
+async fn data_cap_enforced_upload() {
+    // Cap is intentionally small so we exhaust it quickly.
+    const CAP: u64 = 80 * 1024; // 80 KB
+    const CHUNK: usize = 8 * 1024; // 8 KB per write
+    const TOTAL: usize = 512 * 1024; // 512 KB >> cap
+
+    // Use a sink so UP bytes are NOT echoed back — this is a pure upload test.
+    let sink = spawn_sink().await;
+    let store = Arc::new(InMemoryUserStore::new(vec![User {
+        short_id: [3; 8],
+        enabled: true,
+        expires_at: None,
+        data_cap: Some(CAP),
+        rate_up: None,
+        rate_down: None,
+    }]));
+    let server = start_server(store).await;
+    let socks = free_tcp_addr();
+
+    tokio::spawn(async move {
+        let _ = run_quic_client(server, "example.test", socks, [3; 8], true).await;
+    });
+
+    // Wait for client to come up.
+    let mut ready = false;
+    for _ in 0..50 {
+        if TcpStream::connect(socks).await.is_ok() {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        ready,
+        "SOCKS port never became available for data_cap_upload test"
+    );
+
+    // Connect via SOCKS5.
+    let mut c = TcpStream::connect(socks).await.unwrap();
+    c.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+    let mut sel = [0u8; 2];
+    c.read_exact(&mut sel).await.unwrap();
+
+    let (h, p) = sink.rsplit_once(':').unwrap();
+    let host = h.as_bytes();
+    let mut req = vec![0x05, 0x01, 0x00, 0x03, host.len() as u8];
+    req.extend_from_slice(host);
+    req.extend_from_slice(&p.parse::<u16>().unwrap().to_be_bytes());
+    c.write_all(&req).await.unwrap();
+    let mut rep = [0u8; 10];
+    c.read_exact(&mut rep).await.unwrap();
+    assert_eq!(rep[1], 0, "SOCKS CONNECT failed");
+
+    // Push data in small chunks.  After the cap is hit the server will close
+    // the QUIC stream, propagating back through the client relay to close our
+    // SOCKS TCP.  We detect the cut by watching for a write OR read error.
+    //
+    // We interleave a small-timeout read after every chunk to detect EOF
+    // quickly, without blocking indefinitely.
+    let chunk = vec![0xABu8; CHUNK];
+    let mut sent = 0usize;
+    let mut connection_cut = false;
+
+    'outer: while sent < TOTAL {
+        let n = CHUNK.min(TOTAL - sent);
+        match tokio::time::timeout(Duration::from_secs(5), c.write_all(&chunk[..n])).await {
+            Ok(Ok(_)) => sent += n,
+            _ => {
+                connection_cut = true;
+                break 'outer;
+            }
+        }
+        // After every write, peek to see if the server has closed our end.
+        let mut probe = [0u8; 1];
+        match tokio::time::timeout(Duration::from_millis(10), c.read(&mut probe)).await {
+            Ok(Ok(0)) | Ok(Err(_)) => {
+                connection_cut = true;
+                break 'outer;
+            }
+            _ => {} // timeout or data (shouldn't arrive from sink)
+        }
+    }
+
+    // If all writes succeeded (no write error), wait a bit for propagation then
+    // try a final read — the server must have closed the stream by now.
+    if !connection_cut {
+        let mut probe = [0u8; 1];
+        match tokio::time::timeout(Duration::from_secs(3), c.read(&mut probe)).await {
+            Ok(Ok(0)) | Ok(Err(_)) => connection_cut = true,
+            _ => {}
+        }
+    }
+
+    assert!(
+        connection_cut,
+        "upload cap should have closed the connection before all {TOTAL} bytes were accepted \
+         (sent {sent} bytes, cap={CAP})"
+    );
+
+    println!("data_cap_enforced_upload: sent {sent} bytes before cut (cap={CAP}, total={TOTAL})");
+}
+
+// ---------------------------------------------------------------------------
 // Test 4: prober GET gets masquerade page
 // ---------------------------------------------------------------------------
 
