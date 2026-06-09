@@ -3,7 +3,7 @@
 # `leshiy quickstart` and wires up systemd + firewall. POSIX sh.
 set -eu
 
-REPO="${LESHIY_REPO:-OWNER/leshiy}"      # set at release time
+REPO="${LESHIY_REPO:-bigunmd/leshiy}"    # override with LESHIY_REPO for forks
 BINDIR="/usr/local/bin"
 CFGDIR="/etc/leshiy"
 # Embedded minisign public key (matches scripts/minisign.pub):

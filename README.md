@@ -90,7 +90,7 @@ cargo build --release    # binary at ./target/release/leshiy
 On a fresh VPS, as root:
 
 ```sh
-curl -fsSL https://github.com/OWNER/leshiy/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/bigunmd/leshiy/releases/latest/download/install.sh | sh
 ```
 
 This downloads a **signed** static binary (verified with minisign + SHA-256), runs the
