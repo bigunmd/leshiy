@@ -158,11 +158,14 @@ leshiy server-init --host <entry-ip>:443 --dest www.microsoft.com:443 \
 
 ## License
 
-Licensed under the Apache License, Version 2.0 ([LICENSE](LICENSE) or
-<https://www.apache.org/licenses/LICENSE-2.0>).
+Licensed under the GNU Affero General Public License v3.0 — see
+[LICENSE](LICENSE) or <https://www.gnu.org/licenses/agpl-3.0.html>.
+
+AGPL-3.0 is strong copyleft: if you modify Leshiy and let others use it over a
+network (e.g. you run a modified server), you must offer them your modified source.
 
 ### Contribution
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for
-inclusion in the work by you, as defined in the Apache-2.0 license, shall be licensed
-as above, without any additional terms or conditions.
+inclusion in the work by you shall be licensed under AGPL-3.0 as above, without any
+additional terms or conditions.

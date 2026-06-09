@@ -5,7 +5,7 @@ members = ["crates/leshiy-core", "crates/leshiy", "crates/leshiy-tls", "crates/l
 [workspace.package]
 edition = "2024"
 version = "0.0.0"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
