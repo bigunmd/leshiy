@@ -1082,7 +1082,10 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "webpki-roots 0.26.11",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

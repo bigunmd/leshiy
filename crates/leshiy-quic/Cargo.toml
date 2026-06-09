@@ -26,3 +26,7 @@ h3-quinn.workspace = true
 http.workspace = true
 bytes.workspace = true
 hex.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+x25519-dalek.workspace = true
+zeroize.workspace = true
