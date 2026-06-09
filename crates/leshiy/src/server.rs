@@ -16,6 +16,16 @@ use std::sync::Arc;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
+/// What `init` produced — consumed by `quickstart` and the installer.
+// Fields are read by the upcoming `quickstart` command; allow until that lands.
+#[allow(dead_code)]
+pub struct InitOutput {
+    pub config_path: String,
+    pub uri: String,
+    pub listen: String,
+    pub quic_listen: Option<String>,
+}
+
 /// Options for `server-init`. Bundles all the CLI args into one struct to avoid
 /// clippy::too-many-arguments on the `init` function.
 pub struct InitOptions<'a> {
@@ -31,7 +41,7 @@ pub struct InitOptions<'a> {
     pub connector: Option<&'a str>,
 }
 
-pub fn init(opts: InitOptions<'_>) -> Result<()> {
+pub fn init(opts: InitOptions<'_>) -> Result<InitOutput> {
     let InitOptions {
         host,
         dest,
@@ -202,14 +212,17 @@ pub fn init(opts: InitOptions<'_>) -> Result<()> {
             .and_then(|q| q.cert_sha256.as_ref().map(hex::encode)),
         connector: connector.map(|s| s.to_string()),
     };
+    let uri = format_reality_uri_full(&pk, host, &sni, &short_id, quic_endpoint.as_ref());
     write_secret_file(out, &toml::to_string_pretty(&cfg)?)?;
     println!("REALITY server config written to {out}");
     println!("Share this URI with clients:");
-    println!(
-        "{}",
-        format_reality_uri_full(&pk, host, &sni, &short_id, quic_endpoint.as_ref())
-    );
-    Ok(())
+    println!("{uri}");
+    Ok(InitOutput {
+        config_path: out.to_string(),
+        uri,
+        listen: cfg.listen.clone(),
+        quic_listen: quic_endpoint.as_ref().map(|q| q.addr.clone()),
+    })
 }
 
 /// Write a config containing the static key with owner-only perms (0600).
@@ -426,6 +439,31 @@ pub async fn run(config: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn init_returns_uri_and_listen() {
+        let dir = std::env::temp_dir().join(format!("leshiy-init-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("server.toml");
+        let out_s = out.to_str().unwrap();
+        let res = init(InitOptions {
+            host: "203.0.113.5:443",
+            dest: "www.microsoft.com:443",
+            listen: None,
+            out: out_s,
+            quic_listen: None,
+            quic_domain: None,
+            quic_cert: None,
+            quic_key: None,
+            connector: None,
+        })
+        .unwrap();
+        assert!(res.uri.starts_with("leshiy://"));
+        assert_eq!(res.listen, "0.0.0.0:443");
+        assert!(res.quic_listen.is_none());
+        assert_eq!(res.config_path, out_s);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn secret_file_is_owner_only_and_no_clobber() {

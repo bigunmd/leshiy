@@ -31,17 +31,19 @@ async fn main() -> anyhow::Result<()> {
             quic_cert,
             quic_key,
             connector,
-        } => server::init(server::InitOptions {
-            host: &host,
-            dest: &dest,
-            listen: listen.as_deref(),
-            out: &out,
-            quic_listen: quic_listen.as_deref(),
-            quic_domain: quic_domain.as_deref(),
-            quic_cert: quic_cert.as_deref(),
-            quic_key: quic_key.as_deref(),
-            connector: connector.as_deref(),
-        })?,
+        } => {
+            server::init(server::InitOptions {
+                host: &host,
+                dest: &dest,
+                listen: listen.as_deref(),
+                out: &out,
+                quic_listen: quic_listen.as_deref(),
+                quic_domain: quic_domain.as_deref(),
+                quic_cert: quic_cert.as_deref(),
+                quic_key: quic_key.as_deref(),
+                connector: connector.as_deref(),
+            })?;
+        }
         cli::Cmd::Server { config } => server::run(&config).await?,
         cli::Cmd::Client {
             uri,
