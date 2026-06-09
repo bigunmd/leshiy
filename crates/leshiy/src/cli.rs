@@ -59,7 +59,7 @@ pub enum Cmd {
         uri: String,
         #[arg(long, default_value = "127.0.0.1:1080")]
         socks: String,
-        /// Transport to use: auto (default, same as tcp), quic, or tcp.
+        /// Transport to use: auto (default: prefer QUIC, fall back to REALITY/TCP), quic, or tcp.
         #[arg(long, default_value = "auto")]
         transport: Transport,
     },
@@ -73,7 +73,8 @@ pub enum Cmd {
 /// Transport selection for the client subcommand.
 #[derive(Clone, ValueEnum)]
 pub enum Transport {
-    /// Use REALITY (TCP) transport — same as `tcp`.
+    /// Prefer QUIC where the URI has a `quic=` endpoint and UDP is open; fall back
+    /// to REALITY/TCP when QUIC is blocked or absent.
     Auto,
     /// Use QUIC/H3 transport (requires `quic=` in the URI).
     Quic,
