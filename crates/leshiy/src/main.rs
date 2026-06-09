@@ -45,6 +45,26 @@ async fn main() -> anyhow::Result<()> {
                 connector: connector.as_deref(),
             })?;
         }
+        cli::Cmd::Quickstart {
+            host,
+            dest,
+            out,
+            listen,
+            quic_listen,
+            no_probe,
+            summary_json,
+        } => {
+            quickstart::run(quickstart::QuickstartOpts {
+                host: &host,
+                dest: &dest,
+                out: &out,
+                listen: listen.as_deref(),
+                quic_listen: quic_listen.as_deref(),
+                no_probe,
+                summary_json,
+            })
+            .await?
+        }
         cli::Cmd::Server { config } => server::run(&config).await?,
         cli::Cmd::Client {
             uri,

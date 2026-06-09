@@ -17,8 +17,6 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 /// What `init` produced — consumed by `quickstart` and the installer.
-// Fields are read by the upcoming `quickstart` command; allow until that lands.
-#[allow(dead_code)]
 pub struct InitOutput {
     pub config_path: String,
     pub uri: String,

@@ -3,8 +3,6 @@
 //! installer consumes.
 
 /// Render a URI as a terminal QR code (UTF-8 half-block string).
-// Consumed by the quickstart subcommand wired up in a later task.
-#[allow(dead_code)]
 pub fn qr_string(uri: &str) -> String {
     use qrcode::QrCode;
     use qrcode::render::unicode;
@@ -14,9 +12,6 @@ pub fn qr_string(uri: &str) -> String {
 
 /// Connect to `host:port` and report the negotiated TLS protocol version.
 /// Returns Ok(true) iff the peer negotiated TLS 1.3.
-// Called by the quickstart wizard to validate --dest before accepting it. Not
-// yet wired up in non-test code (Task 8 calls it).
-#[allow(dead_code)]
 pub async fn dest_is_tls13(host: &str, port: u16) -> anyhow::Result<bool> {
     use std::sync::Arc;
     use tokio_rustls::TlsConnector;
@@ -36,6 +31,61 @@ pub async fn dest_is_tls13(host: &str, port: u16) -> anyhow::Result<bool> {
     let tls = connector.connect(server_name, stream).await?;
     let (_, conn) = tls.get_ref();
     Ok(conn.protocol_version() == Some(rustls::ProtocolVersion::TLSv1_3))
+}
+
+use anyhow::{Context, Result};
+
+pub struct QuickstartOpts<'a> {
+    pub host: &'a str,
+    pub dest: &'a str,
+    pub out: &'a str,
+    pub listen: Option<&'a str>,
+    pub quic_listen: Option<&'a str>,
+    pub no_probe: bool,
+    pub summary_json: bool,
+}
+
+pub async fn run(opts: QuickstartOpts<'_>) -> Result<()> {
+    // 1. Validate the dest negotiates TLS1.3 (unless explicitly skipped).
+    if !opts.no_probe {
+        let (h, p) = opts.dest.rsplit_once(':').unwrap_or((opts.dest, "443"));
+        let port: u16 = p.parse().context("dest port")?;
+        match dest_is_tls13(h, port).await {
+            Ok(true) => eprintln!("dest {h}:{port} negotiates TLS1.3 ✓"),
+            Ok(false) => {
+                return Err(anyhow::anyhow!(
+                    "dest {h}:{port} did not negotiate TLS1.3 — pick a modern site (see README)"
+                ));
+            }
+            Err(e) => return Err(anyhow::anyhow!("could not probe dest {h}:{port}: {e}")),
+        }
+    }
+    // 2. Reuse the existing server-init logic (keygen + config + sqlite + URI).
+    let out = crate::server::init(crate::server::InitOptions {
+        host: opts.host,
+        dest: opts.dest,
+        listen: opts.listen,
+        out: opts.out,
+        quic_listen: opts.quic_listen,
+        quic_domain: None,
+        quic_cert: None,
+        quic_key: None,
+        connector: None,
+    })?;
+    // 3. Show the QR for phones.
+    println!("\nScan to import on a device:");
+    println!("{}", qr_string(&out.uri));
+    // 4. Emit the machine-readable summary the installer parses.
+    if opts.summary_json {
+        let summary = serde_json::json!({
+            "config_path": out.config_path,
+            "uri": out.uri,
+            "listen": out.listen,
+            "quic_listen": out.quic_listen,
+        });
+        println!("{summary}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

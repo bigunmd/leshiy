@@ -63,6 +63,30 @@ pub enum Cmd {
         #[arg(long, default_value = "auto")]
         transport: Transport,
     },
+    /// Interactive (or flag-driven) single-server setup: probe dest, init, print URI + QR.
+    Quickstart {
+        /// Public host:port clients dial.
+        #[arg(long)]
+        host: String,
+        /// Borrowed TLS site to camouflage as, host:port.
+        #[arg(long)]
+        dest: String,
+        /// Output config path.
+        #[arg(long, default_value = "leshiy-server.toml")]
+        out: String,
+        /// Bind address (default 0.0.0.0:<host port>).
+        #[arg(long)]
+        listen: Option<String>,
+        /// Enable QUIC by listening on this addr (e.g. 0.0.0.0:443).
+        #[arg(long)]
+        quic_listen: Option<String>,
+        /// Skip the live TLS1.3 dest probe (for tests / offline).
+        #[arg(long)]
+        no_probe: bool,
+        /// Emit one machine-readable JSON summary line on stdout (for install.sh).
+        #[arg(long)]
+        summary_json: bool,
+    },
     /// Manage users on a running leshiy server via its control socket.
     User {
         #[command(subcommand)]
