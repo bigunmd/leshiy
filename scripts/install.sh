@@ -10,6 +10,7 @@ CFGDIR="/etc/leshiy"
 MINISIGN_PUB="RWQ_REPLACE_WITH_REAL_PUBKEY_LINE"
 
 DOCKER=0; ASSUME_YES=0; HOST=""; DEST=""; QUIC=0; VERSION="latest"
+ROLE="single"; EXIT_URI=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --docker) DOCKER=1 ;;
@@ -18,6 +19,8 @@ while [ $# -gt 0 ]; do
     --dest) DEST="$2"; shift ;;
     --quic) QUIC=1 ;;
     --version) VERSION="$2"; shift ;;
+    --role) ROLE="$2"; shift ;;
+    --exit-uri) EXIT_URI="$2"; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
   shift
@@ -140,6 +143,16 @@ quic_args() {  # echo the quic flag (word-split intentionally by caller) when en
   return 0
 }
 
+role_args() {  # echo role/exit/quic flags (word-split intentionally by caller)
+  printf '%s' "--role $ROLE"
+  [ -n "$EXIT_URI" ] && printf '%s' " --exit-uri $EXIT_URI"
+  # Exit role needs a reachable QUIC carrier; default it to the public host if unset.
+  if [ "$ROLE" = "exit" ] && [ "$QUIC" -eq 0 ]; then
+    printf '%s' " --quic-listen ${HOST}"
+  fi
+  return 0
+}
+
 # ASSUME_YES is consumed by interactive prompts in later phases of the installer;
 # reference it here so shellcheck knows it is intentionally kept for future use.
 : "$ASSUME_YES"
@@ -161,7 +174,7 @@ main() {
     # shellcheck disable=SC2046  # intentional word-splitting of quic_args (0 or 2 args)
     docker run --rm -v "$CFGDIR":/etc/leshiy "ghcr.io/$REPO:$IMG_TAG" \
       quickstart --host "$HOST" --dest "$DEST" --out /etc/leshiy/server.toml \
-      $(quic_args)
+      $(quic_args) $(role_args)
     cat > "$CFGDIR/docker-compose.yaml" <<COMPOSE
 services:
   leshiy:
@@ -186,7 +199,7 @@ COMPOSE
     # shellcheck disable=SC2046  # intentional word-splitting of quic_args (0 or 2 args)
     summary="$("$BINDIR/leshiy" quickstart \
         --host "$HOST" --dest "$DEST" --out "$CFGDIR/server.toml" \
-        $(quic_args) \
+        $(quic_args) $(role_args) \
         --summary-json | tee /dev/tty | grep -m1 '^{')"
     echo "$summary" > "$CFGDIR/install.json"
   fi

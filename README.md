@@ -153,6 +153,23 @@ leshiy server-init --host <public-ip>:443 --dest www.microsoft.com:443 \
 
 ### 5. Set up an Entry → Exit connector (optional, advanced)
 
+With the installer (recommended), on each box:
+
+```sh
+# On the EXIT (clean egress): note the printed connector-credential URI.
+curl -fsSL https://github.com/bigunmd/leshiy/releases/latest/download/install.sh | sh -s -- \
+    --role exit --dest www.cloudflare.com:443 --quic
+# → prints EXIT_URI = leshiy://…
+
+# On the ENTRY (censor-facing): point it at the exit; hand its printed URI to clients.
+curl -fsSL https://github.com/bigunmd/leshiy/releases/latest/download/install.sh | sh -s -- \
+    --role entry --dest www.microsoft.com:443 --exit-uri '<EXIT_URI>'
+```
+
+Stand the **exit up first** (you need its URI for the entry). Chain further hops by giving the
+exit its own `--exit-uri`. The chain lives only in server-side config, so a leaked client
+config exposes just the entry.
+
 Keep the censor-facing **entry** small and disposable; do the real egress on a separate,
 clean **exit**.
 
