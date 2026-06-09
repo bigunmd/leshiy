@@ -274,7 +274,7 @@ pub async fn run(cmd: UserCmd) -> Result<()> {
             if let Some(uri) = resp["uri"].as_str() {
                 println!("{uri}");
                 if qr {
-                    println!("{}", crate::quickstart::qr_string(uri));
+                    println!("{}", crate::quickstart::qr_for_stdout(uri));
                 }
             }
         }
@@ -386,7 +386,7 @@ pub async fn run(cmd: UserCmd) -> Result<()> {
             if let Some(uri) = resp["uri"].as_str() {
                 println!("{uri}");
                 if qr {
-                    println!("{}", crate::quickstart::qr_string(uri));
+                    println!("{}", crate::quickstart::qr_for_stdout(uri));
                 }
             }
         }

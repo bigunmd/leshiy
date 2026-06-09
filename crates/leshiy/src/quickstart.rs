@@ -3,11 +3,37 @@
 //! installer consumes.
 
 /// Render a URI as a terminal QR code (UTF-8 half-block string).
+///
+/// Uses the **low** error-correction level: a share URI is read off a clean screen, so the
+/// ~15% redundancy of level M isn't needed — level L keeps the QR a few versions smaller
+/// (notably for the longer QUIC URIs, ~225 bytes), which matters for terminal scannability.
 pub fn qr_string(uri: &str) -> String {
-    use qrcode::QrCode;
     use qrcode::render::unicode;
-    let code = QrCode::new(uri.as_bytes()).expect("uri always encodable as QR");
+    use qrcode::{EcLevel, QrCode};
+    let code = QrCode::with_error_correction_level(uri.as_bytes(), EcLevel::L)
+        .expect("uri always encodable as QR");
     code.render::<unicode::Dense1x2>().quiet_zone(true).build()
+}
+
+/// QR for `uri`, unless it is wider than `term_cols` — then return a short hint to widen/copy
+/// instead of an unscannable wrapped blob. `term_cols == None` (width unknown, e.g. piped)
+/// renders the QR. Callers always print the plain URI above the QR, so the hint loses nothing.
+pub fn qr_or_hint(uri: &str, term_cols: Option<usize>) -> String {
+    let qr = qr_string(uri);
+    let qr_cols = qr.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+    match term_cols {
+        Some(cols) if qr_cols > cols => format!(
+            "(QR is {qr_cols} cols wide — widen your terminal to \u{2265}{qr_cols} columns to \
+             scan it, or copy the URI above.)"
+        ),
+        _ => qr,
+    }
+}
+
+/// Render the QR for `uri` sized to the current terminal (hint if too narrow / unknown-wide).
+pub fn qr_for_stdout(uri: &str) -> String {
+    let cols = terminal_size::terminal_size().map(|(w, _h)| w.0 as usize);
+    qr_or_hint(uri, cols)
 }
 
 /// Connect to `host:port` and report the negotiated TLS protocol version.
@@ -101,7 +127,7 @@ pub async fn run(opts: QuickstartOpts<'_>) -> Result<()> {
         }
         Role::Single | Role::Entry => {
             println!("\nShare with clients — scan to import on a device:");
-            println!("{}", qr_string(&out.uri));
+            println!("{}", qr_for_stdout(&out.uri));
         }
     }
     // 4. Emit the machine-readable summary the installer parses.
@@ -219,6 +245,28 @@ mod tests {
         let s = qr_string("leshiy://abc@203.0.113.5:443?sni=www.microsoft.com&sid=00");
         assert!(s.contains('█') || s.contains('▀') || s.contains('▄'));
         assert!(s.lines().count() > 10);
+    }
+
+    const SAMPLE_URI: &str = "leshiy://abc@203.0.113.5:443?sni=www.microsoft.com&sid=00";
+
+    #[test]
+    fn qr_or_hint_renders_when_wide_enough() {
+        let s = qr_or_hint(SAMPLE_URI, Some(200));
+        assert!(s.contains('█') || s.contains('▀') || s.contains('▄'));
+        assert!(!s.contains("widen your terminal"));
+    }
+
+    #[test]
+    fn qr_or_hint_warns_when_too_narrow() {
+        let s = qr_or_hint(SAMPLE_URI, Some(10));
+        assert!(s.contains("widen your terminal"));
+        assert!(!s.contains('█') && !s.contains('▀') && !s.contains('▄'));
+    }
+
+    #[test]
+    fn qr_or_hint_renders_when_width_unknown() {
+        let s = qr_or_hint(SAMPLE_URI, None);
+        assert!(s.contains('█') || s.contains('▀') || s.contains('▄'));
     }
 
     #[tokio::test]
