@@ -37,6 +37,7 @@ pub fn uninstall(config: &str, purge: bool, host: &dyn HostOps) -> Result<()> {
     if purge {
         let dir = std::path::Path::new(config)
             .parent()
+            .filter(|p| !p.as_os_str().is_empty() && p.as_os_str() != "/")
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "/etc/leshiy".into());
         host.remove_path(&dir)?;
@@ -49,30 +50,63 @@ pub fn uninstall(config: &str, purge: bool, host: &dyn HostOps) -> Result<()> {
 
 /// Fetch+verify the release binary for `version` and restart the service onto it.
 pub fn upgrade(repo: &str, version: &str, host: &dyn HostOps) -> Result<()> {
+    validate_repo(repo)?;
+    validate_version(version)?;
     host.fetch_verified_binary(repo, version, "/usr/local/bin/leshiy")?;
     host.systemctl(&["restart", "leshiy"])?;
     println!("upgraded to {version} and restarted");
     Ok(())
 }
 
-/// Resolve the latest release tag for `repo` via the GitHub API (shells to curl).
+/// Validate `owner/name` so it can never inject into a URL/shell.
+fn validate_repo(repo: &str) -> Result<()> {
+    let ok = repo.split('/').count() == 2
+        && !repo.is_empty()
+        && repo
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/_.-".contains(c));
+    if !ok {
+        anyhow::bail!("invalid repo {repo:?} (expected owner/name)");
+    }
+    Ok(())
+}
+
+/// Validate a release tag so it can never inject.
+fn validate_version(v: &str) -> Result<()> {
+    let ok = !v.is_empty()
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "v._-".contains(c));
+    if !ok {
+        anyhow::bail!("invalid version {v:?}");
+    }
+    Ok(())
+}
+
+/// Resolve the latest release tag for `repo` via the GitHub API (no shell).
 pub fn latest_version(repo: &str) -> Result<String> {
-    let out = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "curl -fsSL https://api.github.com/repos/{repo}/releases/latest \
-             | grep -m1 '\"tag_name\"' | cut -d'\"' -f4"
-        ))
+    validate_repo(repo)?;
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let out = std::process::Command::new("curl")
+        .args(["-fsSL", &url])
         .output()
         .context("query latest release")?;
-    let tag = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() {
+        anyhow::bail!("could not fetch latest release for {repo}");
+    }
+    let body = String::from_utf8_lossy(&out.stdout);
+    let tag = body
+        .split("\"tag_name\"")
+        .nth(1)
+        .and_then(|s| s.split('"').nth(1))
+        .map(str::to_string)
+        .unwrap_or_default();
     if tag.is_empty() {
         anyhow::bail!("could not resolve latest release for {repo} (pass --version)");
     }
     Ok(tag)
 }
 
-pub fn status(config: &str, host: &dyn HostOps) -> Result<()> {
+pub fn status(config: &str, host: &dyn HostOps) -> Result<StatusReport> {
     let toml_str = std::fs::read_to_string(config).with_context(|| format!("read {config}"))?;
     let cfg: RealityServerConfig = toml::from_str(&toml_str).context("parse config")?;
     let report = StatusReport {
@@ -83,7 +117,7 @@ pub fn status(config: &str, host: &dyn HostOps) -> Result<()> {
         connector: cfg.connector.is_some(),
     };
     println!("{}", render_status(&report));
-    Ok(())
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -124,8 +158,13 @@ mod tests {
         )
         .unwrap();
         let host = MockHostOps::new(true);
-        status(cfg.to_str().unwrap(), &host).unwrap();
+        let report = status(cfg.to_str().unwrap(), &host).unwrap();
         assert!(host.calls().contains(&"active:leshiy".to_string()));
+        assert!(report.active);
+        assert_eq!(report.listen, "0.0.0.0:443");
+        assert_eq!(report.dest, "www.microsoft.com:443");
+        assert!(!report.quic);
+        assert!(!report.connector);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -141,6 +180,18 @@ mod tests {
         assert!(c.contains(&"remove:/usr/local/bin/leshiy".to_string()));
         // Without --purge, the config dir is NOT removed.
         assert!(!c.iter().any(|s| s == "remove:/etc/leshiy"));
+        let disable = c
+            .iter()
+            .position(|s| s == "systemctl:disable --now leshiy")
+            .unwrap();
+        let rm_unit = c
+            .iter()
+            .position(|s| s == "remove:/etc/systemd/system/leshiy.service")
+            .unwrap();
+        assert!(
+            disable < rm_unit,
+            "must disable service before deleting its unit file"
+        );
     }
 
     #[test]

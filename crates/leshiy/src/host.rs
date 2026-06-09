@@ -62,7 +62,6 @@ impl HostOps for RealHostOps {
         Ok(())
     }
     fn fetch_verified_binary(&self, repo: &str, version: &str, dest: &str) -> Result<()> {
-        // Mirror install.sh's verify-then-install using the embedded signing pubkey.
         let pubkey = MINISIGN_PUB
             .lines()
             .last()
@@ -72,22 +71,30 @@ impl HostOps for RealHostOps {
             "aarch64" => "aarch64-unknown-linux-musl",
             other => anyhow::bail!("unsupported arch {other}"),
         };
-        let script = format!(
-            r#"set -eu
+        // All dynamic values are passed as positional args ($1..$5) so none is interpolated
+        // into the shell program text — no command-injection surface.
+        const SCRIPT: &str = r#"set -eu
+repo="$1"; version="$2"; target="$3"; dest="$4"; pubkey="$5"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-base="https://github.com/{repo}/releases/download/{version}"
-curl -fsSL "$base/leshiy-{version}-{target}.tar.gz" -o "$tmp/p.tgz"
+base="https://github.com/$repo/releases/download/$version"
+curl -fsSL "$base/leshiy-$version-$target.tar.gz" -o "$tmp/p.tgz"
 curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
 curl -fsSL "$base/SHA256SUMS.minisig" -o "$tmp/SHA256SUMS.minisig"
-printf '%s\n' "{pubkey}" > "$tmp/k.pub"
+printf '%s\n' "$pubkey" > "$tmp/k.pub"
 minisign -Vm "$tmp/SHA256SUMS" -p "$tmp/k.pub" -x "$tmp/SHA256SUMS.minisig"
-( cd "$tmp" && grep "leshiy-{version}-{target}.tar.gz" SHA256SUMS | sha256sum -c - )
+( cd "$tmp" && grep "leshiy-$version-$target.tar.gz" SHA256SUMS | sha256sum -c - )
 tar -C "$tmp" -xzf "$tmp/p.tgz"
-install -Dm755 "$tmp/leshiy" "{dest}""#,
-        );
+install -Dm755 "$tmp/leshiy" "$dest"
+"#;
         let st = std::process::Command::new("sh")
             .arg("-c")
-            .arg(&script)
+            .arg(SCRIPT)
+            .arg("sh") // $0
+            .arg(repo)
+            .arg(version)
+            .arg(target)
+            .arg(dest)
+            .arg(pubkey)
             .status()
             .context("run verified download")?;
         if !st.success() {
