@@ -14,5 +14,5 @@ pub mod sqlite_store;
 pub mod tunnel;
 pub mod user;
 
-pub use egress::{DirectEgress, Egress, EgressStream};
+pub use egress::{DirectEgress, Egress, EgressRead, EgressWrite};
 pub use error::{RealityError, Result};

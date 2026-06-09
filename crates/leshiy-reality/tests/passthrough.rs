@@ -5,6 +5,7 @@
 // The Outcome::Authed assertion from M1.2 is removed — the authed path is covered
 // by the in-process e2e in Task 4 (reality_e2e.rs).
 use leshiy_reality::config::ServerAuthConfig;
+use leshiy_reality::egress::DirectEgress;
 use leshiy_reality::handshake::ServerCert;
 use leshiy_reality::server::serve_connection;
 use leshiy_reality::user::InMemoryUserStore;
@@ -84,7 +85,15 @@ async fn unauthed_is_relayed_to_dest() {
         let store = std::sync::Arc::new(InMemoryUserStore::from_short_ids(
             cfg2.short_ids.iter().copied(),
         ));
-        let _ = serve_connection(sock, cfg2, store, cert2, 1000).await;
+        let _ = serve_connection(
+            sock,
+            cfg2,
+            store,
+            std::sync::Arc::new(DirectEgress),
+            cert2,
+            1000,
+        )
+        .await;
     });
 
     // Connect as an unauthed client with a plain (non-auth) ClientHello.

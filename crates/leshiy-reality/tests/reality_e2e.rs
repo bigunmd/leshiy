@@ -6,6 +6,7 @@
 //                           the real rustls dest; client gets a genuine ServerHello back.
 use leshiy_reality::client::run_reality_client;
 use leshiy_reality::config::{ClientAuthConfig, ServerAuthConfig};
+use leshiy_reality::egress::DirectEgress;
 use leshiy_reality::handshake::ServerCert;
 use leshiy_reality::server::run_reality_server;
 use leshiy_reality::user::InMemoryUserStore;
@@ -149,7 +150,8 @@ async fn authed_tunnel_echo() {
             let store = std::sync::Arc::new(InMemoryUserStore::from_short_ids(
                 scfg.short_ids.iter().copied(),
             ));
-            let _ = run_reality_server(sl, scfg, store, cert).await;
+            let _ =
+                run_reality_server(sl, scfg, store, std::sync::Arc::new(DirectEgress), cert).await;
         });
     }
 
@@ -212,7 +214,15 @@ async fn prober_gets_real_dest() {
         let store = std::sync::Arc::new(InMemoryUserStore::from_short_ids(
             scfg.short_ids.iter().copied(),
         ));
-        let _ = leshiy_reality::server::serve_connection(s, scfg, store, cert, now).await;
+        let _ = leshiy_reality::server::serve_connection(
+            s,
+            scfg,
+            store,
+            std::sync::Arc::new(DirectEgress),
+            cert,
+            now,
+        )
+        .await;
     });
 
     // Connect as an unauthed prober with a plain ClientHello.
@@ -266,7 +276,15 @@ async fn garbage_is_relayed_to_dest() {
         let store = std::sync::Arc::new(InMemoryUserStore::from_short_ids(
             scfg.short_ids.iter().copied(),
         ));
-        let _ = leshiy_reality::server::serve_connection(s, scfg, store, cert, now).await;
+        let _ = leshiy_reality::server::serve_connection(
+            s,
+            scfg,
+            store,
+            std::sync::Arc::new(DirectEgress),
+            cert,
+            now,
+        )
+        .await;
     });
 
     let mut c = TcpStream::connect(saddr).await.unwrap();

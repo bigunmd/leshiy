@@ -84,6 +84,7 @@ pub fn classify(ch: &[u8], cfg: &ServerAuthConfig, now_secs: u32) -> Classificat
     }
 }
 
+use crate::egress::Egress;
 use crate::handshake::ServerCert;
 use crate::tunnel::{establish_server, into_transport};
 use crate::user::{UserLimits, UserStore};
@@ -92,7 +93,7 @@ use leshiy_core::mux::{Mux, Role};
 use leshiy_core::version::Hello;
 use leshiy_tls::record::read_record;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 fn server_hello() -> Hello {
@@ -109,6 +110,7 @@ pub async fn serve_connection<S>(
     mut client: S,
     cfg: Arc<ServerAuthConfig>,
     store: Arc<dyn UserStore>,
+    egress: Arc<dyn Egress>,
     cert: Arc<ServerCert>,
     now_secs: u32,
 ) -> crate::Result<()>
@@ -176,8 +178,9 @@ where
                 let sid = short_id;
                 let lim = limits.clone();
                 let st = store.clone();
+                let eg = egress.clone();
                 tokio::spawn(async move {
-                    let _ = relay_stream(&mut stream, sid, lim, st).await;
+                    let _ = relay_stream(&mut stream, sid, lim, st, eg).await;
                     let _ = stream.close().await;
                 });
             }
@@ -185,7 +188,7 @@ where
     }
 }
 
-/// Dial the stream's target and relay bytes both ways.
+/// Open an egress connection to the stream's target and relay bytes both ways.
 /// Throttles via per-user TokenBuckets (None = unlimited, skips consume entirely).
 /// Reports usage every ~64 KB (atomic-only, ADR-0019 hot-path discipline).
 async fn relay_stream(
@@ -193,11 +196,12 @@ async fn relay_stream(
     short_id: [u8; 8],
     limits: UserLimits,
     store: Arc<dyn UserStore>,
+    egress: Arc<dyn Egress>,
 ) -> crate::Result<()> {
-    let addr = crate::netguard::resolve_checked(&stream.target).await?;
-    let upstream = TcpStream::connect(addr).await?;
-    upstream.set_nodelay(true).ok();
-    let (mut ur, mut uw) = upstream.into_split();
+    let (mut ur, mut uw) = egress
+        .open(&stream.target)
+        .await
+        .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
     let mut acc_up: u64 = 0;
     let mut acc_down: u64 = 0;
     const FLUSH: u64 = 64 * 1024; // report usage every ~64 KB (ADR-0019: atomic-only)
@@ -238,6 +242,7 @@ async fn relay_stream(
             }
         }
     }
+    uw.shutdown().await.ok();
     store.add_usage(&short_id, acc_up, acc_down); // final flush of the tail
     Ok(())
 }
@@ -254,18 +259,19 @@ pub async fn run_reality_server(
     listener: tokio::net::TcpListener,
     cfg: Arc<ServerAuthConfig>,
     store: Arc<dyn UserStore>,
+    egress: Arc<dyn Egress>,
     cert: Arc<ServerCert>,
 ) -> crate::Result<()> {
     loop {
         let (sock, _) = listener.accept().await?;
         sock.set_nodelay(true).ok();
-        let (c, st, ce) = (cfg.clone(), store.clone(), cert.clone());
+        let (c, st, eg, ce) = (cfg.clone(), store.clone(), egress.clone(), cert.clone());
         tokio::spawn(async move {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as u32)
                 .unwrap_or(0);
-            let _ = serve_connection(sock, c, st, ce, now).await;
+            let _ = serve_connection(sock, c, st, eg, ce, now).await;
         });
     }
 }

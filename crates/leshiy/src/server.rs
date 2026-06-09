@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use leshiy_reality::config::{QuicEndpoint, format_reality_uri_full};
 use leshiy_reality::control::{UriIssuer, serve_control};
+use leshiy_reality::egress::DirectEgress;
 use leshiy_reality::handshake::ServerCert;
 use leshiy_reality::server::run_reality_server;
 use leshiy_reality::sqlite_store::SqliteUserStore;
@@ -372,7 +373,7 @@ pub async fn run(config: &str) -> Result<()> {
 
     tracing::info!(listen = %cfg.listen, dest = %cfg.dest, sock = %sock_path, "leshiy REALITY server up");
 
-    run_reality_server(listener, auth, user_store, cert)
+    run_reality_server(listener, auth, user_store, Arc::new(DirectEgress), cert)
         .await
         .map_err(|e| anyhow::anyhow!("server: {e}"))
 }

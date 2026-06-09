@@ -9,6 +9,7 @@
 // Harness mirrored from reality_e2e.rs.
 use leshiy_reality::client::run_reality_client;
 use leshiy_reality::config::{ClientAuthConfig, ServerAuthConfig};
+use leshiy_reality::egress::DirectEgress;
 use leshiy_reality::handshake::ServerCert;
 use leshiy_reality::server::run_reality_server;
 use leshiy_reality::user::{InMemoryUserStore, User};
@@ -151,7 +152,9 @@ impl Harness {
             let cert = cert.clone();
             let store = store.clone();
             tokio::spawn(async move {
-                let _ = run_reality_server(sl, scfg, store, cert).await;
+                let _ =
+                    run_reality_server(sl, scfg, store, std::sync::Arc::new(DirectEgress), cert)
+                        .await;
             })
         };
 
@@ -384,7 +387,8 @@ async fn data_cap_disconnects() {
         let cert = cert.clone();
         let store = store.clone();
         tokio::spawn(async move {
-            let _ = run_reality_server(sl, scfg, store, cert).await;
+            let _ =
+                run_reality_server(sl, scfg, store, std::sync::Arc::new(DirectEgress), cert).await;
         });
     }
 
