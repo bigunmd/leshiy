@@ -141,6 +141,22 @@ leshiy user disable <short-id>      # cut access instantly
 leshiy user reset-usage <short-id>
 ```
 
+Add `--qr` to print a scannable QR for any share URI:
+
+```sh
+leshiy user add --data-cap 50GB --qr      # prints the leshiy:// URI + a QR to scan
+```
+
+### Day-2 management (`leshiyctl`)
+
+The installer drops a `leshiyctl` helper that works for both native and Docker installs:
+
+```sh
+leshiyctl status      # service + config summary (or `docker compose ps`)
+leshiyctl upgrade     # verified binary download + restart (or `compose pull && up -d`)
+leshiyctl uninstall   # stop + remove service and binary (add --purge to delete config/keys)
+```
+
 ### 4. Enable the QUIC transport (optional)
 
 Add a QUIC/HTTP-3 endpoint so clients can use the UDP path (auto-fallback handles the rest):
