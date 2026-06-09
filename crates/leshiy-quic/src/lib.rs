@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod client;
+pub mod connector;
 pub mod endpoint;
 pub mod masquerade;
 pub mod server;

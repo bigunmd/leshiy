@@ -5,7 +5,10 @@ use leshiy_quic::{
     masquerade::Masquerade,
     server::run_quic_server,
 };
-use leshiy_reality::user::{InMemoryUserStore, User, UserStore};
+use leshiy_reality::{
+    egress::DirectEgress,
+    user::{InMemoryUserStore, User, UserStore},
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -76,7 +79,15 @@ async fn start_server(store: Arc<dyn UserStore>) -> (std::net::SocketAddr, [u8; 
     let pin = cert_sha256(certs[0].as_ref());
     let bound = free_udp_addr();
     tokio::spawn(async move {
-        let _ = run_quic_server(bound, certs, key, store, Masquerade::default()).await;
+        let _ = run_quic_server(
+            bound,
+            certs,
+            key,
+            store,
+            Masquerade::default(),
+            Arc::new(DirectEgress),
+        )
+        .await;
     });
     (bound, pin)
 }

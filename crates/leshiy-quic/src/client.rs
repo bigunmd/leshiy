@@ -79,6 +79,38 @@ pub async fn run_quic_client(
     .await
 }
 
+/// Open an H3 CONNECT tunnel to `target` on the given [`QuicConn`] and return the
+/// split send/recv halves.  This is the same CONNECT handshake as `tunnel_one` but
+/// returns the stream halves instead of piping a TcpStream — used by `ConnectorEgress`.
+pub async fn open_connect(
+    conn: &QuicConn,
+    target: &str,
+) -> Result<(
+    h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
+    h3::client::RequestStream<h3_quinn::RecvStream, Bytes>,
+)> {
+    let auth = hex::encode(conn.short_id);
+    let mut send_req = conn.send_req.clone();
+    let req = http::Request::builder()
+        .method(Method::CONNECT)
+        .uri(target)
+        .header("leshiy-auth", &auth)
+        .body(())
+        .map_err(|e| QuicError::Conn(e.to_string()))?;
+    let mut stream = send_req
+        .send_request(req)
+        .await
+        .map_err(|e| QuicError::Conn(e.to_string()))?;
+    let resp = stream
+        .recv_response()
+        .await
+        .map_err(|e| QuicError::Conn(e.to_string()))?;
+    if resp.status() != 200 {
+        return Err(QuicError::Conn(format!("connect status {}", resp.status())));
+    }
+    Ok(stream.split())
+}
+
 async fn tunnel_one(
     mut send_req: h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
     auth: &str,

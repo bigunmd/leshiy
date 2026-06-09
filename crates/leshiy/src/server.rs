@@ -331,8 +331,15 @@ pub async fn run(config: &str) -> Result<()> {
         let qstore: Arc<dyn UserStore> = user_store.clone();
         let masq = leshiy_quic::masquerade::Masquerade::default();
         tokio::spawn(async move {
-            if let Err(e) =
-                leshiy_quic::server::run_quic_server(qaddr, certs, key, qstore, masq).await
+            if let Err(e) = leshiy_quic::server::run_quic_server(
+                qaddr,
+                certs,
+                key,
+                qstore,
+                masq,
+                Arc::new(leshiy_reality::egress::DirectEgress),
+            )
+            .await
             {
                 tracing::error!(error = %e, "QUIC server exited");
             }
