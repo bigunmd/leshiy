@@ -1071,3 +1071,215 @@ async fn reality_cli_auto_both_dead() {
     // (status is already consumed; we just assert it exited promptly above.)
     eprintln!("reality_cli_auto_both_dead: client exited in {elapsed:?} (budget={budget:?}) ✓");
 }
+
+/// M3b smoke: 3-process connector chain  client → Entry → Exit → echo.
+///
+/// Topology:
+///   echo (in-process TCP)
+///   ← Exit   (`leshiy server`, DirectEgress, QUIC front exposed, real exit)
+///   ← Entry  (`leshiy server`, ConnectorEgress → Exit over QUIC)
+///   ← client (`leshiy client --transport tcp`, reaches Entry over REALITY)
+///
+/// Steps:
+///  1. Spawn echo + rustls dest (reused for both servers' REALITY fronts).
+///  2. `server-init` Exit (with --quic-listen) → capture Exit's URI (has quic= + qcert=).
+///  3. Start `leshiy server` for Exit; wait for its REALITY TCP port + brief sleep for QUIC.
+///  4. `server-init` Entry (with --connector '<exit-uri>') → capture Entry's URI (REALITY only).
+///  5. Start `leshiy server` for Entry (eagerly connects to Exit → Exit must be up).
+///     Wait for Entry's REALITY TCP port.
+///  6. Start `leshiy client --transport tcp --uri '<entry-uri>' --socks <sp>`.
+///  7. Drive SOCKS5 → echo with an 80×200 ms retry budget.
+#[tokio::test]
+async fn connector_cli_end_to_end() {
+    let bin = env!("CARGO_BIN_EXE_leshiy");
+
+    // ── 1. In-process rustls dest + echo server ───────────────────────────
+    // Both servers share the same rustls dest for their REALITY fronts.
+    let dest = spawn_rustls_dest().await;
+    let echo = spawn_echo().await;
+
+    // ── 2. Reserve ports (all distinct) ──────────────────────────────────
+    // Exit: REALITY TCP port, QUIC UDP port.
+    let (exit_tcp_l, exit_tcp_port) = reserve_port();
+    let (exit_quic_sock, exit_quic_port) = reserve_udp_port();
+    // Entry: REALITY TCP port.
+    let (entry_tcp_l, entry_tcp_port) = reserve_port();
+    // Client: SOCKS port.
+    let (socks_l, socks_port) = reserve_port();
+
+    // ── 3a. server-init for Exit (with --quic-listen) ─────────────────────
+    let exit_cfg_dir = make_temp_dir("connector-exit");
+    let exit_cfg_path = exit_cfg_dir.join("server.toml");
+    let exit_cfg_str = exit_cfg_path.to_str().unwrap();
+
+    // Release the UDP socket so server-init can claim the port during cert gen.
+    drop(exit_quic_sock);
+
+    let exit_init_out = std::process::Command::new(bin)
+        .args([
+            "server-init",
+            "--host",
+            &format!("127.0.0.1:{exit_tcp_port}"),
+            "--listen",
+            &format!("127.0.0.1:{exit_tcp_port}"),
+            "--dest",
+            &dest,
+            "--quic-listen",
+            &format!("127.0.0.1:{exit_quic_port}"),
+            "--out",
+            exit_cfg_str,
+        ])
+        .output()
+        .expect("failed to run server-init for Exit");
+    assert!(
+        exit_init_out.status.success(),
+        "server-init (Exit) failed: {}",
+        String::from_utf8_lossy(&exit_init_out.stderr)
+    );
+    let exit_init_stdout = String::from_utf8_lossy(&exit_init_out.stdout);
+    // The Exit URI must contain quic= and qcert= (the connector credential).
+    let exit_uri = exit_init_stdout
+        .lines()
+        .find(|l| l.starts_with("leshiy://") && l.contains("quic="))
+        .unwrap_or_else(|| {
+            panic!("no leshiy:// URI with quic= in Exit server-init output:\n{exit_init_stdout}")
+        })
+        .to_string();
+    assert!(
+        exit_uri.contains("qcert="),
+        "Exit URI missing qcert= (pin not provisioned): {exit_uri}"
+    );
+
+    // ── 3b. Start Exit server ─────────────────────────────────────────────
+    drop(exit_tcp_l);
+    let _exit_server = Kill(
+        std::process::Command::new(bin)
+            .args(["server", "--config", exit_cfg_str])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn Exit server"),
+    );
+
+    // Wait for Exit REALITY TCP port (up to 10 s).
+    let exit_tcp_addr = format!("127.0.0.1:{exit_tcp_port}");
+    for i in 0..100 {
+        match TcpStream::connect(&exit_tcp_addr).await {
+            Ok(_) => break,
+            Err(_) => {
+                if i == 99 {
+                    let _ = std::fs::remove_dir_all(&exit_cfg_dir);
+                    panic!("Exit server never came up on {exit_tcp_addr}");
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    // Brief extra pause for the QUIC UDP socket to bind.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // ── 4. server-init for Entry (with --connector '<exit-uri>') ─────────
+    let entry_cfg_dir = make_temp_dir("connector-entry");
+    let entry_cfg_path = entry_cfg_dir.join("server.toml");
+    let entry_cfg_str = entry_cfg_path.to_str().unwrap();
+
+    let entry_init_out = std::process::Command::new(bin)
+        .args([
+            "server-init",
+            "--host",
+            &format!("127.0.0.1:{entry_tcp_port}"),
+            "--listen",
+            &format!("127.0.0.1:{entry_tcp_port}"),
+            "--dest",
+            &dest,
+            "--connector",
+            &exit_uri,
+            "--out",
+            entry_cfg_str,
+        ])
+        .output()
+        .expect("failed to run server-init for Entry");
+    assert!(
+        entry_init_out.status.success(),
+        "server-init (Entry) failed: {}",
+        String::from_utf8_lossy(&entry_init_out.stderr)
+    );
+    let entry_init_stdout = String::from_utf8_lossy(&entry_init_out.stdout);
+    // The Entry URI is what the client dials (REALITY front, no quic= needed).
+    let entry_uri = entry_init_stdout
+        .lines()
+        .find(|l| l.starts_with("leshiy://"))
+        .unwrap_or_else(|| {
+            panic!("no leshiy:// URI in Entry server-init output:\n{entry_init_stdout}")
+        })
+        .to_string();
+
+    // ── 5. Start Entry server (eagerly connects to Exit via ConnectorEgress) ─
+    drop(entry_tcp_l);
+    let _entry_server = Kill(
+        std::process::Command::new(bin)
+            .args(["server", "--config", entry_cfg_str])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn Entry server"),
+    );
+
+    // Wait for Entry REALITY TCP port (up to 10 s).
+    let entry_tcp_addr = format!("127.0.0.1:{entry_tcp_port}");
+    for i in 0..100 {
+        match TcpStream::connect(&entry_tcp_addr).await {
+            Ok(_) => break,
+            Err(_) => {
+                if i == 99 {
+                    let _ = std::fs::remove_dir_all(&exit_cfg_dir);
+                    let _ = std::fs::remove_dir_all(&entry_cfg_dir);
+                    panic!("Entry server never came up on {entry_tcp_addr}");
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+
+    // ── 6. Start client (REALITY transport to Entry) ──────────────────────
+    drop(socks_l);
+    let _client = Kill(
+        std::process::Command::new(bin)
+            .args([
+                "client",
+                "--uri",
+                &entry_uri,
+                "--transport",
+                "tcp",
+                "--socks",
+                &format!("127.0.0.1:{socks_port}"),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn leshiy client"),
+    );
+
+    // ── 7. Retry SOCKS5 → echo (generous budget: 80 × 200 ms = 16 s) ─────
+    let socks_addr = format!("127.0.0.1:{socks_port}");
+    let mut last_err = String::from("(no attempt yet)");
+    for _ in 0..80 {
+        match try_socks(&socks_addr, &echo).await {
+            Ok(()) => {
+                let _ = std::fs::remove_dir_all(&exit_cfg_dir);
+                let _ = std::fs::remove_dir_all(&entry_cfg_dir);
+                return; // PASS: payload round-tripped Entry→Exit→echo
+            }
+            Err(e) => {
+                last_err = e;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&exit_cfg_dir);
+    let _ = std::fs::remove_dir_all(&entry_cfg_dir);
+    panic!(
+        "connector_cli_end_to_end failed after 80 retries (~16 s): {last_err}\n\
+         (Entry→Exit→echo chain did not establish)"
+    );
+}

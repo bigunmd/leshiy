@@ -40,6 +40,7 @@ use zeroize::Zeroizing;
 
 const USER_SID: [u8; 8] = [1; 8];
 const CONNECTOR_SID: [u8; 8] = [2; 8];
+const EXIT_SID: [u8; 8] = [3; 8];
 
 // ---------------------------------------------------------------------------
 // Common helpers
@@ -574,6 +575,139 @@ async fn roundtrip_through_egress(
     } else {
         Err(format!("payload mismatch: got {:?}", got))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: connector_chain_three_hops  (A → B → C → echo)
+//
+// C (DirectEgress, EXIT_SID=[3;8]) ← B (ConnectorEgress→C, CONNECTOR_SID=[2;8])
+//                                  ← A (ConnectorEgress→B, USER_SID=[1;8])
+//                                  ← client
+//
+// Build order: C first (no dependencies), then B (connects to C), then A
+// (connects to B), then the client.  The payload must travel A→B→C→echo.
+// ---------------------------------------------------------------------------
+
+/// Build an `InMemoryUserStore` with a single user that allows `short_id`.
+fn single_user_store(short_id: [u8; 8]) -> Arc<dyn leshiy_reality::user::UserStore> {
+    Arc::new(InMemoryUserStore::new(vec![User {
+        short_id,
+        enabled: true,
+        expires_at: None,
+        data_cap: None,
+        rate_up: None,
+        rate_down: None,
+    }])) as Arc<dyn leshiy_reality::user::UserStore>
+}
+
+#[tokio::test]
+async fn connector_chain_three_hops() {
+    let echo = spawn_echo().await;
+
+    // --- C: the real exit (DirectEgress). Accepts EXIT_SID=[3;8]. ---
+    let (c_certs, c_key) = self_signed();
+    let c_pin = cert_sha256(c_certs[0].as_ref());
+    let c_addr = free_udp_addr();
+    tokio::spawn({
+        let c_store = single_user_store(EXIT_SID);
+        let c_certs = c_certs.clone();
+        async move {
+            let _ = run_quic_server(
+                c_addr,
+                c_certs,
+                c_key,
+                c_store,
+                Masquerade::default(),
+                Arc::new(DirectEgress),
+            )
+            .await;
+        }
+    });
+    wait_udp(c_addr).await;
+
+    // --- B: mid-hop (ConnectorEgress→C). Accepts CONNECTOR_SID=[2;8]. ---
+    let (b_certs, b_key) = self_signed();
+    let b_pin = cert_sha256(b_certs[0].as_ref());
+    let b_addr = free_udp_addr();
+    let b_egress = ConnectorEgress::connect(
+        c_addr,
+        "example.test",
+        EXIT_SID,
+        CertVerification::Pinned(c_pin),
+    )
+    .await
+    .expect("ConnectorEgress::connect B→C must succeed");
+    tokio::spawn({
+        let b_store = single_user_store(CONNECTOR_SID);
+        let b_certs = b_certs.clone();
+        async move {
+            let _ = run_quic_server(
+                b_addr,
+                b_certs,
+                b_key,
+                b_store,
+                Masquerade::default(),
+                Arc::new(b_egress),
+            )
+            .await;
+        }
+    });
+    wait_udp(b_addr).await;
+
+    // --- A: entry (ConnectorEgress→B). Accepts USER_SID=[1;8]. ---
+    let (a_certs, a_key) = self_signed();
+    let a_pin = cert_sha256(a_certs[0].as_ref());
+    let a_addr = free_udp_addr();
+    let a_egress = ConnectorEgress::connect(
+        b_addr,
+        "example.test",
+        CONNECTOR_SID,
+        CertVerification::Pinned(b_pin),
+    )
+    .await
+    .expect("ConnectorEgress::connect A→B must succeed");
+    tokio::spawn({
+        let a_store = single_user_store(USER_SID);
+        let a_certs = a_certs.clone();
+        async move {
+            let _ = run_quic_server(
+                a_addr,
+                a_certs,
+                a_key,
+                a_store,
+                Masquerade::default(),
+                Arc::new(a_egress),
+            )
+            .await;
+        }
+    });
+    wait_udp(a_addr).await;
+
+    // --- Client: connects to A, gets a SOCKS5 port. ---
+    let socks = free_tcp_addr();
+    tokio::spawn(async move {
+        let _ = run_quic_client(
+            a_addr,
+            "example.test",
+            socks,
+            USER_SID,
+            CertVerification::Pinned(a_pin),
+        )
+        .await;
+    });
+
+    // --- Drive SOCKS5 → echo through the full A→B→C→echo chain. ---
+    let payload = b"chain-three-hops".to_vec();
+    let mut last = String::from("(no attempt yet)");
+    for _ in 0..80 {
+        match socks_connect_echo(socks, &echo, &payload).await {
+            Ok(g) if g == payload => return, // PASS
+            Ok(_) => last = "payload mismatch".into(),
+            Err(e) => last = e,
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("connector_chain_three_hops failed after 80 retries: {last}");
 }
 
 // ---------------------------------------------------------------------------
