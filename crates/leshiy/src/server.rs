@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use leshiy_reality::config::{QuicEndpoint, format_reality_uri_full};
 use leshiy_reality::control::{UriIssuer, serve_control};
-use leshiy_reality::egress::DirectEgress;
+use leshiy_reality::egress::{DirectEgress, Egress};
 use leshiy_reality::handshake::ServerCert;
 use leshiy_reality::server::run_reality_server;
 use leshiy_reality::sqlite_store::SqliteUserStore;
@@ -27,6 +27,8 @@ pub struct InitOptions<'a> {
     pub quic_domain: Option<&'a str>,
     pub quic_cert: Option<&'a str>,
     pub quic_key: Option<&'a str>,
+    /// Optional exit-node `leshiy://` URI (must have a `quic=` endpoint).
+    pub connector: Option<&'a str>,
 }
 
 pub fn init(opts: InitOptions<'_>) -> Result<()> {
@@ -39,6 +41,7 @@ pub fn init(opts: InitOptions<'_>) -> Result<()> {
         quic_domain,
         quic_cert,
         quic_key,
+        connector,
     } = opts;
     // server static x25519 keypair (raw bytes zeroized on drop)
     let mut sk_bytes = Zeroizing::new([0u8; 32]);
@@ -90,6 +93,14 @@ pub fn init(opts: InitOptions<'_>) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    // --- Validate --connector URI (must parse and have a quic= endpoint) ---
+    if let Some(uri) = connector {
+        let u = leshiy_reality::config::RealityUri::parse(uri).context("connector uri")?;
+        if u.quic.is_none() {
+            return Err(anyhow::anyhow!("--connector uri has no quic= endpoint"));
+        }
     }
 
     // --- Optional QUIC provisioning ---
@@ -189,6 +200,7 @@ pub fn init(opts: InitOptions<'_>) -> Result<()> {
         quic_cert_sha256: quic_endpoint
             .as_ref()
             .and_then(|q| q.cert_sha256.as_ref().map(hex::encode)),
+        connector: connector.map(|s| s.to_string()),
     };
     write_secret_file(out, &toml::to_string_pretty(&cfg)?)?;
     println!("REALITY server config written to {out}");
@@ -274,6 +286,37 @@ pub async fn run(config: &str) -> Result<()> {
         (store.clone(), store)
     };
 
+    // --- Build the egress (shared by REALITY and QUIC fronts) ---
+    let egress: Arc<dyn Egress> = match &cfg.connector {
+        Some(uri) => {
+            let u = leshiy_reality::config::RealityUri::parse(uri)
+                .map_err(|e| anyhow::anyhow!("connector uri: {e}"))?;
+            let q = u
+                .quic
+                .ok_or_else(|| anyhow::anyhow!("connector uri has no quic= endpoint"))?;
+            let v = match q.cert_sha256 {
+                Some(p) => leshiy_quic::endpoint::CertVerification::Pinned(p),
+                None => leshiy_quic::endpoint::CertVerification::Roots,
+            };
+            let addr = tokio::net::lookup_host(&q.addr)
+                .await?
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("resolve connector addr {}", q.addr))?;
+            tracing::info!(exit = %q.addr, "connector enabled");
+            Arc::new(
+                leshiy_quic::connector::ConnectorEgress::connect(
+                    addr,
+                    &q.sni,
+                    u.client.short_id,
+                    v,
+                )
+                .await
+                .context("connect to exit")?,
+            ) as Arc<dyn Egress>
+        }
+        None => Arc::new(DirectEgress),
+    };
+
     // --- Optional QUIC server (shares the SAME UserStore) ---
     let quic_endpoint_cfg: Option<QuicEndpoint> = if let Some(ref ql) = cfg.quic_listen {
         let qaddr: std::net::SocketAddr = ql
@@ -327,19 +370,13 @@ pub async fn run(config: &str) -> Result<()> {
         }
         let cert_sha256 = Some(pin);
 
-        // Spawn QUIC server with the SAME store.
+        // Spawn QUIC server with the SAME store and the SAME egress.
         let qstore: Arc<dyn UserStore> = user_store.clone();
         let masq = leshiy_quic::masquerade::Masquerade::default();
+        let qegress = egress.clone();
         tokio::spawn(async move {
-            if let Err(e) = leshiy_quic::server::run_quic_server(
-                qaddr,
-                certs,
-                key,
-                qstore,
-                masq,
-                Arc::new(leshiy_reality::egress::DirectEgress),
-            )
-            .await
+            if let Err(e) =
+                leshiy_quic::server::run_quic_server(qaddr, certs, key, qstore, masq, qegress).await
             {
                 tracing::error!(error = %e, "QUIC server exited");
             }
@@ -380,7 +417,7 @@ pub async fn run(config: &str) -> Result<()> {
 
     tracing::info!(listen = %cfg.listen, dest = %cfg.dest, sock = %sock_path, "leshiy REALITY server up");
 
-    run_reality_server(listener, auth, user_store, Arc::new(DirectEgress), cert)
+    run_reality_server(listener, auth, user_store, egress, cert)
         .await
         .map_err(|e| anyhow::anyhow!("server: {e}"))
 }

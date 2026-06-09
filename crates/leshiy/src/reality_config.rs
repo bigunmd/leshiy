@@ -40,6 +40,11 @@ pub struct RealityServerConfig {
     /// Hex-encoded SHA-256 fingerprint of the QUIC cert (for pinned verification).
     #[serde(default)]
     pub quic_cert_sha256: Option<String>,
+    /// Exit-node `leshiy://` URI.  When set, the server forwards traffic to that exit
+    /// via `ConnectorEgress` (QUIC).  When absent, traffic is forwarded directly
+    /// (`DirectEgress`).
+    #[serde(default)]
+    pub connector: Option<String>,
 }
 
 impl RealityServerConfig {
@@ -92,6 +97,7 @@ mod tests {
             quic_key_path: None,
             quic_domain: None,
             quic_cert_sha256: None,
+            connector: None,
         };
         let ac = c.to_auth_config().unwrap();
         assert_eq!(ac.dest, "www.microsoft.com:443");

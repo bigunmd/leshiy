@@ -42,6 +42,11 @@ pub enum Cmd {
         /// Path to an existing QUIC TLS private key PEM (skips self-signed generation).
         #[arg(long)]
         quic_key: Option<String>,
+        /// Exit-node `leshiy://` URI.  When set, the server becomes a connector (Entry)
+        /// that forwards traffic to the specified Exit node over QUIC.
+        /// The URI must include a `quic=` endpoint (e.g. `quic=host:port&qsni=…`).
+        #[arg(long)]
+        connector: Option<String>,
     },
     /// Run the REALITY server from a config file.
     Server {
