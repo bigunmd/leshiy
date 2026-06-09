@@ -1,0 +1,53 @@
+#!/bin/sh
+# leshiyctl — mode-aware day-2 dispatcher. Reads /etc/leshiy/install.json (written by the
+# installer) to route verbs to native `leshiy` subcommands or docker compose. POSIX sh.
+set -eu
+
+CFGDIR="/etc/leshiy"
+CONFIG="$CFGDIR/server.toml"
+STATE="$CFGDIR/install.json"
+
+mode() {  # "docker" if the install used compose, else "native"
+  if [ -f "$STATE" ] && grep -q '"mode" *: *"docker"' "$STATE" 2>/dev/null; then
+    echo docker
+  else
+    echo native
+  fi
+}
+
+usage() {
+  echo "usage: leshiyctl {status|upgrade|uninstall [--purge]|user ...}" >&2
+  exit 2
+}
+
+[ $# -ge 1 ] || usage
+verb="$1"; shift
+
+case "$verb" in
+  status)
+    if [ "$(mode)" = docker ]; then
+      ( cd "$CFGDIR" && docker compose ps )
+    else
+      leshiy status --config "$CONFIG"
+    fi
+    ;;
+  upgrade)
+    if [ "$(mode)" = docker ]; then
+      ( cd "$CFGDIR" && docker compose pull && docker compose up -d )
+    else
+      leshiy upgrade "$@"
+    fi
+    ;;
+  uninstall)
+    if [ "$(mode)" = docker ]; then
+      ( cd "$CFGDIR" && docker compose down )
+      case "${1:-}" in --purge) rm -rf "$CFGDIR" ;; esac
+    else
+      leshiy uninstall --config "$CONFIG" "$@"
+    fi
+    ;;
+  user)
+    leshiy user "$@" --config "$CONFIG"
+    ;;
+  *) usage ;;
+esac

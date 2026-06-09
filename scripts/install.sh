@@ -184,6 +184,7 @@ services:
     volumes: ["$CFGDIR:/etc/leshiy"]
     restart: unless-stopped
 COMPOSE
+    printf '{"mode":"docker"}\n' > "$CFGDIR/install.json"
     open_firewall
     ( cd "$CFGDIR" && docker compose up -d )
     echo "leshiy running under docker compose."
@@ -191,6 +192,12 @@ COMPOSE
   fi
 
   verify_and_install_binary
+  # Install the day-2 dispatcher (published alongside install.sh in each release).
+  if curl -fsSL "https://github.com/$REPO/releases/latest/download/leshiyctl" -o /usr/local/bin/leshiyctl 2>/dev/null; then
+    chmod +x /usr/local/bin/leshiyctl
+  else
+    echo "note: leshiyctl not fetched (older release?); manage with 'leshiy <verb>' directly"
+  fi
   install -d -m700 "$CFGDIR"
   if [ -f "$CFGDIR/server.toml" ]; then
     echo "existing install detected at $CFGDIR/server.toml — upgrading binary, keeping identity."
@@ -201,7 +208,7 @@ COMPOSE
         --host "$HOST" --dest "$DEST" --out "$CFGDIR/server.toml" \
         $(quic_args) $(role_args) \
         --summary-json | tee /dev/tty | grep -m1 '^{')"
-    echo "$summary" > "$CFGDIR/install.json"
+    printf '%s\n{"mode":"native"}\n' "$summary" > "$CFGDIR/install.json"
   fi
   open_firewall
   write_unit_and_start

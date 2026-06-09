@@ -60,6 +60,7 @@ jobs:
             SHA256SUMS
             SHA256SUMS.minisig
             scripts/install.sh
+            scripts/leshiyctl
             scripts/minisign.pub
 
   image:
