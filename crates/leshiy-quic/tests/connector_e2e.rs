@@ -516,3 +516,155 @@ async fn connector_enforces_at_entry() {
         "connector_enforces_at_entry: echoed {echoed} bytes before cut (cap={CAP}, payload={PAYLOAD})"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Helpers for the reconnect test
+// ---------------------------------------------------------------------------
+
+/// Deep-copy a PrivateKeyDer by serializing to DER bytes and rebuilding.
+fn clone_key(
+    key: &rustls::pki_types::PrivateKeyDer<'static>,
+) -> rustls::pki_types::PrivateKeyDer<'static> {
+    let der: Vec<u8> = match key {
+        rustls::pki_types::PrivateKeyDer::Pkcs1(k) => k.secret_pkcs1_der().to_vec(),
+        rustls::pki_types::PrivateKeyDer::Sec1(k) => k.secret_sec1_der().to_vec(),
+        rustls::pki_types::PrivateKeyDer::Pkcs8(k) => k.secret_pkcs8_der().to_vec(),
+        _ => panic!("unknown key type"),
+    };
+    rustls::pki_types::PrivateKeyDer::try_from(der).expect("clone key")
+}
+
+/// Poll until a UDP socket can be bound at `addr`, indicating the previous holder released it.
+/// Actually we just sleep briefly since UDP servers claim the addr immediately on spawn.
+async fn wait_udp(addr: std::net::SocketAddr) {
+    // Give the server task time to bind and start accepting.
+    // We probe by trying to bind (which should FAIL while server holds the port, meaning it's ready).
+    for _ in 0..50 {
+        // If we can bind, the server hasn't taken the port yet — wait more.
+        // If bind fails, the server owns the port — it's ready.
+        if std::net::UdpSocket::bind(addr).is_err() {
+            return; // server is up
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // Last resort: just wait a bit.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+}
+
+/// Open a single tunnel through the egress to `target`, write `payload`, read it back.
+async fn roundtrip_through_egress(
+    eg: &leshiy_quic::connector::ConnectorEgress,
+    target: &str,
+    payload: &[u8],
+) -> Result<(), String> {
+    use leshiy_reality::egress::Egress;
+    let (mut r, mut w) = eg.open(target).await.map_err(|e| e.to_string())?;
+    w.write_all(payload).await.map_err(|e| e.to_string())?;
+    let mut got = vec![0u8; payload.len()];
+    let mut n = 0;
+    while n < payload.len() {
+        let k = r.read(&mut got[n..]).await.map_err(|e| e.to_string())?;
+        if k == 0 {
+            return Err("EOF before full payload".into());
+        }
+        n += k;
+    }
+    if got == payload {
+        Ok(())
+    } else {
+        Err(format!("payload mismatch: got {:?}", got))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 4: connector_reconnects_after_exit_restart
+//
+// ConnectorEgress → B-v1; kill B-v1; restart B-v2 at same addr+cert; next open reconnects.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn connector_reconnects_after_exit_restart() {
+    let echo = spawn_echo().await;
+    let (b_certs, b_key) = self_signed();
+    let b_pin = cert_sha256(b_certs[0].as_ref());
+    let b_addr = free_udp_addr();
+    let b_store = || {
+        Arc::new(InMemoryUserStore::new(vec![User {
+            short_id: [2; 8],
+            enabled: true,
+            expires_at: None,
+            data_cap: None,
+            rate_up: None,
+            rate_down: None,
+        }])) as Arc<dyn leshiy_reality::user::UserStore>
+    };
+
+    // Spawn B v1
+    let b1 = tokio::spawn({
+        let (c, k, s) = (b_certs.clone(), clone_key(&b_key), b_store());
+        async move {
+            let _ = run_quic_server(
+                b_addr,
+                c,
+                k,
+                s,
+                Masquerade::default(),
+                Arc::new(DirectEgress),
+            )
+            .await;
+        }
+    });
+    wait_udp(b_addr).await;
+
+    let eg = leshiy_quic::connector::ConnectorEgress::connect(
+        b_addr,
+        "example.test",
+        [2; 8],
+        CertVerification::Pinned(b_pin),
+    )
+    .await
+    .expect("connect to B-v1");
+
+    // Open #1 — must succeed through B-v1 to echo
+    roundtrip_through_egress(&eg, &echo, b"one")
+        .await
+        .expect("first roundtrip must succeed");
+
+    // Restart B at the same addr
+    b1.abort();
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await; // let port free
+
+    let b2 = tokio::spawn({
+        let (c, k, s) = (b_certs.clone(), clone_key(&b_key), b_store());
+        async move {
+            let _ = run_quic_server(
+                b_addr,
+                c,
+                k,
+                s,
+                Masquerade::default(),
+                Arc::new(DirectEgress),
+            )
+            .await;
+        }
+    });
+    wait_udp(b_addr).await;
+
+    // Open #2 — must RECONNECT (old conn is dead) and round-trip again
+    let mut last = String::new();
+    let mut ok = false;
+    for _ in 0..30 {
+        match roundtrip_through_egress(&eg, &echo, b"two").await {
+            Ok(_) => {
+                ok = true;
+                break;
+            }
+            Err(e) => {
+                last = e;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+    assert!(ok, "connector did not reconnect after exit restart: {last}");
+    let _ = (b2,);
+}
