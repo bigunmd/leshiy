@@ -25,6 +25,7 @@ hmac.workspace = true
 subtle.workspace = true
 rusqlite.workspace = true
 tracing.workspace = true
+async-trait.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

@@ -4,6 +4,7 @@ pub mod auth;
 pub mod client;
 pub mod config;
 pub mod control;
+pub mod egress;
 pub mod error;
 pub mod handshake;
 pub mod netguard;
@@ -13,4 +14,5 @@ pub mod sqlite_store;
 pub mod tunnel;
 pub mod user;
 
+pub use egress::{DirectEgress, Egress, EgressStream};
 pub use error::{RealityError, Result};
