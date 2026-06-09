@@ -29,6 +29,9 @@ zeroize.workspace = true
 rand.workspace = true
 x25519-dalek.workspace = true
 serde_json.workspace = true
+qrcode.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
