@@ -201,6 +201,8 @@ COMPOSE
   install -d -m700 "$CFGDIR"
   if [ -f "$CFGDIR/server.toml" ]; then
     echo "existing install detected at $CFGDIR/server.toml — upgrading binary, keeping identity."
+    # Ensure leshiyctl can detect the mode even on boxes first provisioned by an older installer.
+    [ -f "$CFGDIR/install.json" ] || printf '{"mode":"native"}\n' > "$CFGDIR/install.json"
   else
     # Hand off to the Rust wizard; capture the JSON summary line.
     # shellcheck disable=SC2046  # intentional word-splitting of quic_args (0 or 2 args)
