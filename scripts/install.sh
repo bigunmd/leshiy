@@ -37,8 +37,10 @@ detect_target() {
 
 resolve_version() {
   if [ "$VERSION" = "latest" ]; then
-    curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-      | grep -m1 '"tag_name"' | cut -d'"' -f4
+    v="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+      | grep -m1 '"tag_name"' | cut -d'"' -f4)"
+    [ -n "$v" ] || die "could not resolve latest release for $REPO (try --version vX.Y.Z)"
+    echo "$v"
   else
     echo "$VERSION"
   fi
@@ -90,33 +92,52 @@ open_firewall() {
   fi
 }
 
+ensure_user() {  # create an unprivileged system user `leshiy` if missing
+  id leshiy >/dev/null 2>&1 && return 0
+  if have useradd; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin leshiy
+  elif have adduser; then  # busybox/alpine
+    adduser -S -D -H -s /sbin/nologin leshiy
+  else
+    die "cannot create 'leshiy' system user (no useradd/adduser found)"
+  fi
+}
+
 write_unit_and_start() {
-  install -d -m700 "$CFGDIR"
+  ensure_user
+  # The service runs as the unprivileged `leshiy` user, which must own its
+  # config+state dir (config 0600, plus the sqlite DB and control socket).
+  chown -R leshiy "$CFGDIR"
   cat > /etc/systemd/system/leshiy.service <<'UNIT'
 [Unit]
 Description=Leshiy stealth tunnel
 After=network-online.target
 Wants=network-online.target
+
 [Service]
-DynamicUser=yes
+User=leshiy
 ExecStart=/usr/local/bin/leshiy server --config /etc/leshiy/server.toml
 AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-ReadWritePaths=/etc/leshiy /var/lib/leshiy
+ReadWritePaths=/etc/leshiy
 Restart=on-failure
 RestartSec=2
+
 [Install]
 WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
-  systemctl enable --now leshiy
+  systemctl enable leshiy >/dev/null 2>&1 || true
+  systemctl restart leshiy
 }
 
 quic_args() {  # echo the quic flag (word-split intentionally by caller) when enabled
   [ "$QUIC" -eq 1 ] && printf '%s' "--quic-listen 0.0.0.0:443"
+  return 0
 }
 
 # ASSUME_YES is consumed by interactive prompts in later phases of the installer;
@@ -144,7 +165,7 @@ main() {
     cat > "$CFGDIR/docker-compose.yaml" <<COMPOSE
 services:
   leshiy:
-    image: ghcr.io/$REPO:latest
+    image: ghcr.io/$REPO:$IMG_TAG
     command: server --config /etc/leshiy/server.toml
     network_mode: host
     volumes: ["$CFGDIR:/etc/leshiy"]
@@ -158,13 +179,17 @@ COMPOSE
 
   verify_and_install_binary
   install -d -m700 "$CFGDIR"
-  # Hand off to the Rust wizard; capture the JSON summary line.
-  # shellcheck disable=SC2046  # intentional word-splitting of quic_args (0 or 2 args)
-  summary="$("$BINDIR/leshiy" quickstart \
-      --host "$HOST" --dest "$DEST" --out "$CFGDIR/server.toml" \
-      $(quic_args) \
-      --summary-json | tee /dev/tty | grep -m1 '^{')"
-  echo "$summary" > "$CFGDIR/install.json"
+  if [ -f "$CFGDIR/server.toml" ]; then
+    echo "existing install detected at $CFGDIR/server.toml — upgrading binary, keeping identity."
+  else
+    # Hand off to the Rust wizard; capture the JSON summary line.
+    # shellcheck disable=SC2046  # intentional word-splitting of quic_args (0 or 2 args)
+    summary="$("$BINDIR/leshiy" quickstart \
+        --host "$HOST" --dest "$DEST" --out "$CFGDIR/server.toml" \
+        $(quic_args) \
+        --summary-json | tee /dev/tty | grep -m1 '^{')"
+    echo "$summary" > "$CFGDIR/install.json"
+  fi
   open_firewall
   write_unit_and_start
   if systemctl is-active --quiet leshiy; then
