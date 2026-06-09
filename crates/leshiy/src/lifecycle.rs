@@ -47,6 +47,31 @@ pub fn uninstall(config: &str, purge: bool, host: &dyn HostOps) -> Result<()> {
     Ok(())
 }
 
+/// Fetch+verify the release binary for `version` and restart the service onto it.
+pub fn upgrade(repo: &str, version: &str, host: &dyn HostOps) -> Result<()> {
+    host.fetch_verified_binary(repo, version, "/usr/local/bin/leshiy")?;
+    host.systemctl(&["restart", "leshiy"])?;
+    println!("upgraded to {version} and restarted");
+    Ok(())
+}
+
+/// Resolve the latest release tag for `repo` via the GitHub API (shells to curl).
+pub fn latest_version(repo: &str) -> Result<String> {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "curl -fsSL https://api.github.com/repos/{repo}/releases/latest \
+             | grep -m1 '\"tag_name\"' | cut -d'\"' -f4"
+        ))
+        .output()
+        .context("query latest release")?;
+    let tag = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if tag.is_empty() {
+        anyhow::bail!("could not resolve latest release for {repo} (pass --version)");
+    }
+    Ok(tag)
+}
+
 pub fn status(config: &str, host: &dyn HostOps) -> Result<()> {
     let toml_str = std::fs::read_to_string(config).with_context(|| format!("read {config}"))?;
     let cfg: RealityServerConfig = toml::from_str(&toml_str).context("parse config")?;
@@ -123,5 +148,25 @@ mod tests {
         let host = MockHostOps::new(true);
         uninstall("/etc/leshiy/server.toml", true, &host).unwrap();
         assert!(host.calls().contains(&"remove:/etc/leshiy".to_string()));
+    }
+
+    #[test]
+    fn upgrade_fetches_then_restarts_in_order() {
+        let host = MockHostOps::new(true);
+        upgrade("bigunmd/leshiy", "v0.2.0", &host).unwrap();
+        let c = host.calls();
+        let fetch = c
+            .iter()
+            .position(|s| s.starts_with("fetch:bigunmd/leshiy:v0.2.0:"))
+            .unwrap();
+        let restart = c
+            .iter()
+            .position(|s| s == "systemctl:restart leshiy")
+            .unwrap();
+        assert!(
+            fetch < restart,
+            "must fetch+verify before restarting: {c:?}"
+        );
+        assert!(c[fetch].ends_with(":/usr/local/bin/leshiy"));
     }
 }

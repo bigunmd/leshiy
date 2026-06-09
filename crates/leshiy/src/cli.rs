@@ -111,6 +111,15 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: UserCmd,
     },
+    /// Download + verify the latest (or --version) release binary and restart the service.
+    Upgrade {
+        /// GitHub repo to pull from.
+        #[arg(long, default_value = "bigunmd/leshiy")]
+        repo: String,
+        /// Release tag to install (e.g. v0.2.0). Defaults to the latest release.
+        #[arg(long)]
+        version: Option<String>,
+    },
 }
 
 /// Connector role for `quickstart`.

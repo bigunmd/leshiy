@@ -2,9 +2,6 @@
 //! without root, systemd, or the network. `RealHostOps` shells out; tests use `MockHostOps`.
 use anyhow::{Context, Result};
 
-// The non-status methods (systemctl/remove_path/firewall_revoke/fetch_verified_binary)
-// and MINISIGN_PUB gain call sites in `leshiy uninstall`/`upgrade` (next tasks).
-#[allow(dead_code)]
 pub trait HostOps {
     /// Is the systemd unit currently active?
     fn service_active(&self, unit: &str) -> bool;
@@ -100,7 +97,6 @@ install -Dm755 "$tmp/leshiy" "{dest}""#,
     }
 }
 
-#[allow(dead_code)]
 /// The release signing public key, embedded at build time (last line is the key).
 pub const MINISIGN_PUB: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

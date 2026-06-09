@@ -82,6 +82,13 @@ async fn main() -> anyhow::Result<()> {
         cli::Cmd::Uninstall { config, purge } => {
             lifecycle::uninstall(&config, purge, &host::RealHostOps)?
         }
+        cli::Cmd::Upgrade { repo, version } => {
+            let v = match version {
+                Some(v) => v,
+                None => lifecycle::latest_version(&repo)?,
+            };
+            lifecycle::upgrade(&repo, &v, &host::RealHostOps)?
+        }
     }
     Ok(())
 }
