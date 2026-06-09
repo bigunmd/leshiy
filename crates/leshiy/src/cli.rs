@@ -86,12 +86,29 @@ pub enum Cmd {
         /// Emit one machine-readable JSON summary line on stdout (for install.sh).
         #[arg(long)]
         summary_json: bool,
+        /// Connector role: single (default), entry, or exit.
+        #[arg(long, default_value = "single")]
+        role: Role,
+        /// Exit node's `leshiy://` URI (the connector credential) — required for --role entry.
+        #[arg(long)]
+        exit_uri: Option<String>,
     },
     /// Manage users on a running leshiy server via its control socket.
     User {
         #[command(subcommand)]
         cmd: UserCmd,
     },
+}
+
+/// Connector role for `quickstart`.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Role {
+    /// Standalone server (default): clients connect, server egresses directly.
+    Single,
+    /// Censor-facing entry that forwards to an exit via `--exit-uri`.
+    Entry,
+    /// Clean-egress exit (requires QUIC); its share URI is the connector credential.
+    Exit,
 }
 
 /// Transport selection for the client subcommand.

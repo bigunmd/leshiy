@@ -43,9 +43,28 @@ pub struct QuickstartOpts<'a> {
     pub quic_listen: Option<&'a str>,
     pub no_probe: bool,
     pub summary_json: bool,
+    pub role: crate::cli::Role,
+    pub exit_uri: Option<&'a str>,
 }
 
 pub async fn run(opts: QuickstartOpts<'_>) -> Result<()> {
+    use crate::cli::Role;
+    // Role-specific preconditions.
+    let connector: Option<&str> = match opts.role {
+        Role::Entry => Some(
+            opts.exit_uri
+                .ok_or_else(|| anyhow::anyhow!("--role entry requires --exit-uri <EXIT_URI>"))?,
+        ),
+        Role::Exit => {
+            if opts.quic_listen.is_none() {
+                return Err(anyhow::anyhow!(
+                    "--role exit requires --quic-listen <public-host:port> (the carrier the entry dials)"
+                ));
+            }
+            None
+        }
+        Role::Single => None,
+    };
     // 1. Validate the dest negotiates TLS1.3 (unless explicitly skipped).
     if !opts.no_probe {
         let (h, p) = opts.dest.rsplit_once(':').unwrap_or((opts.dest, "443"));
@@ -70,11 +89,21 @@ pub async fn run(opts: QuickstartOpts<'_>) -> Result<()> {
         quic_domain: None,
         quic_cert: None,
         quic_key: None,
-        connector: None,
+        connector,
     })?;
-    // 3. Show the QR for phones.
-    println!("\nScan to import on a device:");
-    println!("{}", qr_string(&out.uri));
+    // 3. Show the QR for phones (or the connector credential for exit role).
+    match opts.role {
+        Role::Exit => {
+            println!(
+                "\nThis is the EXIT's connector credential — give it to the entry's --exit-uri:"
+            );
+            println!("{}", out.uri);
+        }
+        Role::Single | Role::Entry => {
+            println!("\nShare with clients — scan to import on a device:");
+            println!("{}", qr_string(&out.uri));
+        }
+    }
     // 4. Emit the machine-readable summary the installer parses.
     if opts.summary_json {
         let summary = serde_json::json!({

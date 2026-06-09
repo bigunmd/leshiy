@@ -53,6 +53,8 @@ async fn main() -> anyhow::Result<()> {
             quic_listen,
             no_probe,
             summary_json,
+            role,
+            exit_uri,
         } => {
             quickstart::run(quickstart::QuickstartOpts {
                 host: &host,
@@ -62,6 +64,8 @@ async fn main() -> anyhow::Result<()> {
                 quic_listen: quic_listen.as_deref(),
                 no_probe,
                 summary_json,
+                role,
+                exit_uri: exit_uri.as_deref(),
             })
             .await?
         }
