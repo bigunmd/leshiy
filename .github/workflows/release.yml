@@ -2,14 +2,15 @@ name: release
 on:
   push:
     tags: ["v*"]
+# Least privilege by default; each job widens only what it needs.
 permissions:
-  contents: write   # create releases
-  packages: write   # push to GHCR
-  id-token: write   # cosign keyless
+  contents: read
 
 jobs:
   binaries:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
         target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
@@ -35,6 +36,8 @@ jobs:
   release:
     needs: binaries
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the GitHub Release
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -47,8 +50,8 @@ jobs:
           MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
         run: |
           printf '%s\n' "$MINISIGN_SECRET_KEY" > minisign.key
+          trap 'rm -f minisign.key' EXIT   # never leave the secret key around
           echo "$MINISIGN_PASSWORD" | minisign -S -s minisign.key -m SHA256SUMS
-          rm -f minisign.key
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -61,6 +64,10 @@ jobs:
 
   image:
     runs-on: ubuntu-latest
+    permissions:
+      packages: write   # push to GHCR
+      id-token: write   # cosign keyless (OIDC)
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3

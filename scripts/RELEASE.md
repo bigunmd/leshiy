@@ -73,3 +73,10 @@ minisign -Vm SHA256SUMS -p scripts/minisign.pub
 - The signing key is the **root of trust** for the native installer. Treat the secret key
   like any production signing key; rotating it means re-publishing `minisign.pub` and the
   embedded `MINISIGN_PUB` line in `install.sh`.
+- **Pin third-party actions to commit SHAs before the first signed release.** The `release`
+  job has `MINISIGN_SECRET_KEY` in its environment, so any action it runs is inside the
+  signing-key blast radius. The workflow currently pins to mutable tags
+  (`actions/checkout@v4`, `actions/download-artifact@v4`, `softprops/action-gh-release@v2`,
+  `docker/*@v3`/`@v6`, `sigstore/cosign-installer@v3`). Replace each `@vN` with the action's
+  full commit SHA (the tag is mutable; the SHA is not) before tagging `v0.1.0`. Per-job
+  `permissions:` are already scoped to least privilege.
