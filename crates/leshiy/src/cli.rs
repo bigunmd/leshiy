@@ -98,6 +98,14 @@ pub enum Cmd {
         #[arg(long, default_value = "leshiy-server.toml")]
         config: String,
     },
+    /// Stop and remove the installed server (keeps config unless --purge).
+    Uninstall {
+        #[arg(long, default_value = "leshiy-server.toml")]
+        config: String,
+        /// Also delete the config directory (identity, user DB). Irreversible.
+        #[arg(long)]
+        purge: bool,
+    },
     /// Manage users on a running leshiy server via its control socket.
     User {
         #[command(subcommand)]

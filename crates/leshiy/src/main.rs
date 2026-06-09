@@ -79,6 +79,9 @@ async fn main() -> anyhow::Result<()> {
         } => client::run(&uri, &socks, transport).await?,
         cli::Cmd::User { cmd } => user_cli::run(cmd).await?,
         cli::Cmd::Status { config } => lifecycle::status(&config, &host::RealHostOps)?,
+        cli::Cmd::Uninstall { config, purge } => {
+            lifecycle::uninstall(&config, purge, &host::RealHostOps)?
+        }
     }
     Ok(())
 }

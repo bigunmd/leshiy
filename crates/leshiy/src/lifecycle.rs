@@ -25,6 +25,28 @@ pub fn render_status(r: &StatusReport) -> String {
     )
 }
 
+/// Stop + remove the service and binary. Removes the config dir only when `purge` is set
+/// (so identity/keys are never deleted silently).
+pub fn uninstall(config: &str, purge: bool, host: &dyn HostOps) -> Result<()> {
+    // Stop+disable is best-effort (service may already be gone).
+    let _ = host.systemctl(&["disable", "--now", "leshiy"]);
+    host.remove_path("/etc/systemd/system/leshiy.service")?;
+    let _ = host.systemctl(&["daemon-reload"]);
+    let _ = host.firewall_revoke();
+    host.remove_path("/usr/local/bin/leshiy")?;
+    if purge {
+        let dir = std::path::Path::new(config)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/etc/leshiy".into());
+        host.remove_path(&dir)?;
+        println!("purged {dir}");
+    } else {
+        println!("removed service + binary; kept config (use --purge to remove it)");
+    }
+    Ok(())
+}
+
 pub fn status(config: &str, host: &dyn HostOps) -> Result<()> {
     let toml_str = std::fs::read_to_string(config).with_context(|| format!("read {config}"))?;
     let cfg: RealityServerConfig = toml::from_str(&toml_str).context("parse config")?;
@@ -80,5 +102,26 @@ mod tests {
         status(cfg.to_str().unwrap(), &host).unwrap();
         assert!(host.calls().contains(&"active:leshiy".to_string()));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn uninstall_keeps_config_without_purge() {
+        let host = MockHostOps::new(true);
+        uninstall("/etc/leshiy/server.toml", false, &host).unwrap();
+        let c = host.calls();
+        assert!(c.iter().any(|s| s == "systemctl:disable --now leshiy"));
+        assert!(c.contains(&"remove:/etc/systemd/system/leshiy.service".to_string()));
+        assert!(c.contains(&"systemctl:daemon-reload".to_string()));
+        assert!(c.contains(&"firewall_revoke".to_string()));
+        assert!(c.contains(&"remove:/usr/local/bin/leshiy".to_string()));
+        // Without --purge, the config dir is NOT removed.
+        assert!(!c.iter().any(|s| s == "remove:/etc/leshiy"));
+    }
+
+    #[test]
+    fn uninstall_purge_removes_config_dir() {
+        let host = MockHostOps::new(true);
+        uninstall("/etc/leshiy/server.toml", true, &host).unwrap();
+        assert!(host.calls().contains(&"remove:/etc/leshiy".to_string()));
     }
 }
