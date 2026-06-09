@@ -1,5 +1,6 @@
 mod cli;
 mod client;
+mod quickstart;
 mod reality_config;
 mod server;
 mod user_cli;
