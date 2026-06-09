@@ -93,6 +93,11 @@ pub enum Cmd {
         #[arg(long)]
         exit_uri: Option<String>,
     },
+    /// Show service + config status for an installed server.
+    Status {
+        #[arg(long, default_value = "leshiy-server.toml")]
+        config: String,
+    },
     /// Manage users on a running leshiy server via its control socket.
     User {
         #[command(subcommand)]

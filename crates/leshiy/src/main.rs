@@ -1,5 +1,7 @@
 mod cli;
 mod client;
+mod host;
+mod lifecycle;
 mod quickstart;
 mod reality_config;
 mod server;
@@ -76,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
             transport,
         } => client::run(&uri, &socks, transport).await?,
         cli::Cmd::User { cmd } => user_cli::run(cmd).await?,
+        cli::Cmd::Status { config } => lifecycle::status(&config, &host::RealHostOps)?,
     }
     Ok(())
 }
