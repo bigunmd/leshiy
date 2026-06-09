@@ -1283,3 +1283,106 @@ async fn connector_cli_end_to_end() {
          (Entry→Exit→echo chain did not establish)"
     );
 }
+
+/// Task 3: `leshiy user add --qr` renders the URI AND QR block art on stdout.
+///
+/// Mirrors `reality_cli_user_add_then_tunnel` but only asserts stdout content —
+/// no tunnel is needed to prove the QR flag works.
+#[tokio::test]
+async fn reality_cli_user_add_qr_flag() {
+    let bin = env!("CARGO_BIN_EXE_leshiy");
+
+    // ── 1. In-process rustls dest ─────────────────────────────────────────
+    let dest = spawn_rustls_dest().await;
+
+    // ── 2. Reserve server port ────────────────────────────────────────────
+    let (server_l, server_port) = reserve_port();
+
+    // ── 3. server-init → write config ─────────────────────────────────────
+    let cfg_dir = make_temp_dir("useradd-qr");
+    let cfg_path = cfg_dir.join("server.toml");
+    let cfg_str = cfg_path.to_str().unwrap();
+    let sock_path = cfg_dir.join("leshiy.sock");
+    let sock_str = sock_path.to_str().unwrap().to_string();
+
+    let dest_sni = dest.rsplit_once(':').map(|(h, _)| h).unwrap_or(&dest);
+
+    let out = std::process::Command::new(bin)
+        .args([
+            "server-init",
+            "--host",
+            &format!("127.0.0.1:{server_port}"),
+            "--dest",
+            &dest,
+            "--listen",
+            &format!("127.0.0.1:{server_port}"),
+            "--out",
+            cfg_str,
+        ])
+        .output()
+        .expect("failed to run server-init");
+    assert!(
+        out.status.success(),
+        "server-init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // ── 4. Spawn the server ───────────────────────────────────────────────
+    drop(server_l);
+    let _server = Kill(
+        std::process::Command::new(bin)
+            .args(["server", "--config", cfg_str])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn leshiy server"),
+    );
+
+    // Wait for TCP port.
+    let server_addr = format!("127.0.0.1:{server_port}");
+    for i in 0..50 {
+        match TcpStream::connect(&server_addr).await {
+            Ok(_) => break,
+            Err(_) => {
+                if i == 49 {
+                    let _ = std::fs::remove_dir_all(&cfg_dir);
+                    panic!("leshiy server never came up on {server_addr}");
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    // Wait for control socket.
+    for i in 0..50 {
+        if sock_path.exists() {
+            break;
+        }
+        if i == 49 {
+            let _ = std::fs::remove_dir_all(&cfg_dir);
+            panic!("control socket never appeared at {sock_str}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // ── 5. `leshiy user add --qr` — capture stdout ───────────────────────
+    let add_out = std::process::Command::new(bin)
+        .args([
+            "user", "add", "--qr", "--sni", dest_sni, "--socket", &sock_str,
+        ])
+        .output()
+        .expect("failed to run leshiy user add --qr");
+    assert!(
+        add_out.status.success(),
+        "leshiy user add --qr failed: {}",
+        String::from_utf8_lossy(&add_out.stderr)
+    );
+    let out = String::from_utf8_lossy(&add_out.stdout).to_string();
+
+    let _ = std::fs::remove_dir_all(&cfg_dir);
+
+    assert!(out.contains("leshiy://"), "should print the URI");
+    assert!(
+        out.contains('\u{2588}') || out.contains('\u{2580}') || out.contains('\u{2584}'),
+        "should render a QR for --qr; stdout was:\n{out}"
+    );
+}

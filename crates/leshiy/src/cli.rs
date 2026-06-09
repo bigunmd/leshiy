@@ -151,6 +151,9 @@ pub enum UserCmd {
         /// Explicit path to the control socket (overrides --config-derived path).
         #[arg(long)]
         socket: Option<String>,
+        /// Also render the URI as a scannable QR code.
+        #[arg(long)]
+        qr: bool,
     },
     /// List all users.
     List {
@@ -252,5 +255,8 @@ pub enum UserCmd {
         /// Explicit path to the control socket (overrides --config-derived path).
         #[arg(long)]
         socket: Option<String>,
+        /// Also render the URI as a scannable QR code.
+        #[arg(long)]
+        qr: bool,
     },
 }

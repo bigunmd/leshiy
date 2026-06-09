@@ -249,6 +249,7 @@ pub async fn run(cmd: UserCmd) -> Result<()> {
             expires,
             config,
             socket,
+            qr,
         } => {
             let sock = resolve_socket(&config, socket.as_deref());
             let now = now_unix();
@@ -272,6 +273,9 @@ pub async fn run(cmd: UserCmd) -> Result<()> {
             let resp = call(&sock, req).await?;
             if let Some(uri) = resp["uri"].as_str() {
                 println!("{uri}");
+                if qr {
+                    println!("{}", crate::quickstart::qr_string(uri));
+                }
             }
         }
 
@@ -371,6 +375,7 @@ pub async fn run(cmd: UserCmd) -> Result<()> {
             sni,
             config,
             socket,
+            qr,
         } => {
             let sock = resolve_socket(&config, socket.as_deref());
             let resp = call(
@@ -380,6 +385,9 @@ pub async fn run(cmd: UserCmd) -> Result<()> {
             .await?;
             if let Some(uri) = resp["uri"].as_str() {
                 println!("{uri}");
+                if qr {
+                    println!("{}", crate::quickstart::qr_string(uri));
+                }
             }
         }
     }
