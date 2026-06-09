@@ -24,7 +24,22 @@ pub async fn run_quic_server(
     egress: Arc<dyn Egress>,
 ) -> Result<()> {
     let ep = crate::endpoint::server_endpoint(listen, certs, key)?;
-    while let Some(incoming) = ep.accept().await {
+    serve_quic_on_endpoint(ep, store, masquerade, egress).await
+}
+
+/// Run the accept loop on an already-built [`quinn::Endpoint`], spawning a detached
+/// per-connection handler for each incoming connection.
+///
+/// Exposed so callers (e.g. tests) can own the `Endpoint` and call
+/// `endpoint.close(..)` to immediately tear down ALL of its live connections — which
+/// `run_quic_server` cannot offer because it owns the endpoint internally.
+pub async fn serve_quic_on_endpoint(
+    endpoint: quinn::Endpoint,
+    store: Arc<dyn UserStore>,
+    masquerade: Masquerade,
+    egress: Arc<dyn Egress>,
+) -> Result<()> {
+    while let Some(incoming) = endpoint.accept().await {
         let (store, masq, egress) = (store.clone(), masquerade.clone(), egress.clone());
         tokio::spawn(async move {
             if let Ok(conn) = incoming.await {

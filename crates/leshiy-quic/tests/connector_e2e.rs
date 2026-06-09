@@ -535,8 +535,9 @@ fn clone_key(
     rustls::pki_types::PrivateKeyDer::try_from(der).expect("clone key")
 }
 
-/// Poll until a UDP socket can be bound at `addr`, indicating the previous holder released it.
-/// Actually we just sleep briefly since UDP servers claim the addr immediately on spawn.
+/// Poll until a UDP socket can NO LONGER be bound at `addr` — i.e. the server task has
+/// claimed the port and is ready to accept. (A successful bind means the server hasn't
+/// taken the port yet, so we keep waiting.)
 async fn wait_udp(addr: std::net::SocketAddr) {
     // Give the server task time to bind and start accepting.
     // We probe by trying to bind (which should FAIL while server holds the port, meaning it's ready).
@@ -716,6 +717,23 @@ async fn connector_chain_three_hops() {
 // ConnectorEgress → B-v1; kill B-v1; restart B-v2 at same addr+cert; next open reconnects.
 // ---------------------------------------------------------------------------
 
+/// Build a B-server endpoint at `addr`, retrying the bind for a short while so the test
+/// is robust against the previous holder still releasing the UDP port after `close()`.
+async fn bind_b_endpoint(
+    addr: std::net::SocketAddr,
+    certs: &[CertificateDer<'static>],
+    key: &rustls::pki_types::PrivateKeyDer<'static>,
+) -> quinn::Endpoint {
+    for _ in 0..50 {
+        match leshiy_quic::endpoint::server_endpoint(addr, certs.to_vec(), clone_key(key)) {
+            Ok(ep) => return ep,
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+        }
+    }
+    leshiy_quic::endpoint::server_endpoint(addr, certs.to_vec(), clone_key(key))
+        .expect("bind B endpoint at addr")
+}
+
 #[tokio::test]
 async fn connector_reconnects_after_exit_restart() {
     let echo = spawn_echo().await;
@@ -733,14 +751,13 @@ async fn connector_reconnects_after_exit_restart() {
         }])) as Arc<dyn leshiy_reality::user::UserStore>
     };
 
-    // Spawn B v1
-    let b1 = tokio::spawn({
-        let (c, k, s) = (b_certs.clone(), clone_key(&b_key), b_store());
+    // --- B v1: build the endpoint HERE so the test OWNS it and can close() it. ---
+    let ep1 = bind_b_endpoint(b_addr, &b_certs, &b_key).await;
+    let srv1 = tokio::spawn({
+        let (ep, s) = (ep1.clone(), b_store());
         async move {
-            let _ = run_quic_server(
-                b_addr,
-                c,
-                k,
+            let _ = leshiy_quic::server::serve_quic_on_endpoint(
+                ep,
                 s,
                 Masquerade::default(),
                 Arc::new(DirectEgress),
@@ -748,7 +765,6 @@ async fn connector_reconnects_after_exit_restart() {
             .await;
         }
     });
-    wait_udp(b_addr).await;
 
     let eg = leshiy_quic::connector::ConnectorEgress::connect(
         b_addr,
@@ -759,22 +775,28 @@ async fn connector_reconnects_after_exit_restart() {
     .await
     .expect("connect to B-v1");
 
-    // Open #1 — must succeed through B-v1 to echo
+    // Open #1 — must succeed through B-v1 to echo (this proves conn1 is live).
     roundtrip_through_egress(&eg, &echo, b"one")
         .await
         .expect("first roundtrip must succeed");
 
-    // Restart B at the same addr
-    b1.abort();
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await; // let port free
+    // --- Kill conn1 for real: close() tears down ALL of ep1's live connections
+    //     immediately (not just the accept loop). Then drop ep1 + its server task so the
+    //     UDP socket is released and B-v2 can rebind the same addr. ---
+    ep1.close(0u32.into(), b"restart");
+    srv1.abort();
+    let _ = srv1.await;
+    drop(ep1);
+    // Give the OS a moment to release the UDP socket before rebinding.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
-    let b2 = tokio::spawn({
-        let (c, k, s) = (b_certs.clone(), clone_key(&b_key), b_store());
+    // --- B v2: fresh endpoint at the SAME addr + cert (bind retries until the port frees). ---
+    let ep2 = bind_b_endpoint(b_addr, &b_certs, &b_key).await;
+    let _srv2 = tokio::spawn({
+        let (ep, s) = (ep2.clone(), b_store());
         async move {
-            let _ = run_quic_server(
-                b_addr,
-                c,
-                k,
+            let _ = leshiy_quic::server::serve_quic_on_endpoint(
+                ep,
                 s,
                 Masquerade::default(),
                 Arc::new(DirectEgress),
@@ -784,7 +806,8 @@ async fn connector_reconnects_after_exit_restart() {
     });
     wait_udp(b_addr).await;
 
-    // Open #2 — must RECONNECT (old conn is dead) and round-trip again
+    // Open #2 — conn1 is DEAD, so open_connect transport-fails → ConnectorEgress must
+    // RECONNECT to B-v2 and round-trip again. Retry to absorb B-v2 readiness timing.
     let mut last = String::new();
     let mut ok = false;
     for _ in 0..30 {
@@ -800,5 +823,4 @@ async fn connector_reconnects_after_exit_restart() {
         }
     }
     assert!(ok, "connector did not reconnect after exit restart: {last}");
-    let _ = (b2,);
 }

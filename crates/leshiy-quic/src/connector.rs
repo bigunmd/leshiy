@@ -5,6 +5,7 @@
 //! split read/write halves backed by the h3 stream.  If the connection is dead, `open` silently
 //! re-establishes it (mutex-serialized to avoid a stampede) and retries once.  Enforcement
 //! (rate-limit, data-cap) stays at A.
+use crate::QuicError;
 use crate::client::{QuicConn, open_connect};
 use bytes::{Buf, Bytes};
 use leshiy_reality::egress::{Egress, EgressRead, EgressWrite};
@@ -97,12 +98,21 @@ impl Egress for ConnectorEgress {
         })?;
         match open_connect(&conn, target).await {
             Ok(halves) => Ok(wrap_halves(halves)),
+            // Per-stream failure (e.g. the Exit replied 502 for THIS target) on a healthy
+            // A↔B connection: surface it WITHOUT tearing the connection down. Reconnecting
+            // here would disrupt every other multiplexed user — a DoS amplifier.
+            Err(e @ QuicError::ConnectStatus(_)) => Err(leshiy_reality::RealityError::Malformed(
+                format!("connector: {e}"),
+            )),
+            // Connection/transport failure — the connection is dead. Invalidate and
+            // reconnect once (mutex-serialized), then retry the CONNECT.
             Err(_) => {
-                // Connection is dead — invalidate and reconnect once (mutex-serialized).
                 self.invalidate().await;
                 let conn = self.get_or_connect().await.map_err(|e| {
                     leshiy_reality::RealityError::Malformed(format!("connector reconnect: {e}"))
                 })?;
+                // On the retry the same discrimination applies: a per-stream status error
+                // or a fresh transport error both surface as Err (no second reconnect).
                 let halves = open_connect(&conn, target).await.map_err(|e| {
                     leshiy_reality::RealityError::Malformed(format!("connector: {e}"))
                 })?;

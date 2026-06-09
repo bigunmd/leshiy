@@ -106,7 +106,10 @@ pub async fn open_connect(
         .await
         .map_err(|e| QuicError::Conn(e.to_string()))?;
     if resp.status() != 200 {
-        return Err(QuicError::Conn(format!("connect status {}", resp.status())));
+        // Per-stream failure on a HEALTHY connection (e.g. the Exit's egress replied
+        // 502 because netguard blocked the target). Typed so the caller does NOT tear
+        // down the whole connector connection over a single bad target.
+        return Err(QuicError::ConnectStatus(resp.status().as_u16()));
     }
     Ok(stream.split())
 }
