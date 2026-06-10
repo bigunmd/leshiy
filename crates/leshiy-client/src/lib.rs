@@ -10,6 +10,7 @@
 
 pub mod adapter;
 pub mod error;
+pub mod listener;
 pub mod profile;
 pub mod pump;
 pub mod settings;
@@ -21,6 +22,7 @@ pub mod transport;
 
 pub use adapter::{QuicTunnel, RealTransport, RealityTunnel};
 pub use error::{ClientError, Result};
+pub use listener::serve_metered;
 pub use profile::{Profile, ProfileStore};
 pub use pump::pump;
 pub use settings::{Settings, TransportPref};
