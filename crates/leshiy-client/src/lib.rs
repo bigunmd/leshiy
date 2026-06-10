@@ -6,5 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
+pub mod stats;
 
 pub use error::{ClientError, Result};
+pub use stats::{ByteCounters, Rates, Throughput};
