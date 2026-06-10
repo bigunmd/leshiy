@@ -4,3 +4,7 @@
 //! throughput accounting. Networking (tunnel engine, system proxy, supervisor)
 //! arrives in Plan 2.
 #![forbid(unsafe_code)]
+
+pub mod error;
+
+pub use error::{ClientError, Result};
