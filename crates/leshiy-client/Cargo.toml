@@ -1,0 +1,29 @@
+[package]
+name = "leshiy-client"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+leshiy-core = { path = "../leshiy-core" }
+leshiy-reality = { path = "../leshiy-reality" }
+leshiy-quic = { path = "../leshiy-quic" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+h3 = { workspace = true }
+h3-quinn = { workspace = true }
+
+[dev-dependencies]
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rcgen = { workspace = true }
+x25519-dalek = { workspace = true }
+zeroize = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"

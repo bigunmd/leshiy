@@ -1,0 +1,8 @@
+{
+  "brand": "LESHIY",
+  "state": { "Disconnected": "Отключено", "Connecting": "Подключение…", "Connected": "Подключено", "Reconnecting": "Переподключение…", "Error": "Не удалось подключиться" },
+  "tapToConnect": "Нажмите, чтобы подключиться", "tapToRetry": "нажмите, чтобы повторить", "noConfig": "Нет конфигурации — добавьте", "manageConfigs": "Конфигурации", "total": "всего",
+  "config": { "title": "Конфигурации", "paste": "Вставьте ссылку leshiy://", "fromClipboard": "Из буфера обмена", "fromImage": "Из QR-изображения", "name": "Название", "add": "Добавить", "rename": "Переименовать", "delete": "Удалить", "empty": "Пока нет конфигураций. Вставьте ссылку leshiy:// или отсканируйте QR-изображение.", "invalid": "Это не похоже на ссылку leshiy://.", "orPaste": "или вставьте ссылку" },
+  "settings": { "title": "Настройки", "language": "Язык", "killSwitch": "Аварийное отключение (fail-closed)", "transport": "Транспорт", "socksPort": "Порт SOCKS", "auto": "Авто", "quic": "QUIC", "tcp": "REALITY (TCP)", "restartNote": "Изменения транспорта и порта применятся при следующем запуске." },
+  "close": "Закрыть"
+}

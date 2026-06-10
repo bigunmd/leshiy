@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/leshiy-core", "crates/leshiy", "crates/leshiy-tls", "crates/leshiy-reality", "crates/leshiy-quic"]
+members = ["crates/leshiy-core", "crates/leshiy", "crates/leshiy-tls", "crates/leshiy-reality", "crates/leshiy-quic", "crates/leshiy-client"]
+exclude = ["apps/desktop/src-tauri"]
 
 [workspace.package]
 edition = "2024"
@@ -47,3 +48,4 @@ qrcode = "0.14"
 terminal_size = "0.4"
 rustls-pemfile = "2"
 async-trait = "0.1"
+uuid = { version = "1", features = ["v4"] }

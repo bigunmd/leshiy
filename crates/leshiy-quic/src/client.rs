@@ -12,6 +12,16 @@ use tokio::net::TcpListener;
 pub struct QuicConn {
     pub(crate) send_req: h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
     pub(crate) short_id: [u8; 8],
+    pub(crate) closed: tokio::sync::watch::Receiver<bool>,
+}
+
+impl QuicConn {
+    /// Resolves once the QUIC connection has closed (its h3 driver finished).
+    /// Used by the supervisor to trigger reconnect.
+    pub async fn closed(&self) {
+        let mut rx = self.closed.clone();
+        let _ = rx.wait_for(|v| *v).await;
+    }
 }
 
 /// Establish a QUIC connection to `server_addr` and return a [`QuicConn`].
@@ -33,10 +43,17 @@ pub async fn connect_quic(
         .await
         .map_err(|e| QuicError::Conn(e.to_string()))?;
     // The driver MUST stay alive for the whole connection — poll it forever.
+    // When it completes, the connection has closed: flip the `closed` signal.
+    let (closed_tx, closed_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
         let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
+        let _ = closed_tx.send(true);
     });
-    Ok(QuicConn { send_req, short_id })
+    Ok(QuicConn {
+        send_req,
+        short_id,
+        closed: closed_rx,
+    })
 }
 
 /// Bind a SOCKS5 listener on `socks_addr` and forward every CONNECT request
