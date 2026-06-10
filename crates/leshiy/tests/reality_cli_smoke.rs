@@ -12,8 +12,9 @@
 
 use base64::Engine as _;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use std::collections::HashSet;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -28,21 +29,38 @@ impl Drop for Kill {
     }
 }
 
-/// Reserve a free port, keeping the listener bound until the caller drops it
-/// just before the subprocess binds the port (minimises the TOCTOU window that
-/// flakes on busy CI when the port is grabbed between selection and bind).
+/// Ports already handed out in THIS process. These helpers must drop their listener so a
+/// `leshiy` subprocess can bind the port — which opens a reuse window: a parallel test's
+/// `reserve_*` could grab the just-freed port and bind it first, leaving the original
+/// subprocess unable to bind → "Connection refused" flakes. Recording every handed-out port
+/// (and re-rolling on a duplicate) closes that window for intra-process parallelism. The OS
+/// won't reassign a port while a listener holds it, so a number can only repeat after a drop,
+/// by which time it is in this set and gets skipped. (TCP and UDP share one set — harmless
+/// over-reservation, simpler.)
+static USED_PORTS: LazyLock<Mutex<HashSet<u16>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Reserve a process-unique free TCP port, keeping the listener bound until the caller drops
+/// it just before the subprocess binds the port.
 fn reserve_port() -> (std::net::TcpListener, u16) {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = l.local_addr().unwrap().port();
-    (l, port)
+    loop {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        if USED_PORTS.lock().unwrap().insert(port) {
+            return (l, port);
+        }
+        // Port was handed out earlier in this process — drop and re-roll.
+    }
 }
 
-/// Reserve a free UDP port, keeping the socket bound until the caller drops it.
-/// Used for the QUIC listen port (QUIC is UDP-based).
+/// Reserve a process-unique free UDP port (for the QUIC listen port).
 fn reserve_udp_port() -> (std::net::UdpSocket, u16) {
-    let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let port = s.local_addr().unwrap().port();
-    (s, port)
+    loop {
+        let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = s.local_addr().unwrap().port();
+        if USED_PORTS.lock().unwrap().insert(port) {
+            return (s, port);
+        }
+    }
 }
 
 /// Spawn a rustls TLS 1.3 "dest" server (self-signed cert for www.example.com).
