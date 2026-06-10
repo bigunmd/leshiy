@@ -1,9 +1,9 @@
 use bytes::Buf;
 use leshiy_quic::{
     client::run_quic_client,
-    endpoint::{CertVerification, cert_sha256},
+    endpoint::{CertVerification, cert_sha256, server_endpoint},
     masquerade::Masquerade,
-    server::run_quic_server,
+    server::serve_quic_on_endpoint,
 };
 use leshiy_reality::{
     egress::DirectEgress,
@@ -55,15 +55,6 @@ fn self_signed() -> (
     (vec![cert_der], key_der)
 }
 
-/// Bind a free UDP port, drop the socket, return the address.
-/// The retry loop in the tests tolerates the small TOCTOU window.
-fn free_udp_addr() -> std::net::SocketAddr {
-    let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let a = s.local_addr().unwrap();
-    drop(s);
-    a
-}
-
 /// Bind a free TCP port, drop the listener, return the address.
 fn free_tcp_addr() -> std::net::SocketAddr {
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -72,22 +63,20 @@ fn free_tcp_addr() -> std::net::SocketAddr {
     a
 }
 
-/// Spawn `run_quic_server` and return the UDP address it is listening on plus the SHA-256 pin
-/// of the server's end-entity certificate.
+/// Start a QUIC server on an ephemeral port and return its address plus the SHA-256 pin of
+/// the server's end-entity certificate. RACE-FREE: `server_endpoint` binds and the returned
+/// endpoint OWNS the socket through `serve_quic_on_endpoint`, so the port is never released —
+/// avoiding the bind/drop/rebind window that let a parallel test steal the port (which showed
+/// up as a flaky "certificate pin mismatch").
 async fn start_server(store: Arc<dyn UserStore>) -> (std::net::SocketAddr, [u8; 32]) {
     let (certs, key) = self_signed();
     let pin = cert_sha256(certs[0].as_ref());
-    let bound = free_udp_addr();
+    let ep =
+        server_endpoint("127.0.0.1:0".parse().unwrap(), certs, key).expect("bind quic endpoint");
+    let bound = ep.local_addr().expect("local_addr");
     tokio::spawn(async move {
-        let _ = run_quic_server(
-            bound,
-            certs,
-            key,
-            store,
-            Masquerade::default(),
-            Arc::new(DirectEgress),
-        )
-        .await;
+        let _ =
+            serve_quic_on_endpoint(ep, store, Masquerade::default(), Arc::new(DirectEgress)).await;
     });
     (bound, pin)
 }
