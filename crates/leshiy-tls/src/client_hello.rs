@@ -121,11 +121,10 @@ pub fn build_client_hello_with_entropy(
     msg
 }
 
-/// Build the body bytes for a single TLS extension identified by `etype`.
-///
-/// Only the extension types that appear in the Yandex profile are handled; all
-/// other types (including GREASE entries and opaque extensions whose bodies
-/// are zero-length for fingerprinting purposes) return an empty `Vec`.
+/// Build the body bytes for a single non-GREASE extension identified by `etype`.
+/// (GREASE extension placeholders are handled by the caller, which substitutes the
+/// per-connection ext1/ext2 values and bodies.) Only the extension types that
+/// appear in the Yandex profile are handled; any other type returns an empty `Vec`.
 fn build_extension(
     etype: u16,
     profile: &Profile,
