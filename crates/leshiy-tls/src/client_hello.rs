@@ -198,12 +198,17 @@ fn build_extension(
         // a decode_error.  The extension is then ignored by the server.
         0xfe0d => vec![0x01],
 
+        // application_settings / ALPS (0x44cd) — draft-vvv-tls-alps.
+        // Body: [supported_protocols_list_len u16][proto_len u8][proto bytes].
+        // Authentic Yandex/Chromium advertises only "h2" here (the protocol that
+        // negotiates application settings), distinct from the ALPN list.
+        0x44cd => vec![0x00, 0x03, 0x02, b'h', b'2'],
+
         // All remaining extension types:
         //   - GREASE entries: empty body is valid (GREASE is ignored by servers)
         //   - session_ticket (0x0023): empty body = no session ticket to offer
         //   - extended_master_secret (0x0017): empty body (flag-style extension)
         //   - signed_certificate_timestamp (0x0012): empty body (client request)
-        //   - application_settings / ALPS (0x44cd): unknown to rustls, ignored
         //
         // JA4/JA3 only inspect extension type IDs, so bodies here do not affect
         // the fingerprint hash.
@@ -282,5 +287,47 @@ mod tests {
             bytes.windows(32).any(|w| w == ks),
             "raw bytes must contain the key_share public key"
         );
+    }
+
+    /// Walk a built ClientHello handshake message and return the raw body bytes of
+    /// the first extension whose type equals `etype`.
+    fn ext_body(msg: &[u8], etype: u16) -> Option<Vec<u8>> {
+        // [type 1][len u24][ver 2][random 32][sid_len 1][sid][cs_len u16][cs][comp_len 1][comp]
+        let mut i = 4 + 2 + 32;
+        let sid_len = msg[i] as usize;
+        i += 1 + sid_len;
+        let cs_len = u16::from_be_bytes([msg[i], msg[i + 1]]) as usize;
+        i += 2 + cs_len;
+        let comp_len = msg[i] as usize;
+        i += 1 + comp_len;
+        let _ext_total = u16::from_be_bytes([msg[i], msg[i + 1]]) as usize;
+        i += 2;
+        while i + 4 <= msg.len() {
+            let t = u16::from_be_bytes([msg[i], msg[i + 1]]);
+            let l = u16::from_be_bytes([msg[i + 2], msg[i + 3]]) as usize;
+            let body = msg[i + 4..i + 4 + l].to_vec();
+            if t == etype {
+                return Some(body);
+            }
+            i += 4 + l;
+        }
+        None
+    }
+
+    /// ALPS (application_settings, 0x44CD) must advertise a single protocol "h2",
+    /// matching authentic Yandex 26.4. Body layout (ApplicationSettings):
+    ///   [supported_protocols_list_len u16][proto_len u8][proto bytes]
+    /// For "h2": list_len=3, then 0x02 "h2" → [0x00,0x03,0x02,b'h',b'2'].
+    #[test]
+    fn alps_extension_advertises_h2() {
+        let ch = build_client_hello(
+            &Profile::yandex(),
+            "www.example.com",
+            &[0x42u8; 32],
+            &[0u8; 1184],
+            [0xAA; 32],
+        );
+        let body = ext_body(&ch, 0x44cd).expect("ALPS extension must be present");
+        assert_eq!(body, vec![0x00, 0x03, 0x02, b'h', b'2']);
     }
 }
