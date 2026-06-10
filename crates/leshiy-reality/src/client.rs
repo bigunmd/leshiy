@@ -148,6 +148,25 @@ pub struct RealityConn {
     pub(crate) mux: Arc<Mutex<Mux>>,
 }
 
+impl RealityConn {
+    /// Open a tunneled stream to `target` ("host:port") over the mux.
+    pub async fn open(&self, target: &str) -> crate::Result<leshiy_core::mux::Stream> {
+        self.mux
+            .lock()
+            .await
+            .open(target)
+            .await
+            .map_err(|e| crate::RealityError::Malformed(e.to_string()))
+    }
+
+    /// Resolves once the underlying tunnel has dropped (the mux's reader or writer
+    /// task exited). Used by the supervisor to trigger reconnect.
+    pub async fn closed(&self) {
+        let mut rx = self.mux.lock().await.closed_receiver();
+        let _ = rx.wait_for(|v| *v).await;
+    }
+}
+
 /// Connect to the REALITY server, authenticate, and establish the mux tunnel.
 /// Returns a [`RealityConn`] that can be passed to [`serve_socks5`].
 pub async fn connect_reality(
