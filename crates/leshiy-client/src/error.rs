@@ -13,6 +13,9 @@ pub enum ClientError {
     /// Persistence / serialization failure.
     #[error("storage error: {0}")]
     Store(String),
+    /// System-proxy set/clear failure.
+    #[error("system proxy error: {0}")]
+    Proxy(String),
     /// Underlying I/O failure.
     #[error(transparent)]
     Io(#[from] std::io::Error),
