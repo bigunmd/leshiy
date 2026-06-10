@@ -10,6 +10,7 @@ pub mod profile;
 pub mod settings;
 pub mod stats;
 pub mod stream;
+pub mod sysproxy;
 pub mod transport;
 
 pub use error::{ClientError, Result};
@@ -17,4 +18,5 @@ pub use profile::{Profile, ProfileStore};
 pub use settings::{Settings, TransportPref};
 pub use stats::{ByteCounters, Rates, Throughput};
 pub use stream::ProxyStream;
+pub use sysproxy::{NoopProxy, SystemProxy};
 pub use transport::{Transport, Tunnel};
