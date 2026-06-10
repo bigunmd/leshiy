@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/leshiy-core", "crates/leshiy", "crates/leshiy-tls", "crates/leshiy-reality", "crates/leshiy-quic"]
+members = ["crates/leshiy-core", "crates/leshiy", "crates/leshiy-tls", "crates/leshiy-reality", "crates/leshiy-quic", "crates/leshiy-client"]
 
 [workspace.package]
 edition = "2024"

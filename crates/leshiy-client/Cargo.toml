@@ -1,0 +1,12 @@
+[package]
+name = "leshiy-client"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+leshiy-reality = { path = "../leshiy-reality" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
