@@ -5,7 +5,9 @@
 //! values and shuffles the non-GREASE extension order (see `camouflage`), so the JA4
 //! is stable but the JA3 varies connection-to-connection. SNI (0x0000) and key_share
 //! (0x0033) are injected from the call arguments.
-use crate::camouflage::{Grease, chrome_ext_permutation, derive_grease, is_grease};
+use crate::camouflage::{
+    Grease, chrome_ext_permutation, derive_grease, grease_ech_outer, is_grease,
+};
 use crate::fingerprint::Profile;
 use rand::RngCore;
 
@@ -17,8 +19,8 @@ use rand::RngCore;
 /// - `random`: 32-byte client random (pass fresh entropy in production; deterministic in tests).
 ///
 /// The `legacy_session_id` is set to 32 bytes (mirrors current Chromium behaviour).
-/// GREASE extension entries from the profile are emitted with an empty body, which
-/// is correct for JA4/JA3 round-trips (those fingerprints only care about the type IDs).
+/// The two GREASE extension placeholders are emitted leading (empty body) and
+/// trailing (single 0x00 byte), as Chromium does.
 ///
 /// The key_share (0x0033) extension emits three entries in order:
 ///   1. GREASE (group = per-connection GREASE value, 1-byte key 0x00) — matches browser CH
@@ -95,7 +97,7 @@ pub fn build_client_hello_with_entropy(
     // real extensions in shuffled order
     for &idx in &perm {
         let etype = middle[idx];
-        let ebody = build_extension(etype, profile, sni, x25519_pub, mlkem_ek, &grease);
+        let ebody = build_extension(etype, profile, sni, x25519_pub, mlkem_ek, &grease, &entropy);
         ext_bytes.extend_from_slice(&etype.to_be_bytes());
         ext_bytes.extend_from_slice(&(ebody.len() as u16).to_be_bytes());
         ext_bytes.extend_from_slice(&ebody);
@@ -131,6 +133,7 @@ fn build_extension(
     x25519_pub: &[u8; 32],
     mlkem_ek: &[u8; 1184],
     grease: &Grease,
+    entropy: &[u8; 32],
 ) -> Vec<u8> {
     match etype {
         // server_name (SNI) — RFC 6066 §3
@@ -247,12 +250,10 @@ fn build_extension(
         0x001b => vec![0x02, 0x00, 0x02],
 
         // encrypted_client_hello (0xfe0d) — draft-ietf-tls-esni §5.
-        // rustls knows this extension and tries to parse the body.  The
-        // minimal valid body is a single byte with EchClientHelloType =
-        // ClientHelloInner (0x01), which carries no additional payload.
-        // This lets rustls parse the extension cleanly without triggering
-        // a decode_error.  The extension is then ignored by the server.
-        0xfe0d => vec![0x01],
+        // Emit a realistic GREASE-ECH OUTER (config_id + 32-byte enc + ~176-byte
+        // payload), exactly as Chromium does when it has no real ECH config. A
+        // server without a matching config_id ignores it (rustls accepts it).
+        0xfe0d => grease_ech_outer(entropy),
 
         // application_settings / ALPS (0x44cd) — draft-vvv-tls-alps.
         // Body: [supported_protocols_list_len u16][proto_len u8][proto bytes].
@@ -499,5 +500,27 @@ mod tests {
         assert_eq!(ja4(&v1), fixture_str("yandex.ja4"));
         assert_eq!(ja4(&v2), fixture_str("yandex.ja4"));
         assert_ne!(ja3(&v1), ja3(&v2), "JA3 should differ across connections");
+    }
+
+    /// The encrypted_client_hello extension must be a realistic GREASE-ECH outer
+    /// (~186 bytes), not the 1-byte inner-type stub. JA4 is unaffected.
+    #[test]
+    fn ech_extension_is_realistic_grease_outer() {
+        let ch = build_client_hello(
+            &Profile::yandex(),
+            "ex.com",
+            &[1u8; 32],
+            &[0u8; 1184],
+            [2u8; 32],
+        );
+        let body = ext_body(&ch, 0xfe0d).expect("ECH extension must be present");
+        assert_eq!(body[0], 0x00, "ECH outer type");
+        assert!(
+            body.len() >= 180,
+            "realistic GREASE-ECH is ~186 bytes, got {}",
+            body.len()
+        );
+        let view = ClientHelloView::parse(&ch).expect("parse");
+        assert_eq!(ja4(&view), fixture_str("yandex.ja4"));
     }
 }

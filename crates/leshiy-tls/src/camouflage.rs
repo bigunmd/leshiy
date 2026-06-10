@@ -58,6 +58,24 @@ pub(crate) fn derive_grease(entropy: &[u8; 32]) -> Grease {
     }
 }
 
+/// Expand `entropy` into `n` deterministic bytes, domain-separated by `domain`.
+/// A simple SHA-256 counter stream — enough to drive shuffling and to fill the
+/// opaque bytes of a GREASE-ECH from per-connection entropy.
+fn expand(entropy: &[u8; 32], domain: &[u8], n: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(n + 32);
+    let mut counter = 0u8;
+    while out.len() < n {
+        let mut h = Sha256::new();
+        h.update(entropy);
+        h.update(domain);
+        h.update([counter]);
+        out.extend_from_slice(&h.finalize());
+        counter = counter.wrapping_add(1);
+    }
+    out.truncate(n);
+    out
+}
+
 /// A per-connection permutation of `0..n`, derived from independent `entropy`
 /// (domain-separated from GREASE). Chromium shuffles its TLS extensions on every
 /// connection (`ShuffleChromeTLSExtensions`); applying this to the non-GREASE
@@ -67,18 +85,8 @@ pub(crate) fn chrome_ext_permutation(entropy: &[u8; 32], n: usize) -> Vec<usize>
     if n <= 1 {
         return perm;
     }
-    // Expand entropy into enough bytes for one u32 per Fisher-Yates step.
-    let mut stream = Vec::with_capacity(n * 4);
-    let mut counter = 0u8;
-    while stream.len() < (n - 1) * 4 {
-        let mut h = Sha256::new();
-        h.update(entropy);
-        h.update(b"leshiy-ext-shuffle");
-        h.update([counter]);
-        stream.extend_from_slice(&h.finalize());
-        counter = counter.wrapping_add(1);
-    }
-    // Fisher-Yates shuffle.
+    // One u32 per Fisher-Yates step.
+    let stream = expand(entropy, b"leshiy-ext-shuffle", (n - 1) * 4);
     let mut s = 0;
     for i in (1..n).rev() {
         let r = u32::from_le_bytes([stream[s], stream[s + 1], stream[s + 2], stream[s + 3]]);
@@ -87,6 +95,33 @@ pub(crate) fn chrome_ext_permutation(entropy: &[u8; 32], n: usize) -> Vec<usize>
         perm.swap(i, j);
     }
     perm
+}
+
+/// Build a GREASE-ECH (`encrypted_client_hello`) OUTER body, as Chromium emits when
+/// it has no real ECH config from DNS. Structure (draft-ietf-tls-esni §5):
+///   [type=outer 0x00][kdf_id u16][aead_id u16][config_id u8][enc_len u16][enc][payload_len u16][payload]
+/// with HKDF-SHA256 (0x0001) + AES-128-GCM (0x0001), a 32-byte X25519 `enc`, and a
+/// random "encrypted" payload. All opaque bytes come from the per-connection
+/// entropy stream; a server without a matching config_id ignores the extension.
+pub(crate) fn grease_ech_outer(entropy: &[u8; 32]) -> Vec<u8> {
+    // config_id(1) + enc(32) + payload_len_selector(1) + payload(up to 208).
+    let stream = expand(entropy, b"leshiy-ech", 1 + 32 + 1 + 208);
+    let config_id = stream[0];
+    let enc = &stream[1..33];
+    // Payload length 144..=208, derived from entropy (Chromium varies it per conn).
+    let payload_len = 144 + (stream[33] as usize % 65);
+    let payload = &stream[34..34 + payload_len];
+
+    let mut b = Vec::with_capacity(8 + enc.len() + payload_len);
+    b.push(0x00); // ECHClientHelloType = outer
+    b.extend_from_slice(&0x0001u16.to_be_bytes()); // kdf_id  = HKDF-SHA256
+    b.extend_from_slice(&0x0001u16.to_be_bytes()); // aead_id = AES-128-GCM
+    b.push(config_id);
+    b.extend_from_slice(&(enc.len() as u16).to_be_bytes());
+    b.extend_from_slice(enc);
+    b.extend_from_slice(&(payload_len as u16).to_be_bytes());
+    b.extend_from_slice(payload);
+    b
 }
 
 #[cfg(test)]
@@ -155,5 +190,39 @@ mod tests {
         let b = chrome_ext_permutation(&[0x22u8; 32], 16);
         assert_eq!(a, a2, "deterministic for the same entropy");
         assert_ne!(a, b, "different entropy must shuffle differently");
+    }
+
+    /// The GREASE-ECH outer body must have Chromium's structure: outer type, the
+    /// HKDF-SHA256 / AES-128-GCM cipher suite, a 32-byte X25519 `enc`, and a
+    /// length-prefixed payload — all self-consistent and ~186 bytes, not the
+    /// 1-byte stub. It is deterministic for a given entropy.
+    #[test]
+    fn grease_ech_outer_has_chromium_structure() {
+        let body = grease_ech_outer(&[0x37u8; 32]);
+        assert_eq!(body[0], 0x00, "ECHClientHelloType = outer");
+        assert_eq!(
+            u16::from_be_bytes([body[1], body[2]]),
+            0x0001,
+            "kdf=HKDF-SHA256"
+        );
+        assert_eq!(
+            u16::from_be_bytes([body[3], body[4]]),
+            0x0001,
+            "aead=AES-128-GCM"
+        );
+        // config_id at body[5]; enc_length at body[6..8].
+        let enc_len = u16::from_be_bytes([body[6], body[7]]) as usize;
+        assert_eq!(enc_len, 32, "enc is a 32-byte X25519 public key");
+        let payload_off = 8 + enc_len;
+        let payload_len = u16::from_be_bytes([body[payload_off], body[payload_off + 1]]) as usize;
+        // Body is fully consumed by header + enc + payload (no trailing junk).
+        assert_eq!(body.len(), payload_off + 2 + payload_len);
+        assert!(
+            body.len() >= 180,
+            "realistic GREASE-ECH is ~186 bytes, got {}",
+            body.len()
+        );
+        // Deterministic for the same entropy.
+        assert_eq!(body, grease_ech_outer(&[0x37u8; 32]));
     }
 }
