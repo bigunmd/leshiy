@@ -8,6 +8,7 @@
 //! The entropy MUST be independent of anything on the wire (in particular the
 //! TLS `random`, which is sent in clear): deriving GREASE from observable bytes
 //! would let an adversary who reads this source recompute and detect us.
+use sha2::{Digest, Sha256};
 
 /// Returns true for GREASE values (RFC 8701): 0x?A?A where both bytes are equal.
 pub(crate) fn is_grease(v: u16) -> bool {
@@ -57,6 +58,37 @@ pub(crate) fn derive_grease(entropy: &[u8; 32]) -> Grease {
     }
 }
 
+/// A per-connection permutation of `0..n`, derived from independent `entropy`
+/// (domain-separated from GREASE). Chromium shuffles its TLS extensions on every
+/// connection (`ShuffleChromeTLSExtensions`); applying this to the non-GREASE
+/// extension slots reproduces that behaviour so JA3 varies per connection.
+pub(crate) fn chrome_ext_permutation(entropy: &[u8; 32], n: usize) -> Vec<usize> {
+    let mut perm: Vec<usize> = (0..n).collect();
+    if n <= 1 {
+        return perm;
+    }
+    // Expand entropy into enough bytes for one u32 per Fisher-Yates step.
+    let mut stream = Vec::with_capacity(n * 4);
+    let mut counter = 0u8;
+    while stream.len() < (n - 1) * 4 {
+        let mut h = Sha256::new();
+        h.update(entropy);
+        h.update(b"leshiy-ext-shuffle");
+        h.update([counter]);
+        stream.extend_from_slice(&h.finalize());
+        counter = counter.wrapping_add(1);
+    }
+    // Fisher-Yates shuffle.
+    let mut s = 0;
+    for i in (1..n).rev() {
+        let r = u32::from_le_bytes([stream[s], stream[s + 1], stream[s + 2], stream[s + 3]]);
+        s += 4;
+        let j = (r as usize) % (i + 1);
+        perm.swap(i, j);
+    }
+    perm
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +131,29 @@ mod tests {
             "the two extension GREASE values must differ"
         );
         assert!(is_grease(g.ext2));
+    }
+
+    /// The permutation must be a genuine permutation of 0..n (no lost/duplicated
+    /// indices) for every length we care about.
+    #[test]
+    fn chrome_ext_permutation_is_a_valid_permutation() {
+        let entropy = [0x5au8; 32];
+        for n in [0usize, 1, 2, 16] {
+            let mut perm = chrome_ext_permutation(&entropy, n);
+            assert_eq!(perm.len(), n);
+            perm.sort_unstable();
+            assert_eq!(perm, (0..n).collect::<Vec<_>>());
+        }
+    }
+
+    /// Same entropy -> same order (deterministic); different entropy -> different
+    /// order (so JA3 varies connection-to-connection, like real Chromium).
+    #[test]
+    fn chrome_ext_permutation_depends_on_entropy() {
+        let a = chrome_ext_permutation(&[0x11u8; 32], 16);
+        let a2 = chrome_ext_permutation(&[0x11u8; 32], 16);
+        let b = chrome_ext_permutation(&[0x22u8; 32], 16);
+        assert_eq!(a, a2, "deterministic for the same entropy");
+        assert_ne!(a, b, "different entropy must shuffle differently");
     }
 }

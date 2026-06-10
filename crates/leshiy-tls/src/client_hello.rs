@@ -1,10 +1,11 @@
-//! Build a byte-exact, profile-fingerprinted TLS 1.3 ClientHello handshake message.
+//! Build a profile-fingerprinted TLS 1.3 ClientHello handshake message.
 //!
-//! The built message is designed to round-trip through `ClientHelloView::parse`
-//! and produce the same JA4/JA3 as the committed fixture. Extension order and
-//! GREASE placement follow the `Profile` exactly; only SNI (0x0000) and
-//! key_share (0x0033) are injected from the call arguments.
-use crate::camouflage::{Grease, derive_grease, is_grease};
+//! The built message round-trips through `ClientHelloView::parse` and produces the
+//! committed JA4 fixture. Like real Chromium, each connection randomises its GREASE
+//! values and shuffles the non-GREASE extension order (see `camouflage`), so the JA4
+//! is stable but the JA3 varies connection-to-connection. SNI (0x0000) and key_share
+//! (0x0033) are injected from the call arguments.
+use crate::camouflage::{Grease, chrome_ext_permutation, derive_grease, is_grease};
 use crate::fingerprint::Profile;
 use rand::RngCore;
 
@@ -76,29 +77,34 @@ pub fn build_client_hello_with_entropy(
     // compression methods: 1 method = null (0x00)
     body.extend_from_slice(&[0x01, 0x00]);
 
-    // extensions: iterate in profile order. The two GREASE extension placeholders are
-    // replaced with the per-connection ext1 (leading, empty body) and ext2 (trailing,
-    // single 0x00 byte) — matching Chromium's emission. Real extensions get their body.
+    // extensions: the non-GREASE extensions are shuffled per connection (Chromium's
+    // ShuffleChromeTLSExtensions); one GREASE extension is pinned first (empty body)
+    // and one last (single 0x00 byte), carrying the per-connection ext1/ext2 values.
+    let middle: Vec<u16> = profile
+        .extensions
+        .iter()
+        .copied()
+        .filter(|t| !is_grease(*t))
+        .collect();
+    let perm = chrome_ext_permutation(&entropy, middle.len());
+
     let mut ext_bytes = Vec::new();
-    let mut grease_idx = 0u8;
-    for &etype in &profile.extensions {
-        let (out_type, ebody) = if is_grease(etype) {
-            grease_idx += 1;
-            if grease_idx == 1 {
-                (grease.ext1, Vec::new())
-            } else {
-                (grease.ext2, vec![0x00])
-            }
-        } else {
-            (
-                etype,
-                build_extension(etype, profile, sni, x25519_pub, mlkem_ek, &grease),
-            )
-        };
-        ext_bytes.extend_from_slice(&out_type.to_be_bytes());
+    // leading GREASE extension (empty body)
+    ext_bytes.extend_from_slice(&grease.ext1.to_be_bytes());
+    ext_bytes.extend_from_slice(&0u16.to_be_bytes());
+    // real extensions in shuffled order
+    for &idx in &perm {
+        let etype = middle[idx];
+        let ebody = build_extension(etype, profile, sni, x25519_pub, mlkem_ek, &grease);
+        ext_bytes.extend_from_slice(&etype.to_be_bytes());
         ext_bytes.extend_from_slice(&(ebody.len() as u16).to_be_bytes());
         ext_bytes.extend_from_slice(&ebody);
     }
+    // trailing GREASE extension (single 0x00 byte)
+    ext_bytes.extend_from_slice(&grease.ext2.to_be_bytes());
+    ext_bytes.extend_from_slice(&1u16.to_be_bytes());
+    ext_bytes.push(0x00);
+
     body.extend_from_slice(&(ext_bytes.len() as u16).to_be_bytes());
     body.extend_from_slice(&ext_bytes);
 
@@ -439,5 +445,59 @@ mod tests {
 
         // JA4 must be unchanged (GREASE is stripped before hashing).
         assert_eq!(ja4(&view), fixture_str("yandex.ja4"));
+    }
+
+    /// The non-GREASE extensions are shuffled per connection (like Chromium), so the
+    /// order — and thus JA3 — varies; but the extension SET, the pinned leading/
+    /// trailing GREASE, and the JA4 are all invariant.
+    #[test]
+    fn extensions_shuffle_per_connection_preserving_set_and_ja4() {
+        use crate::camouflage::is_grease;
+        use crate::ja::ja3;
+
+        let build = |shuffle_byte: u8| {
+            let mut e = [0u8; 32];
+            e[8] = shuffle_byte; // vary only the shuffle entropy
+            let ch = build_client_hello_with_entropy(
+                &Profile::yandex(),
+                "ex.com",
+                &[1u8; 32],
+                &[0u8; 1184],
+                [2u8; 32],
+                e,
+            );
+            ClientHelloView::parse(&ch).expect("parse")
+        };
+        let v1 = build(0x11);
+        let v2 = build(0x22);
+
+        let non_grease = |v: &ClientHelloView| -> Vec<u16> {
+            v.extensions
+                .iter()
+                .copied()
+                .filter(|x| !is_grease(*x))
+                .collect()
+        };
+
+        // Order differs across connections...
+        assert_ne!(
+            non_grease(&v1),
+            non_grease(&v2),
+            "extension order should vary per connection"
+        );
+        // ...but the SET is identical.
+        let (mut s1, mut s2) = (non_grease(&v1), non_grease(&v2));
+        s1.sort_unstable();
+        s2.sort_unstable();
+        assert_eq!(s1, s2, "extension set must be preserved");
+
+        // One GREASE pinned first, one pinned last.
+        assert!(is_grease(*v1.extensions.first().unwrap()), "leading GREASE");
+        assert!(is_grease(*v1.extensions.last().unwrap()), "trailing GREASE");
+
+        // JA4 invariant (sorts before hashing); JA3 varies (order-sensitive).
+        assert_eq!(ja4(&v1), fixture_str("yandex.ja4"));
+        assert_eq!(ja4(&v2), fixture_str("yandex.ja4"));
+        assert_ne!(ja3(&v1), ja3(&v2), "JA3 should differ across connections");
     }
 }
