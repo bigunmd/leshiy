@@ -95,9 +95,27 @@ curl -fsSL https://github.com/bigunmd/leshiy/releases/latest/download/install.sh
 
 This downloads a **signed** static binary (verified with minisign + SHA-256), runs the
 setup wizard, installs a hardened systemd service on 443, and prints your client
-`leshiy://` URI + a QR code. Flags for automation: `--host`, `--dest`, `--quic`,
-`--docker`, `--yes`. Prefer to inspect first? The script is short — read it at the URL
-above before piping to `sh`.
+`leshiy://` URI + a QR code.
+
+To pass flags, append them after `sh -s --` (the `-s` makes `sh` read the script from
+stdin; `--` ends `sh`'s own options so the rest go to the installer):
+
+```sh
+URL=https://github.com/bigunmd/leshiy/releases/latest/download/install.sh
+
+# Also enable the QUIC/HTTP-3 transport (443/udp) alongside REALITY:
+curl -fsSL $URL | sh -s -- --quic
+
+# Install via Docker + compose instead of native systemd:
+curl -fsSL $URL | sh -s -- --docker
+
+# Pick a camouflage site, enable QUIC, and pin a version:
+curl -fsSL $URL | sh -s -- --dest www.cloudflare.com:443 --quic --version v0.1.2
+```
+
+Other flags: `--host <ip:port>`, `--dest <host:port>`, `--role single|entry|exit`,
+`--exit-uri '<leshiy://…>'`, `--yes`. Prefer to inspect first? The script is short — read it
+at the URL above before piping to `sh`.
 
 ### 1. Run a server
 
