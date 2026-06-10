@@ -19,9 +19,26 @@ pnpm tauri build --no-bundle        # compile only, no installer
 
 Bundles land in `src-tauri/target/release/bundle/`.
 
-- **Linux:** `.deb`, `.rpm`, AppImage (AppImage downloads `appimagetool` on first build).
+- **Linux:** `.deb`, `.rpm`, AppImage. `.deb`/`.rpm` need only `dpkg-deb`/`rpmbuild`; AppImage needs `patchelf` and downloads `linuxdeploy`/`appimagetool` on first build.
 - **Windows:** `.msi` (WiX) + `.exe` (NSIS) — build on Windows.
 - **macOS:** `.dmg` + `.app` — build on macOS.
+
+### Building AppImage on WSL
+
+`linuxdeploy` crashes on WSL because WSL appends the Windows `PATH`, and it can't stat the permission-locked `/mnt/c/.../WindowsApps` directory. Strip the Windows paths (and make sure `patchelf` is installed) for the AppImage step:
+
+```bash
+# one-time: a sudo-free patchelf
+mkdir -p ~/.local/bin
+curl -fsSL https://github.com/NixOS/patchelf/releases/download/0.18.0/patchelf-0.18.0-x86_64.tar.gz \
+  | tar xz -C /tmp ./bin/patchelf && cp /tmp/bin/patchelf ~/.local/bin/
+
+# build AppImage with Windows paths removed
+env PATH="$HOME/.local/bin:$(printf '%s' "$PATH" | tr ':' '\n' | grep -v '^/mnt/' | paste -sd:)" \
+  APPIMAGE_EXTRACT_AND_RUN=1 pnpm tauri build --bundles appimage
+```
+
+`pnpm tauri build --bundles deb,rpm` needs none of this. CI builds AppImage on real Ubuntu (no WSL quirk).
 
 ## Architecture
 
