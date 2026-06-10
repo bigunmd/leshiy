@@ -19,7 +19,7 @@ pub mod supervisor;
 pub mod sysproxy;
 pub mod transport;
 
-pub use adapter::{QuicTunnel, RealityTunnel};
+pub use adapter::{QuicTunnel, RealTransport, RealityTunnel};
 pub use error::{ClientError, Result};
 pub use profile::{Profile, ProfileStore};
 pub use pump::pump;
