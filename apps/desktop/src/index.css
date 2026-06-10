@@ -1,0 +1,115 @@
+@import "tailwindcss";
+@import "@fontsource-variable/bricolage-grotesque";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --font-ui: "Bricolage Grotesque Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --color-bg0: #0c120d;
+  --color-bg1: #10160f;
+  --color-panel: #18241a;
+  --color-moss: #3b5e3a;
+  --color-dim: #8fa98c;
+  --color-wisp: #7ce07a;
+  --color-wisp-bright: #9df59b;
+  --color-warn: #e0954a;
+  --color-warn-bright: #f0b87a;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --radius: 0.75rem;
+  --background: #0c120d;
+  --foreground: #e6f0e3;
+  --card: #18241a;
+  --card-foreground: #e6f0e3;
+  --popover: #18241a;
+  --popover-foreground: #e6f0e3;
+  --primary: #7ce07a;
+  --primary-foreground: #0c120d;
+  --secondary: #18241a;
+  --secondary-foreground: #e6f0e3;
+  --muted: #18241a;
+  --muted-foreground: #8fa98c;
+  --accent: #1c2b1e;
+  --accent-foreground: #e6f0e3;
+  --destructive: #e0954a;
+  --border: #2c4030;
+  --input: #2c4030;
+  --ring: #7ce07a;
+}
+
+@layer base {
+  * { @apply border-border outline-ring/50; }
+  html, body, #root { height: 100%; }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-ui);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+}
+
+/* atmosphere */
+.atmosphere { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
+.atmosphere .fog {
+  position: absolute; inset: -20%;
+  background:
+    radial-gradient(40% 30% at 50% 32%, #16291a 0%, transparent 70%),
+    radial-gradient(60% 50% at 70% 80%, #0e1a12 0%, transparent 70%),
+    radial-gradient(50% 40% at 20% 70%, #0e1a14 0%, transparent 70%);
+  filter: blur(6px); animation: drift 24s ease-in-out infinite alternate;
+}
+.atmosphere .vignette { position: absolute; inset: 0; background: radial-gradient(120% 100% at 50% 38%, transparent 40%, #060a07 100%); }
+.atmosphere .grain {
+  position: absolute; inset: 0; opacity: .04; mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* orb */
+@keyframes drift { from { transform: translate3d(-2%,-1%,0) scale(1.02); } to { transform: translate3d(2%,1%,0) scale(1.06); } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulseGlow { 0%,100% { box-shadow: 0 0 12px #7ce07a22, inset 0 0 14px #7ce07a18; } 50% { box-shadow: 0 0 30px #7ce07a66, inset 0 0 18px #7ce07a33; } }
+@keyframes breathe {
+  0%,100% { box-shadow: 0 0 26px #7ce07a55, 0 0 60px #7ce07a22, inset 0 0 22px #7ce07a22; transform: scale(1); }
+  50% { box-shadow: 0 0 40px #7ce07a99, 0 0 90px #7ce07a33, inset 0 0 28px #7ce07a33; transform: scale(1.035); }
+}
+@keyframes ember { 0%,100% { box-shadow: 0 0 10px #3b5e3a33, inset 0 0 16px #0c120d; } 50% { box-shadow: 0 0 16px #3b5e3a55, inset 0 0 16px #0c120d; } }
+@keyframes gutter { 0%,82%,100% { transform: translateX(0); } 84% { transform: translateX(-3px); } 86% { transform: translateX(3px); } 88% { transform: translateX(-2px); } 90% { transform: translateX(2px); } 92% { transform: translateX(0); } }
+.orb-breathe { animation: breathe 3.2s ease-in-out infinite; }
+.orb-pulse { animation: pulseGlow 1.4s ease-in-out infinite; }
+.orb-ember { animation: ember 4s ease-in-out infinite; }
+.orb-gutter { animation: gutter 2.6s ease-in-out infinite; }
+.orb-spin { animation: spin .9s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .atmosphere .fog, .orb-breathe, .orb-pulse, .orb-ember, .orb-gutter, .orb-spin { animation: none !important; }
+}

@@ -1,0 +1,8 @@
+{
+  "brand": "LESHIY",
+  "state": { "Disconnected": "Disconnected", "Connecting": "Connecting…", "Connected": "Connected", "Reconnecting": "Reconnecting…", "Error": "Couldn't connect" },
+  "tapToConnect": "Tap to connect", "tapToRetry": "tap to retry", "noConfig": "No config — import one", "manageConfigs": "Manage configs", "total": "total",
+  "config": { "title": "Configs", "paste": "Paste a leshiy:// link", "fromClipboard": "From clipboard", "fromImage": "From QR image", "name": "Name", "add": "Add", "rename": "Rename", "delete": "Delete", "empty": "No configs yet. Paste a leshiy:// link or scan a QR image.", "invalid": "That isn't a valid leshiy:// link." },
+  "settings": { "title": "Settings", "language": "Language", "killSwitch": "Kill switch (fail closed)", "transport": "Transport", "socksPort": "SOCKS port", "auto": "Auto", "quic": "QUIC", "tcp": "REALITY (TCP)", "restartNote": "Transport and port changes apply on next launch." },
+  "close": "Close"
+}
