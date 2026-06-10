@@ -144,15 +144,9 @@ pub fn ja3(v: &ClientHelloView) -> String {
     hex::encode(Md5::digest(s.as_bytes()))
 }
 
-/// Compute JA4 fingerprint: "JA4_a_JA4_b_JA4_c".
-///
-/// - Part A: protocol(t) + TLS version (from supported_versions) + SNI(d/i) + cipher_count(2)
-///   + ext_count(2) + ALPN(first+last char of first ALPN protocol)
-/// - Part B: SHA-256[:6] of sorted hex cipher IDs (GREASE excluded), hex-encoded = 12 chars
-/// - Part C: SHA-256[:6] of sorted non-SNI/non-ALPN extension IDs joined by ","
-///   + "_" + sig algs in hello order (not sorted), hex-encoded = 12 chars
-pub fn ja4(v: &ClientHelloView) -> String {
-    // Part A: determine TLS version from supported_versions (take max non-GREASE)
+/// JA4 Part A: protocol(t) + TLS version + SNI(d/i) + cipher_count + ext_count + ALPN tag.
+fn ja4_part_a(v: &ClientHelloView) -> String {
+    // determine TLS version from supported_versions (take max non-GREASE)
     let ver = match v
         .supported_versions
         .iter()
@@ -183,46 +177,64 @@ pub fn ja4(v: &ClientHelloView) -> String {
             )
         })
         .unwrap_or_else(|| "00".into());
-    let a = format!("t{ver}{sni}{nci:02}{nex:02}{alpn_tag}");
+    format!("t{ver}{sni}{nci:02}{nex:02}{alpn_tag}")
+}
 
-    // Part B: SHA-256 of sorted hex cipher IDs (GREASE excluded), take first 6 bytes (12 hex chars)
-    let b = {
-        let mut ciphers: Vec<u16> = v
-            .cipher_suites
-            .iter()
-            .filter(|x| !is_grease(**x))
-            .copied()
-            .collect();
-        ciphers.sort_unstable();
-        let s = ciphers
-            .iter()
-            .map(|x| format!("{x:04x}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        hex::encode(&Sha256::digest(s.as_bytes())[..6])
-    };
+/// JA4 raw cipher list: sorted hex cipher IDs (GREASE excluded), comma-joined.
+fn ja4_ciphers_str(v: &ClientHelloView) -> String {
+    let mut ciphers: Vec<u16> = v
+        .cipher_suites
+        .iter()
+        .filter(|x| !is_grease(**x))
+        .copied()
+        .collect();
+    ciphers.sort_unstable();
+    ciphers
+        .iter()
+        .map(|x| format!("{x:04x}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
 
-    // Part C: sorted non-SNI/non-ALPN extensions + "_" + sig algs in hello order
+/// JA4 raw extension list: sorted hex extension IDs, GREASE + SNI(0x0000) + ALPN(0x0010)
+/// excluded, comma-joined.
+fn ja4_exts_str(v: &ClientHelloView) -> String {
+    let mut exts: Vec<u16> = v
+        .extensions
+        .iter()
+        .filter(|x| !is_grease(**x) && **x != 0x0000 && **x != 0x0010)
+        .copied()
+        .collect();
+    exts.sort_unstable();
+    exts.iter()
+        .map(|x| format!("{x:04x}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// JA4 raw signature-algorithm list: hex IDs in hello order (NOT sorted), GREASE excluded.
+fn ja4_sigalgs_str(v: &ClientHelloView) -> String {
+    v.sig_algs
+        .iter()
+        .filter(|x| !is_grease(**x))
+        .map(|x| format!("{x:04x}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Compute JA4 fingerprint: "JA4_a_JA4_b_JA4_c".
+///
+/// - Part A: protocol(t) + TLS version (from supported_versions) + SNI(d/i) + cipher_count(2)
+///   + ext_count(2) + ALPN(first+last char of first ALPN protocol)
+/// - Part B: SHA-256[:6] of sorted hex cipher IDs (GREASE excluded), hex-encoded = 12 chars
+/// - Part C: SHA-256[:6] of sorted non-SNI/non-ALPN extension IDs joined by ","
+///   + "_" + sig algs in hello order (not sorted), hex-encoded = 12 chars
+pub fn ja4(v: &ClientHelloView) -> String {
+    let a = ja4_part_a(v);
+    let b = hex::encode(&Sha256::digest(ja4_ciphers_str(v).as_bytes())[..6]);
     let c = {
-        let mut exts: Vec<u16> = v
-            .extensions
-            .iter()
-            .filter(|x| !is_grease(**x) && **x != 0x0000 && **x != 0x0010)
-            .copied()
-            .collect();
-        exts.sort_unstable();
-        let exts_s = exts
-            .iter()
-            .map(|x| format!("{x:04x}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sig_s = v
-            .sig_algs
-            .iter()
-            .filter(|x| !is_grease(**x))
-            .map(|x| format!("{x:04x}"))
-            .collect::<Vec<_>>()
-            .join(",");
+        let exts_s = ja4_exts_str(v);
+        let sig_s = ja4_sigalgs_str(v);
         let c_input = if sig_s.is_empty() {
             exts_s
         } else {
@@ -230,8 +242,23 @@ pub fn ja4(v: &ClientHelloView) -> String {
         };
         hex::encode(&Sha256::digest(c_input.as_bytes())[..6])
     };
-
     format!("{a}_{b}_{c}")
+}
+
+/// Compute the raw (unhashed) JA4 — "JA4_r" — used to pin a fingerprint to ground
+/// truth without the SHA-256 collapse of parts B and C:
+///   `{partA}_{sorted ciphers}_{sorted exts}_{sig algs in order}`
+///
+/// This is the form returned by `tls.peet.ws` (`ja4_r`) and lets tests assert the
+/// exact cipher/extension/sig-alg content rather than just the hashed JA4.
+pub fn ja4_r(v: &ClientHelloView) -> String {
+    format!(
+        "{}_{}_{}_{}",
+        ja4_part_a(v),
+        ja4_ciphers_str(v),
+        ja4_exts_str(v),
+        ja4_sigalgs_str(v)
+    )
 }
 
 /// ML-KEM-768 client share extracted from the 0x11EC key_share entry.
@@ -488,6 +515,42 @@ mod tests {
             expected_ja4,
             "JA4 mismatch — check part A counts, cipher/ext sorting, sig alg order"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test 1b: ja4_r (raw/unhashed JA4) must reproduce the AUTHENTIC Yandex 26.4
+    // capture (Chromium 146, Windows 11) recorded via tls.peet.ws and browserleaks
+    // on 2026-06-10. This pins the cipher list, the sorted extension list, and the
+    // signature-algorithm order to ground truth — a stronger guard than the hashed
+    // JA4 alone, which could in principle collide.
+    //   fixture: tests/fixtures/yandex.ja4_r
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn ja4_r_reproduces_authentic_yandex_capture() {
+        use crate::fingerprint::Profile;
+        fn fixture_str(name: &str) -> String {
+            std::fs::read_to_string(format!(
+                "{}/tests/fixtures/{}",
+                env!("CARGO_MANIFEST_DIR"),
+                name
+            ))
+            .unwrap()
+            .trim()
+            .to_string()
+        }
+        let p = Profile::yandex();
+        let view = ClientHelloView {
+            legacy_version: 0x0303,
+            cipher_suites: p.cipher_suites.clone(),
+            extensions: p.extensions.clone(),
+            supported_groups: p.supported_groups.clone(),
+            ec_point_formats: p.ec_point_formats.clone(),
+            sig_algs: p.sig_algs.clone(),
+            alpn: p.alpn.clone(),
+            has_sni: true,
+            supported_versions: p.supported_versions.clone(),
+        };
+        assert_eq!(ja4_r(&view), fixture_str("yandex.ja4_r"));
     }
 
     // ---------------------------------------------------------------------------

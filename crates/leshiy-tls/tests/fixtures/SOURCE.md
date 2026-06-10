@@ -1,23 +1,35 @@
 # Ground-Truth Yandex Browser ClientHello Fixture — Provenance
 
-## Status: Chrome 134 (Mac) — DOCUMENTED FALLBACK, replace with authentic Yandex capture
+## Status: AUTHENTIC — Yandex Browser 26.4.0.0 (Chromium 146, Windows 11)
 
-**Authenticity:** CHROME FALLBACK — not an authentic Yandex Browser capture.
-See "Authenticity & Fallback Rationale" section below.
+**Authenticity:** AUTHENTIC capture. The committed fixtures (`yandex.ja4`,
+`yandex.ja4_r`, `yandex.ja3`) and `Profile::yandex()` were verified field-by-field
+against a live Yandex Browser 26.4.0.0 ClientHello on 2026-06-10.
 
-**Confidence level:** HIGH for Chrome 134 Mac (JA3 and JA4 independently computed and
-verified against two sources). MEDIUM for Yandex Browser equivalence (same Chromium
-lineage, but Yandex may add or omit extensions — no primary Yandex capture confirmed).
+**Confidence level:** HIGH. The JA4 was reported identically by two independent
+fingerprinting endpoints (tls.peet.ws and browserleaks.com/tls), and the raw `ja4_r`
+field lists (ciphers, extensions, signature algorithms) match `Profile::yandex()`
+exactly.
+
+> Historical note: prior to 2026-06-10 these fixtures were a documented Chrome 134
+> (Mac) fallback (no authentic Yandex capture was available in public databases).
+> The authentic capture confirmed the fallback was already correct at the JA4 level —
+> Chromium 134→146 kept the same cipher suites and extension set (ALPS still present),
+> so the JA4 `t13d1516h2_8daaf6152771_d8a2da3f94cd` was unchanged.
 
 ---
 
-## Yandex Browser Version
+## Browser Version
 
-- **Yandex Browser version:** 26.4.3.897 (Windows/macOS, released 2026-06-03)
-- **Underlying Chromium base:** Chrome/Chromium 148
-  - Evidence: UA string `Chrome/148.0.0.0 YaBrowser/26.4.3.897` (from whatismybrowser.com)
-- **Source URL (version):** https://www.whatismybrowser.com/guides/the-latest-version/yandex-browser
-- **Lookup date:** 2026-06-07
+- **Yandex Browser version:** 26.4.0.0
+- **Underlying Chromium base:** Chromium 146
+  - Evidence: UA `Chrome/146.0.0.0 YaBrowser/26.4.0.0`; client hint
+    `sec-ch-ua: "Chromium";v="146", "Not-A.Brand";v="24", "YaBrowser";v="26.4", "Yowser";v="2.5"`
+- **Platform:** Windows 11 (Version 25H2, Build 26200.8457)
+- **Capture date:** 2026-06-10
+- **Capture method:** live ClientHello reported by tls.peet.ws (`/api/all`) and
+  browserleaks.com/tls; cross-checked against three raw last-segment packet captures
+  (Wireshark) of connections to www.gosuslugi.ru / www.mos.ru.
 
 ---
 
@@ -27,47 +39,54 @@ lineage, but Yandex may add or omit extensions — no primary Yandex capture con
 ```
 t13d1516h2_8daaf6152771_d8a2da3f94cd
 ```
-Source: Chrome 134 (Mac), from lexiforest/curl_cffi GitHub issue #529.
+Confirmed identical by **two independent endpoints**: tls.peet.ws and browserleaks.
 
-**Cross-validation (3 independent sources confirm this JA4):**
-1. `github.com/lexiforest/curl_cffi/issues/529` — primary capture of Chrome 134 Mac with full JA3N and JA4
-2. `github.com/telegramdesktop/tdesktop/issues/30733` — references Chrome 134 Mac as "t13d1516h2_8daaf6152771_d8a2da3f94cd" (before updating to Chrome 148 Windows)
-3. `github.com/ntop/ndpi/issues/2914` — uses "t13d1516h2_8daaf6152771_d8a2da3f94cd" in PCAP-based JA4 test
+JA4 part A breakdown `t13d1516h2`:
+- protocol = `t` (TCP/TLS)
+- version  = `13` (TLS 1.3)
+- sni      = `d` (domain present)
+- ciphers  = `15` (15 non-GREASE cipher suites)
+- exts     = `16` (16 non-GREASE extensions, incl. SNI + ALPN)
+- alpn     = `h2`
 
-**Mathematically verified:** Both JA4 parts B and C were independently recomputed in Python
-from the known cipher and extension lists and matched exactly:
-- Part A: `t13d1516h2` — protocol=t(TCP/TLS), ver=13(TLS 1.3), sni=d(domain), ciphers=15, exts=16, alpn=h2
-- Part B: `8daaf6152771` — SHA-256[:12] of sorted hex cipher IDs (confirmed match)
-- Part C: `d8a2da3f94cd` — SHA-256[:12] of sorted non-SNI/ALPN extension IDs + `_` + sig alg IDs (confirmed match)
-
-### JA3 (in `yandex.ja3`)
-Line 1 — MD5 hash: `845db3b4e398789bdeb5b15594360a29`
-Line 2 — Raw JA3 string (order-as-observed in one capture, extensions NOT sorted):
+### JA4_r (in `yandex.ja4_r`)
+The raw, unhashed JA4 — pins the exact cipher / extension / sig-alg content:
 ```
-771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,51-27-65281-18-45-0-35-5-11-43-16-65037-23-17613-13-10,4588-29-23-24,0
+t13d1516h2_002f,0035,009c,009d,1301,1302,1303,c013,c014,c02b,c02c,c02f,c030,cca8,cca9_0005,000a,000b,000d,0012,0017,001b,0023,002b,002d,0033,44cd,fe0d,ff01_0403,0804,0401,0503,0805,0501,0806,0601
 ```
-**Warning:** JA3 is NOT stable for Chrome-family browsers because Chrome shuffles extension
-order per connection. The raw JA3 string shown is one capture snapshot (from curl_cffi #529).
-Different captures will give different JA3 strings and different hashes. The JA4 is the
-reliable fingerprint for this project's purposes.
+Source: tls.peet.ws `ja4_r` for Yandex 26.4.0.0 (2026-06-10). The test
+`ja::tests::ja4_r_reproduces_authentic_yandex_capture` asserts `Profile::yandex()`
+reproduces this string exactly.
 
-The JA3 hash was **mathematically verified**: recomputing MD5 from the raw JA3 string
-produces `845db3b4e398789bdeb5b15594360a29` exactly.
+### JA3 — UNSTABLE, do not rely on (in `yandex.ja3`)
+JA3 is **not stable** for Chrome-family browsers: Chromium shuffles its TLS extension
+order on every connection (`ShuffleChromeTLSExtensions`) and randomizes GREASE values
+per connection, so the JA3 hash changes connection-to-connection. Three different JA3
+hashes were observed for the *same* browser:
+
+| Source                         | JA3 hash                           |
+|--------------------------------|------------------------------------|
+| tls.peet.ws (2026-06-10)       | `3ebe815087b9f632dc0ff06e977bf80d` |
+| browserleaks (2026-06-10)      | `af56fea52b1a3d53f9eb86a4f55ce442` |
+| committed `yandex.ja3` snapshot| `845db3b4e398789bdeb5b15594360a29` |
+
+The committed `yandex.ja3` records the JA3 of the *canonical (unshuffled) `Profile`
+order* only — useful as a characterization of the declared profile, **not** as
+something observable on the wire. Leshiy itself shuffles extensions per connection
+(see `camouflage::chrome_ext_permutation`), so it does not emit a single fixed JA3.
+**JA4 is the reliable fingerprint for this project.**
 
 ---
 
-## Complete Field Breakdown
+## Complete Field Breakdown (authentic Yandex 26.4)
 
-This breakdown describes the **Chrome 134 (Mac)** ClientHello on which these fixtures are based.
-Yandex Browser 26.4 (Chromium 148) may differ in minor ways (see Known Differences section).
+### Cipher Suites (15 non-GREASE + 1 GREASE placeholder)
 
-### Cipher Suites (ordered, 15 non-GREASE + 1 GREASE placeholder)
-
-Actual ClientHello order (GREASE first, then these 15):
+ClientHello order (GREASE first, then these 15):
 
 | Position | Decimal | Hex    | Name |
 |----------|---------|--------|------|
-| 0        | GREASE  | 0x?A?A | GREASE placeholder (random per connection) |
+| 0        | GREASE  | 0x?A?A | GREASE placeholder (randomized per connection) |
 | 1        | 4865    | 0x1301 | TLS_AES_128_GCM_SHA256 |
 | 2        | 4866    | 0x1302 | TLS_AES_256_GCM_SHA384 |
 | 3        | 4867    | 0x1303 | TLS_CHACHA20_POLY1305_SHA256 |
@@ -84,198 +103,119 @@ Actual ClientHello order (GREASE first, then these 15):
 | 14       | 47      | 0x002F | TLS_RSA_WITH_AES_128_CBC_SHA |
 | 15       | 53      | 0x0035 | TLS_RSA_WITH_AES_256_CBC_SHA |
 
-### Extensions (16 non-GREASE + 2 GREASE in actual ClientHello)
+### Extensions (16 non-GREASE + 2 GREASE)
 
-Chrome shuffles the non-fixed extensions per connection (via `ShuffleChromeTLSExtensions`).
-The table below shows the CANONICAL SET; order in one observed capture shown in "Observed
-position" column (from JA3 raw string in curl_cffi #529).
+Chromium shuffles the non-GREASE extensions per connection and pins one GREASE
+extension first and one last. Two real captures showed completely different orders
+(below), confirming the shuffle. The canonical SET (sorted) is what JA4 part C hashes.
 
-| Observed pos | Dec   | Hex    | Name |
-|--------------|-------|--------|------|
-| 1            | 51    | 0x0033 | key_share |
-| 2            | 27    | 0x001B | compress_certificate |
-| 3            | 65281 | 0xFF01 | renegotiation_info |
-| 4            | 18    | 0x0012 | signed_certificate_timestamp (SCT) |
-| 5            | 45    | 0x002D | psk_key_exchange_modes |
-| 6            | 0     | 0x0000 | server_name (SNI) — NOT shuffled, fixed first among shuffled |
-| 7            | 35    | 0x0023 | session_ticket |
-| 8            | 5     | 0x0005 | status_request |
-| 9            | 11    | 0x000B | ec_point_formats |
-| 10           | 43    | 0x002B | supported_versions |
-| 11           | 16    | 0x0010 | ALPN (application_layer_protocol_negotiation) |
-| 12           | 65037 | 0xFE0D | encrypted_client_hello (ECH, GREASE outer) |
-| 13           | 23    | 0x0017 | extended_master_secret |
-| 14           | 17613 | 0x44CD | application_settings_new (ALPS) |
-| 15           | 13    | 0x000D | signature_algorithms |
-| 16           | 10    | 0x000A | supported_groups |
-| (GREASE 0)   | GREASE| 0x?A?A | GREASE extension — before first non-GREASE |
-| (GREASE 17)  | GREASE| 0x?A?A | GREASE extension — after last non-GREASE |
+Observed order, tls.peet.ws capture:
+```
+GREASE, 0x000a, 0x002b, 0x0010, 0x000b, 0x0017, 0x002d, 0x44cd, 0xfe0d,
+0x0005, 0x0012, 0x001b, 0xff01, 0x0000, 0x0033, 0x000d, 0x0023, GREASE
+```
+Observed order, browserleaks capture (different!):
+```
+GREASE, 0x0023, 0x0005, 0x002b, 0x000d, 0x0012, 0xff01, 0xfe0d, 0x000a,
+0x0033, 0x44cd, 0x0000, 0x0017, 0x0010, 0x002d, 0x001b, 0x000b, GREASE
+```
+
+Canonical set:
+
+| Dec   | Hex    | Name |
+|-------|--------|------|
+| 0     | 0x0000 | server_name (SNI) |
+| 5     | 0x0005 | status_request |
+| 10    | 0x000A | supported_groups |
+| 11    | 0x000B | ec_point_formats |
+| 13    | 0x000D | signature_algorithms |
+| 18    | 0x0012 | signed_certificate_timestamp (SCT) |
+| 23    | 0x0017 | extended_master_secret |
+| 27    | 0x001B | compress_certificate |
+| 16    | 0x0010 | ALPN |
+| 35    | 0x0023 | session_ticket |
+| 43    | 0x002B | supported_versions |
+| 45    | 0x002D | psk_key_exchange_modes |
+| 51    | 0x0033 | key_share |
+| 17613 | 0x44CD | application_settings (ALPS) |
+| 65037 | 0xFE0D | encrypted_client_hello (GREASE-ECH outer) |
+| 65281 | 0xFF01 | renegotiation_info |
 
 **JA4 Part C sorted extension list** (SNI=0x0000 and ALPN=0x0010 excluded):
 ```
 0005,000a,000b,000d,0012,0017,001b,0023,002b,002d,0033,44cd,fe0d,ff01
 ```
 
-### Supported Groups (in extension 0x000A)
-
-In ClientHello order (GREASE + 4 real groups):
+### Supported Groups (extension 0x000A)
 
 | Position | Decimal | Hex    | Name |
 |----------|---------|--------|------|
-| 0        | GREASE  | 0x?A?A | GREASE placeholder |
-| 1        | 4588    | 0x11EC | X25519MLKEM768 (hybrid post-quantum, draft-ietf-tls-hybrid-design) |
+| 0        | GREASE  | 0x?A?A | GREASE (shares the per-connection value used in key_share) |
+| 1        | 4588    | 0x11EC | X25519MLKEM768 (hybrid post-quantum) |
 | 2        | 29      | 0x001D | x25519 |
 | 3        | 23      | 0x0017 | secp256r1 (P-256) |
 | 4        | 24      | 0x0018 | secp384r1 (P-384) |
 
-Note: X25519MLKEM768 (0x11EC) is the Kyber-768 + X25519 hybrid post-quantum group
-introduced in Chrome 124+ (Chromium stable).
-
-### Signature Algorithms (in extension 0x000D)
-
-In ClientHello order (NOT sorted for JA4 part C):
-
-| Position | Hex    | Decimal | Name |
-|----------|--------|---------|------|
-| 1        | 0x0403 | 1027    | ecdsa_secp256r1_sha256 |
-| 2        | 0x0804 | 2052    | rsa_pss_rsae_sha256 |
-| 3        | 0x0401 | 1025    | rsa_pkcs1_sha256 |
-| 4        | 0x0503 | 1283    | ecdsa_secp384r1_sha384 |
-| 5        | 0x0805 | 2053    | rsa_pss_rsae_sha384 |
-| 6        | 0x0501 | 1281    | rsa_pkcs1_sha384 |
-| 7        | 0x0806 | 2054    | rsa_pss_rsae_sha512 |
-| 8        | 0x0601 | 1537    | rsa_pkcs1_sha512 |
-
-**JA4 Part C sig algs string** (in hello order, NOT sorted):
+### Signature Algorithms (extension 0x000D), in hello order (NOT sorted)
 ```
 0403,0804,0401,0503,0805,0501,0806,0601
 ```
+ecdsa_secp256r1_sha256, rsa_pss_rsae_sha256, rsa_pkcs1_sha256, ecdsa_secp384r1_sha384,
+rsa_pss_rsae_sha384, rsa_pkcs1_sha384, rsa_pss_rsae_sha512, rsa_pkcs1_sha512.
 
 ### ALPN
-- `h2` (HTTP/2)
-- `http/1.1`
+`h2`, `http/1.1`
 
-### Supported TLS Versions (in extension 0x002B)
-1. GREASE placeholder
-2. 0x0304 (TLS 1.3)
-3. 0x0303 (TLS 1.2)
+### application_settings / ALPS (0x44CD)
+Body advertises a single protocol: `h2`.
 
-### key_share Groups (in extension 0x0033)
-1. GREASE placeholder (1-byte zero key)
-2. X25519MLKEM768 (0x11EC) — full key material
+### Supported Versions (0x002B)
+GREASE, 0x0304 (TLS 1.3), 0x0303 (TLS 1.2).
+
+### key_share (0x0033)
+1. GREASE (group = the per-connection supported_groups GREASE value, 1-byte `00` key)
+2. X25519MLKEM768 (0x11EC) — 1216-byte hybrid share (ML-KEM-768 ek ‖ x25519)
 3. X25519 (0x001D) — 32-byte key
 
-### compress_certificate (0x001B)
-- Brotli (0x0002)
+### encrypted_client_hello / GREASE-ECH (0xFE0D)
+Chromium sends a GREASE-ECH **outer**:
+- type = outer (0x00)
+- kdf_id = 0x0001 (HKDF-SHA256), aead_id = 0x0001 (AES-128-GCM)
+- config_id = 1 random byte
+- enc = 32-byte X25519 public key
+- payload = ~144–192 random "encrypted" bytes
+(browserleaks decoded one as: config_id=21, enc_length=32, payload_length=176.)
 
-### psk_key_exchange_modes (0x002D)
-- psk_dhe_ke (0x01)
+### compress_certificate (0x001B): brotli (0x0002)
+### psk_key_exchange_modes (0x002D): psk_dhe_ke (0x01)
+### ec_point_formats (0x000B): uncompressed (0x00)
+### session_ticket (0x0023): empty
+### renegotiation_info (0xFF01): empty
 
-### ec_point_formats (0x000B)
-- uncompressed (0x00)
-
-### session_ticket (0x0023)
-- Empty (0 bytes of ticket data on fresh connection)
-
-### renegotiation_info (0xFF01)
-- Empty (0x00 length of renegotiation data = no prior renegotiation)
-
----
-
-## Raw ClientHello Binary
-
-**Not produced.** No raw `.bin` file was captured; a `.bin` file cannot be reconstructed without
-knowing the exact GREASE values, random bytes, and key_share public keys used in a specific
-connection. The `.bin` file is to be generated by the builder (Task 5) and validated against
-the committed JA4 in `yandex.ja4` once the builder is implemented.
-
----
-
-## Known Differences: Chrome 134 (Mac) vs Chrome 148 Windows
-
-The Telegram Desktop issue #30733 shows that Chrome 148 on Windows uses:
-```
-t13d1514h2_8daaf6152771_827b515c4f52
-```
-vs Chrome 134 on Mac:
-```
-t13d1516h2_8daaf6152771_d8a2da3f94cd
-```
-Key differences:
-- `1514` vs `1516`: Chrome 148 Windows has **14** non-GREASE extensions (not 16)
-- Part C differs: the extension or sig_alg content changed
-
-The exact Chrome 148 extension set has not been fully reverse-engineered. Since Yandex Browser
-26.4 is based on Chromium 148 but typically ships on Windows as the primary platform, the
-Chrome 148 Windows fingerprint may be closer to what Yandex Browser 26.4 actually emits.
-
-**TODO:** Replace this fixture with an authentic Yandex Browser 26.4 capture, or at minimum
-a verified Chrome 148 Windows capture. The current fixture (Chrome 134 Mac) uses the same
-cipher suite B-hash and is verified mathematically, but the extension set (JA4 part C) may
-differ from what Yandex Browser 26.4 actually produces.
+### Per-connection GREASE
+GREASE values are randomized per connection following BoringSSL's derivation: a single
+seed produces distinct values for cipher / group / extension1 / extension2 / version,
+where the **supported_groups GREASE equals the key_share GREASE**, and the two
+extension-list GREASE values must differ. Observed pairs:
+- tls.peet.ws: cipher=0xCACA, group=0x6A6A (groups & key_share), ext=0x5A5A/0x4A4A, version=0x0A0A
+- browserleaks: cipher=0x9A9A, group=0x4A4A, ext=0xEAEA/0xFAFA, version=0x2A2A
 
 ---
 
-## Authenticity & Fallback Rationale
+## HTTP/2 fingerprint (informational; not emitted by Leshiy)
 
-No dedicated Yandex Browser TLS capture was found in any public fingerprint database:
-- `tlsfingerprint.io` — currently suspended (funding cut)
-- `ja4db.com` — timed out; the FoxIO JA4 CSV only contained generic Chromium, Firefox, Safari entries, no Yandex
-- `tls.peet.ws` — expired certificate
-- GitHub search for uTLS Yandex profiles — no dedicated Yandex profile found in refraction-networking/utls
-
-This is a **Chrome 134 (Mac) fallback** per the plan's fallback clause, chosen because:
-1. Chrome 134 was a stable Chrome version from late 2025
-2. All three parts of JA4 and the JA3 hash were independently computed and verified
-3. Yandex Browser uses BoringSSL (Chromium's TLS library) with no documented TLS deviation
-4. The cipher suite B-hash (`8daaf6152771`) is stable across Chrome 91–148+ (same cipher list)
+tls.peet.ws also reported the Akamai HTTP/2 fingerprint
+`1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p`. Leshiy speaks its own tunnel mux
+after the TLS handshake, not real HTTP/2, so it never emits these frames. Recorded here
+only for completeness should HTTP/2 emulation ever be added.
 
 ---
 
 ## Sources
 
-1. **Primary fingerprint data:** https://github.com/lexiforest/curl_cffi/issues/529
-   — Chrome 134 Mac Desktop JA3, JA4, JA3N string, Akamai fingerprint (captured / reported 2025)
-
-2. **Cross-validation #1:** https://github.com/telegramdesktop/tdesktop/issues/30733
-   — References Chrome 134 Mac as `t13d1516h2_8daaf6152771_d8a2da3f94cd` and Chrome 148 Windows as
-   `t13d1514h2_8daaf6152771_827b515c4f52`
-
-3. **Cross-validation #2:** https://github.com/ntop/ndpi/issues/2914
-   — Uses `t13d1516h2_8daaf6152771_d8a2da3f94cd` in JA4 PCAP test cases
-
-4. **uTLS Chrome profiles:** https://github.com/refraction-networking/utls/blob/master/u_parrots.go
-   — HelloChrome_131 and HelloChrome_133 definition (cipher suites, extensions, groups, sig algs)
-
-5. **IANA TLS extension registry:** https://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xhtml
-   — Extension type numeric assignments
-
-6. **Yandex Browser version:** https://www.whatismybrowser.com/guides/the-latest-version/yandex-browser
-   — Version 26.4.3.897 with `Chrome/148.0.0.0` in UA string
-
-7. **JA4 specification:** https://github.com/FoxIO-LLC/ja4 — spec for JA4 computation
-
----
-
-## Mathematical Verification Log (2026-06-07)
-
-All computations performed in Python 3 using `hashlib`:
-
-```
-Cipher list (sorted hex):
-  002f,0035,009c,009d,1301,1302,1303,c013,c014,c02b,c02c,c02f,c030,cca8,cca9
-JA4 Part B = SHA256[:12] = 8daaf6152771  ✓
-
-Extension list for Part C (sorted, SNI+ALPN excluded):
-  0005,000a,000b,000d,0012,0017,001b,0023,002b,002d,0033,44cd,fe0d,ff01
-Sig algs (in order):
-  0403,0804,0401,0503,0805,0501,0806,0601
-Combined: <exts>_<sigalgs>
-JA4 Part C = SHA256[:12] = d8a2da3f94cd  ✓
-
-JA4 = t13d1516h2_8daaf6152771_d8a2da3f94cd  ✓
-
-JA3 string (one observed extension order):
-  771,4865-...-53,51-27-65281-18-45-0-35-5-11-43-16-65037-23-17613-13-10,4588-29-23-24,0
-JA3 MD5 = 845db3b4e398789bdeb5b15594360a29  ✓
-```
+1. tls.peet.ws `/api/all` — Yandex 26.4.0.0 JA4, JA4_r, JA3, peetprint, full ordered field lists (2026-06-10)
+2. browserleaks.com/tls — independent JA4 + decoded extension/cipher breakdown (2026-06-10)
+3. Three Wireshark last-segment packet captures (gosuslugi.ru / mos.ru) — confirmed ECH outer, key_share, shuffle
+4. JA4 specification: https://github.com/FoxIO-LLC/ja4
+5. IANA TLS extension registry: https://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xhtml
+6. BoringSSL GREASE derivation + extension permutation (ssl_get_grease_value / ShuffleChromeTLSExtensions)

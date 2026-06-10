@@ -1,8 +1,11 @@
 //! Declarative browser TLS fingerprint profiles. Values mirror a real capture
 //! (see tests/fixtures/SOURCE.md); ordering is significant for JA3/JA4 reproduction.
 //!
-//! `Profile::yandex()` is the default profile — it uses the Chrome 134 (Mac) field
-//! layout documented as a fallback in SOURCE.md (see "Authenticity & Fallback" section).
+//! `Profile::yandex()` is the default profile, matching an **authentic** Yandex
+//! Browser 26.4.0.0 (Chromium 146, Windows 11) ClientHello captured on 2026-06-10
+//! via tls.peet.ws and browserleaks (see SOURCE.md). Both the hashed JA4 and the
+//! raw `ja4_r` field lists were confirmed against ground truth:
+//!   JA4 = t13d1516h2_8daaf6152771_d8a2da3f94cd
 //! The field lists are chosen so that when projected into a `ClientHelloView`, the
 //! computed JA4 equals the committed fixture `yandex.ja4`.
 
@@ -47,10 +50,11 @@ pub struct Profile {
 impl Profile {
     /// Default profile: Yandex Browser (Russia-blending camouflage).
     ///
-    /// Field values are taken from the Chrome 134 (Mac) fixture documented in
-    /// `tests/fixtures/SOURCE.md` (see "Authenticity & Fallback Rationale").
+    /// Field values are taken from an authentic Yandex Browser 26.4.0.0 (Chromium 146,
+    /// Windows 11) capture documented in `tests/fixtures/SOURCE.md`.
     /// When these lists are projected into a `ClientHelloView` (with `has_sni = true`),
-    /// `ja4(&view)` produces the exact JA4 string committed in `tests/fixtures/yandex.ja4`.
+    /// `ja4(&view)` produces the exact JA4 string committed in `tests/fixtures/yandex.ja4`,
+    /// and `ja4_r(&view)` matches `tests/fixtures/yandex.ja4_r`.
     ///
     /// JA4 part A breakdown: `t13d1516h2`
     ///   - protocol = `t` (TCP/TLS)
@@ -152,8 +156,8 @@ impl Profile {
     ///
     /// TODO: Replace with a dedicated Chrome fixture when available. For now this
     /// delegates to `yandex()` since both are Chromium-based and share the same
-    /// TLS field layout for Chrome 134 (Mac). A real Chrome fixture may differ in
-    /// minor extension details.
+    /// TLS field layout (Yandex 26.4 is Chromium 146). A real Chrome fixture may
+    /// differ in minor extension details.
     pub fn chrome() -> Profile {
         let mut p = Profile::yandex();
         p.name = "chrome";
