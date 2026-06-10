@@ -15,6 +15,14 @@ mode() {  # "docker" if the install used compose, else "native"
   fi
 }
 
+compose() {  # docker compose v2 (plugin) if present, else the v1 docker-compose standalone
+  if docker compose version >/dev/null 2>&1; then
+    docker compose "$@"
+  else
+    docker-compose "$@"
+  fi
+}
+
 usage() {
   echo "usage: leshiyctl {status|upgrade|uninstall [--purge]|user ...}" >&2
   exit 2
@@ -26,21 +34,21 @@ verb="$1"; shift
 case "$verb" in
   status)
     if [ "$(mode)" = docker ]; then
-      ( cd "$CFGDIR" && docker compose ps )
+      ( cd "$CFGDIR" && compose ps )
     else
       leshiy status --config "$CONFIG"
     fi
     ;;
   upgrade)
     if [ "$(mode)" = docker ]; then
-      ( cd "$CFGDIR" && docker compose pull && docker compose up -d )
+      ( cd "$CFGDIR" && compose pull && compose up -d )
     else
       leshiy upgrade "$@"
     fi
     ;;
   uninstall)
     if [ "$(mode)" = docker ]; then
-      ( cd "$CFGDIR" && docker compose down )
+      ( cd "$CFGDIR" && compose down )
       case "${1:-}" in --purge) rm -rf "$CFGDIR" ;; esac
     else
       leshiy uninstall --config "$CONFIG" "$@"

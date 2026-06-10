@@ -86,6 +86,22 @@ install_pkg() {  # best-effort installer for a host tool ($1)
 
 public_ip() { curl -fsSL https://api.ipify.org || curl -fsSL https://ifconfig.me; }
 
+compose() {  # docker compose v2 (plugin) if present, else the v1 docker-compose standalone
+  if docker compose version >/dev/null 2>&1; then
+    docker compose "$@"
+  else
+    docker-compose "$@"
+  fi
+}
+ensure_compose() {  # get.docker.com bundles compose, but an existing docker may lack it
+  docker compose version >/dev/null 2>&1 && return 0
+  have docker-compose && return 0
+  die "docker compose is not installed. Add it and re-run, e.g.:
+    Debian/Ubuntu (docker apt repo):  apt-get install -y docker-compose-plugin
+    Fedora:                           dnf install -y docker-compose-plugin
+  or see https://docs.docker.com/compose/install/"
+}
+
 open_firewall() {
   if have ufw; then
     ufw allow 443/tcp
@@ -178,6 +194,7 @@ main() {
 
   if [ "$DOCKER" -eq 1 ]; then
     have docker || sh -c "$(curl -fsSL https://get.docker.com)"
+    ensure_compose   # an already-present docker may not include the compose plugin
     install -d -m700 "$CFGDIR"
     IMG_TAG="$VERSION"
     if [ "$IMG_TAG" = "latest" ]; then
@@ -203,7 +220,7 @@ services:
 COMPOSE
     printf '{"mode":"docker"}\n' > "$CFGDIR/install.json"
     open_firewall
-    ( cd "$CFGDIR" && docker compose up -d )
+    ( cd "$CFGDIR" && compose up -d )
     echo "leshiy running under docker compose."
     exit 0
   fi
