@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type { Profile } from "@/lib/types";
 import { ClipboardIcon, QrIcon } from "./icons";
+import { defaultConfigName } from "@/lib/uri";
 
 interface Props {
   open: boolean; onOpenChange: (o: boolean) => void;
@@ -32,7 +33,7 @@ export function ConfigSheet(p: Props) {
   const [uri, setUri] = useState(""); const [name, setName] = useState(""); const [error, setError] = useState<string | null>(null);
   const doImport = async () => {
     setError(null);
-    try { await p.onImport(uri.trim(), name.trim() || uri.trim().slice(9, 24)); setUri(""); setName(""); }
+    try { await p.onImport(uri.trim(), name.trim() || defaultConfigName(uri) || "config"); setUri(""); setName(""); }
     catch { setError(t("config.invalid")); }
   };
   return (
@@ -47,7 +48,11 @@ export function ConfigSheet(p: Props) {
               setError(null);
               try {
                 const text = await navigator.clipboard.readText();
-                if (text) setUri(text.trim());
+                if (text) {
+                  const v = text.trim();
+                  setUri(v);
+                  setName((n) => (n.trim() ? n : defaultConfigName(v)));
+                }
               } catch {
                 /* clipboard blocked; use the manual field */
               }
@@ -69,8 +74,12 @@ export function ConfigSheet(p: Props) {
                 const f = e.target.files?.[0];
                 if (f) {
                   const decoded = await decodeQrFile(f);
-                  if (decoded) setUri(decoded);
-                  else setError(t("config.invalid"));
+                  if (decoded) {
+                    setUri(decoded);
+                    setName((n) => (n.trim() ? n : defaultConfigName(decoded)));
+                  } else {
+                    setError(t("config.invalid"));
+                  }
                 }
               }}
             />
@@ -86,7 +95,11 @@ export function ConfigSheet(p: Props) {
 
         {/* Manual entry */}
         <div className="flex flex-col gap-2 px-4 pb-4">
-          <Input className="font-mono bg-bg1" placeholder={t("config.paste")} value={uri} onChange={(e) => setUri(e.target.value)} />
+          <Input className="font-mono bg-bg1" placeholder={t("config.paste")} value={uri} onChange={(e) => {
+            const v = e.target.value;
+            setUri(v);
+            setName((n) => (n.trim() ? n : defaultConfigName(v)));
+          }} />
           <div className="flex gap-2">
             <Input className="flex-1 bg-bg1" placeholder={t("config.name")} value={name} onChange={(e) => setName(e.target.value)} />
             <Button onClick={doImport} disabled={!uri.trim()}>{t("config.add")}</Button>
