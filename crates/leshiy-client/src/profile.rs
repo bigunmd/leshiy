@@ -5,6 +5,7 @@
 use crate::error::{ClientError, Result};
 use leshiy_reality::config::RealityUri;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// One saved server configuration.
@@ -91,6 +92,30 @@ impl ProfileStore {
             }
             None => false,
         }
+    }
+
+    /// Load the store from `path`. A missing file yields an empty store (first run).
+    pub fn load(path: &Path) -> Result<Self> {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).map_err(|e| ClientError::Store(e.to_string()))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(ClientError::Io(e)),
+        }
+    }
+
+    /// Persist the store to `path` atomically (write a sibling temp file, then rename).
+    pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let data =
+            serde_json::to_vec_pretty(self).map_err(|e| ClientError::Store(e.to_string()))?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, data)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
     }
 
     /// Remove a profile. Clears the active pointer if it pointed at this one.
@@ -180,5 +205,31 @@ mod tests {
         // Removing the active profile clears the active pointer.
         assert!(store.active().is_none());
         assert!(!store.remove(&id));
+    }
+
+    fn temp_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("leshiy-test-{}.json", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn load_missing_file_returns_empty() {
+        let store = ProfileStore::load(&temp_path()).unwrap();
+        assert_eq!(store.list().len(), 0);
+        assert!(store.active().is_none());
+    }
+
+    #[test]
+    fn save_then_load_round_trips() {
+        let path = temp_path();
+        let mut store = ProfileStore::default();
+        let id = store.import(&sample_uri(), "A").unwrap();
+        store.set_active(&id);
+        store.save(&path).unwrap();
+
+        let reloaded = ProfileStore::load(&path).unwrap();
+        assert_eq!(reloaded.list().len(), 1);
+        assert_eq!(reloaded.active().unwrap().id, id);
+
+        let _ = std::fs::remove_file(&path);
     }
 }
