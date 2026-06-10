@@ -6,7 +6,7 @@ set -eu
 REPO="${LESHIY_REPO:-bigunmd/leshiy}"    # override with LESHIY_REPO for forks
 BINDIR="/usr/local/bin"
 CFGDIR="/etc/leshiy"
-# Embedded minisign public key (matches scripts/minisign.pub):
+# Embedded minisign public key — the base64 key line of scripts/minisign.pub.
 MINISIGN_PUB="RWTdtVTZBm+928JVtALfb1pBJf013uPjatAh3WwNV20EqaEoQmulZgXU"
 
 DOCKER=0; ASSUME_YES=0; HOST=""; DEST=""; QUIC=0; VERSION="latest"
@@ -59,10 +59,10 @@ verify_and_install_binary() {
   curl -fsSL "$base/leshiy-$ver-$target.tar.gz" -o "$tmp/pkg.tgz"
   curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
   curl -fsSL "$base/SHA256SUMS.minisig" -o "$tmp/SHA256SUMS.minisig"
-  # 1) signature over the checksum file
-  echo "$MINISIGN_PUB" > "$tmp/minisign.pub"
+  # 1) signature over the checksum file — pass the pubkey as a base64 string via -P (no file;
+  #    minisign -p expects a 2-line key FILE, -P takes the bare key line we embed above).
   have minisign || install_pkg minisign
-  minisign -Vm "$tmp/SHA256SUMS" -p "$tmp/minisign.pub" -x "$tmp/SHA256SUMS.minisig" \
+  minisign -Vm "$tmp/SHA256SUMS" -P "$MINISIGN_PUB" -x "$tmp/SHA256SUMS.minisig" \
     || die "signature verification FAILED — aborting"
   # 2) checksum over the artifact we actually downloaded
   ( cd "$tmp" && grep "leshiy-$ver-$target.tar.gz" SHA256SUMS | sha256sum -c - ) \

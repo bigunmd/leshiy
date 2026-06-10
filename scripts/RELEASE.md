@@ -5,29 +5,26 @@ and a multi-arch GHCR image whenever a `v*` tag is pushed. Two one-time setup st
 required before the first real release, because the project's signing identity must be
 created by a maintainer (not committed to the repo).
 
-## 1. Generate the minisign signing key (one-time, offline)
+## 1. The minisign signing key
 
-`scripts/minisign.pub` currently holds a **placeholder** (`RWQ_REPLACE_WITH_REAL_PUBKEY_LINE`).
-Replace it with a real key:
+`scripts/minisign.pub` holds the real public key, and its **base64 line** is embedded in
+`scripts/install.sh` as `MINISIGN_PUB="RWT…"`. The native installer verifies downloads with
+`minisign -P "$MINISIGN_PUB"` — the **bare key line passed as a string**, not a two-line key
+*file* (`minisign -p <file>` would fail with "Error while loading the public key file").
+
+**To rotate the key** (or set one up on a fork):
 
 ```sh
 # Generates a real keypair. Keep the secret key OUT of git.
 minisign -G -p scripts/minisign.pub -s /tmp/leshiy-minisign.key
-```
 
-This overwrites `scripts/minisign.pub` with the real public key (safe to commit) and writes
-the secret key to `/tmp/leshiy-minisign.key`.
-
-Then propagate the public key line into the installer so it can verify downloads. The second
-line of `scripts/minisign.pub` (the one starting `RWQ…`) must replace
-`RWQ_REPLACE_WITH_REAL_PUBKEY_LINE` inside `scripts/install.sh` (the `MINISIGN_PUB="…"` line):
-
-```sh
+# Embed the new public key's base64 line into install.sh's MINISIGN_PUB=.
 PUB="$(tail -1 scripts/minisign.pub)"
-sed -i "s|RWQ_REPLACE_WITH_REAL_PUBKEY_LINE|$PUB|" scripts/install.sh
+sed -i -E "s|^MINISIGN_PUB=\".*\"|MINISIGN_PUB=\"$PUB\"|" scripts/install.sh
 ```
 
-Commit both updated files.
+Commit both updated files. (`leshiy upgrade` embeds `scripts/minisign.pub` at build time via
+`include_str!`, so a rebuild picks up the new key automatically.)
 
 ## 2. Store the secret key as GitHub Actions secrets (one-time)
 

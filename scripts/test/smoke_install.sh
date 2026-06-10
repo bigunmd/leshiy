@@ -20,13 +20,10 @@ docker run --rm -v "$here":/work -w /work debian:12 sh -eu -c '
   # Sign with empty password (passwordless key still prompts without piped input).
   printf "\n" | minisign -S -s /srv/minisign.key -m /srv/rel/SHA256SUMS >/dev/null 2>&1
 
-  # Sanity: confirm the pubkey placeholder in install.sh can be substituted.
+  # Good path: verify exactly the way install.sh::verify_and_install_binary does — the bare
+  # base64 key line passed via -P (NOT a 2-line key FILE with -p, which would fail to load).
   PUB="$(tail -1 /srv/minisign.pub)"
-  sed "s|RWQ_REPLACE_WITH_REAL_PUBKEY_LINE|$PUB|" scripts/install.sh > /tmp/install.sh
-  grep -q "$PUB" /tmp/install.sh || { echo "PUBKEY-SUBST-FAILED"; exit 1; }
-
-  # Good path: verify exactly the way install.sh::verify_and_install_binary does.
-  minisign -Vm /srv/rel/SHA256SUMS -p /srv/minisign.pub -x /srv/rel/SHA256SUMS.minisig \
+  minisign -Vm /srv/rel/SHA256SUMS -P "$PUB" -x /srv/rel/SHA256SUMS.minisig \
     || { echo "SIG-VERIFY-FAILED"; exit 1; }
   ( cd /srv/rel && grep "leshiy-vT-x86_64-unknown-linux-musl.tar.gz" SHA256SUMS | sha256sum -c - ) \
     || { echo "CHECKSUM-VERIFY-FAILED"; exit 1; }
