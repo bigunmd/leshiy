@@ -183,9 +183,10 @@ main() {
     if [ "$IMG_TAG" = "latest" ]; then
       IMG_TAG="$(resolve_version)"
     fi
-    # Generate config inside the image, mounting the config dir.
+    # Generate config inside the image, mounting the config dir. Run as root (--user 0:0):
+    # the image's default 'nonroot' user can't write the root-owned /etc/leshiy bind mount.
     # shellcheck disable=SC2046  # intentional word-splitting of quic_args (0 or 2 args)
-    docker run --rm -v "$CFGDIR":/etc/leshiy "ghcr.io/$REPO:$IMG_TAG" \
+    docker run --rm --user 0:0 -v "$CFGDIR":/etc/leshiy "ghcr.io/$REPO:$IMG_TAG" \
       quickstart --host "$HOST" --dest "$DEST" --out /etc/leshiy/server.toml \
       $(quic_args) $(role_args)
     cat > "$CFGDIR/docker-compose.yaml" <<COMPOSE
@@ -193,6 +194,9 @@ services:
   leshiy:
     image: ghcr.io/$REPO:$IMG_TAG
     command: server --config /etc/leshiy/server.toml
+    # Run as root in-container: with network_mode host the server binds the privileged :443
+    # and must read/write its root-owned config + DB + control socket in /etc/leshiy.
+    user: "0:0"
     network_mode: host
     volumes: ["$CFGDIR:/etc/leshiy"]
     restart: unless-stopped
