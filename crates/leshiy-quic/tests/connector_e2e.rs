@@ -14,7 +14,6 @@ use leshiy_quic::{
     connector::ConnectorEgress,
     endpoint::{CertVerification, cert_sha256},
     masquerade::Masquerade,
-    server::run_quic_server,
 };
 use leshiy_reality::{
     client::run_reality_client,
@@ -83,20 +82,37 @@ fn self_signed() -> (
     (vec![cert_der], key_der)
 }
 
-/// Bind a free UDP port, drop the socket, return the address.
-fn free_udp_addr() -> std::net::SocketAddr {
-    let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let a = s.local_addr().unwrap();
-    drop(s);
-    a
-}
-
 /// Bind a free TCP port, drop the listener, return the address.
 fn free_tcp_addr() -> std::net::SocketAddr {
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let a = l.local_addr().unwrap();
     drop(l);
     a
+}
+
+/// Bind a QUIC server on an ephemeral port and start its accept loop, returning the bound
+/// address. RACE-FREE: the endpoint owns the socket from bind through serve, so a parallel
+/// test can never grab the port in a gap — unlike `free_udp_addr` + `run_quic_server(addr)`,
+/// whose drop/rebind window caused intermittent "certificate pin mismatch".
+fn spawn_quic_node(
+    certs: Vec<rustls::pki_types::CertificateDer<'static>>,
+    key: rustls::pki_types::PrivateKeyDer<'static>,
+    store: Arc<dyn leshiy_reality::user::UserStore>,
+    egress: Arc<dyn leshiy_reality::egress::Egress>,
+) -> std::net::SocketAddr {
+    let ep = leshiy_quic::endpoint::server_endpoint("127.0.0.1:0".parse().unwrap(), certs, key)
+        .expect("bind quic endpoint");
+    let addr = ep.local_addr().expect("local_addr");
+    tokio::spawn(async move {
+        let _ = leshiy_quic::server::serve_quic_on_endpoint(
+            ep,
+            store,
+            leshiy_quic::masquerade::Masquerade::default(),
+            egress,
+        )
+        .await;
+    });
+    addr
 }
 
 /// Drive a full SOCKS5 CONNECT over the given SOCKS proxy to the echo address,
@@ -177,7 +193,6 @@ async fn spawn_rustls_dest() -> String {
 async fn spawn_exit_b() -> (std::net::SocketAddr, [u8; 32]) {
     let (b_certs, b_key) = self_signed();
     let b_pin = cert_sha256(b_certs[0].as_ref());
-    let b_addr = free_udp_addr();
     let b_store = Arc::new(InMemoryUserStore::new(vec![User {
         short_id: CONNECTOR_SID,
         enabled: true,
@@ -186,17 +201,7 @@ async fn spawn_exit_b() -> (std::net::SocketAddr, [u8; 32]) {
         rate_up: None,
         rate_down: None,
     }]));
-    tokio::spawn(async move {
-        let _ = run_quic_server(
-            b_addr,
-            b_certs,
-            b_key,
-            b_store,
-            Masquerade::default(),
-            Arc::new(DirectEgress),
-        )
-        .await;
-    });
+    let b_addr = spawn_quic_node(b_certs, b_key, b_store, Arc::new(DirectEgress));
     // Give B a moment to start listening before callers try to connect.
     tokio::time::sleep(Duration::from_millis(50)).await;
     (b_addr, b_pin)
@@ -229,7 +234,6 @@ async fn connector_quic_front_two_hop() {
     // Step 3: start A as a QUIC server with the ConnectorEgress.
     let (a_certs, a_key) = self_signed();
     let a_pin = cert_sha256(a_certs[0].as_ref());
-    let a_addr = free_udp_addr();
     let a_store = Arc::new(InMemoryUserStore::new(vec![User {
         short_id: USER_SID,
         enabled: true,
@@ -238,20 +242,7 @@ async fn connector_quic_front_two_hop() {
         rate_up: None,
         rate_down: None,
     }]));
-    {
-        let egress = Arc::new(connector);
-        tokio::spawn(async move {
-            let _ = run_quic_server(
-                a_addr,
-                a_certs,
-                a_key,
-                a_store,
-                Masquerade::default(),
-                egress,
-            )
-            .await;
-        });
-    }
+    let a_addr = spawn_quic_node(a_certs, a_key, a_store, Arc::new(connector));
 
     // Step 4: start the client pointing at A.
     let socks = free_tcp_addr();
@@ -457,7 +448,6 @@ async fn connector_enforces_at_entry() {
     // Step 3: start A with USER_SID capped at 100 KB.
     let (a_certs, a_key) = self_signed();
     let a_pin = cert_sha256(a_certs[0].as_ref());
-    let a_addr = free_udp_addr();
     let a_store = Arc::new(InMemoryUserStore::new(vec![User {
         short_id: USER_SID,
         enabled: true,
@@ -466,20 +456,7 @@ async fn connector_enforces_at_entry() {
         rate_up: None,
         rate_down: None,
     }]));
-    {
-        let egress = Arc::new(connector);
-        tokio::spawn(async move {
-            let _ = run_quic_server(
-                a_addr,
-                a_certs,
-                a_key,
-                a_store,
-                Masquerade::default(),
-                egress,
-            )
-            .await;
-        });
-    }
+    let a_addr = spawn_quic_node(a_certs, a_key, a_store, Arc::new(connector));
 
     // Step 4: start the client.
     let socks = free_tcp_addr();
@@ -608,28 +585,13 @@ async fn connector_chain_three_hops() {
     // --- C: the real exit (DirectEgress). Accepts EXIT_SID=[3;8]. ---
     let (c_certs, c_key) = self_signed();
     let c_pin = cert_sha256(c_certs[0].as_ref());
-    let c_addr = free_udp_addr();
-    tokio::spawn({
-        let c_store = single_user_store(EXIT_SID);
-        let c_certs = c_certs.clone();
-        async move {
-            let _ = run_quic_server(
-                c_addr,
-                c_certs,
-                c_key,
-                c_store,
-                Masquerade::default(),
-                Arc::new(DirectEgress),
-            )
-            .await;
-        }
-    });
+    let c_store = single_user_store(EXIT_SID);
+    let c_addr = spawn_quic_node(c_certs, c_key, c_store, Arc::new(DirectEgress));
     wait_udp(c_addr).await;
 
     // --- B: mid-hop (ConnectorEgress→C). Accepts CONNECTOR_SID=[2;8]. ---
     let (b_certs, b_key) = self_signed();
     let b_pin = cert_sha256(b_certs[0].as_ref());
-    let b_addr = free_udp_addr();
     let b_egress = ConnectorEgress::connect(
         c_addr,
         "example.test",
@@ -638,27 +600,13 @@ async fn connector_chain_three_hops() {
     )
     .await
     .expect("ConnectorEgress::connect B→C must succeed");
-    tokio::spawn({
-        let b_store = single_user_store(CONNECTOR_SID);
-        let b_certs = b_certs.clone();
-        async move {
-            let _ = run_quic_server(
-                b_addr,
-                b_certs,
-                b_key,
-                b_store,
-                Masquerade::default(),
-                Arc::new(b_egress),
-            )
-            .await;
-        }
-    });
+    let b_store = single_user_store(CONNECTOR_SID);
+    let b_addr = spawn_quic_node(b_certs, b_key, b_store, Arc::new(b_egress));
     wait_udp(b_addr).await;
 
     // --- A: entry (ConnectorEgress→B). Accepts USER_SID=[1;8]. ---
     let (a_certs, a_key) = self_signed();
     let a_pin = cert_sha256(a_certs[0].as_ref());
-    let a_addr = free_udp_addr();
     let a_egress = ConnectorEgress::connect(
         b_addr,
         "example.test",
@@ -667,21 +615,8 @@ async fn connector_chain_three_hops() {
     )
     .await
     .expect("ConnectorEgress::connect A→B must succeed");
-    tokio::spawn({
-        let a_store = single_user_store(USER_SID);
-        let a_certs = a_certs.clone();
-        async move {
-            let _ = run_quic_server(
-                a_addr,
-                a_certs,
-                a_key,
-                a_store,
-                Masquerade::default(),
-                Arc::new(a_egress),
-            )
-            .await;
-        }
-    });
+    let a_store = single_user_store(USER_SID);
+    let a_addr = spawn_quic_node(a_certs, a_key, a_store, Arc::new(a_egress));
     wait_udp(a_addr).await;
 
     // --- Client: connects to A, gets a SOCKS5 port. ---
@@ -739,7 +674,6 @@ async fn connector_reconnects_after_exit_restart() {
     let echo = spawn_echo().await;
     let (b_certs, b_key) = self_signed();
     let b_pin = cert_sha256(b_certs[0].as_ref());
-    let b_addr = free_udp_addr();
     let b_store = || {
         Arc::new(InMemoryUserStore::new(vec![User {
             short_id: [2; 8],
@@ -751,8 +685,15 @@ async fn connector_reconnects_after_exit_restart() {
         }])) as Arc<dyn leshiy_reality::user::UserStore>
     };
 
-    // --- B v1: build the endpoint HERE so the test OWNS it and can close() it. ---
-    let ep1 = bind_b_endpoint(b_addr, &b_certs, &b_key).await;
+    // --- B v1: build the endpoint HERE so the test OWNS it and can close() it.
+    //     Bind on :0 to get a race-free ephemeral port; read the address back from the endpoint. ---
+    let ep1 = leshiy_quic::endpoint::server_endpoint(
+        "127.0.0.1:0".parse().unwrap(),
+        b_certs.clone(),
+        clone_key(&b_key),
+    )
+    .expect("bind B-v1 endpoint");
+    let b_addr = ep1.local_addr().expect("local_addr");
     let srv1 = tokio::spawn({
         let (ep, s) = (ep1.clone(), b_store());
         async move {
