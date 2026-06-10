@@ -5,7 +5,7 @@ use crate::transport::{FrameRead, FrameWrite};
 use crate::version::{Hello, Negotiated, negotiate};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 /// Which side of the connection owns this mux.
 /// Clients allocate odd stream ids; servers allocate even ids.
@@ -79,6 +79,7 @@ pub struct Mux {
     incoming: mpsc::Receiver<Stream>,
     next_id: u32,
     pub negotiated: Negotiated,
+    closed_rx: watch::Receiver<bool>,
 }
 
 impl Mux {
@@ -115,10 +116,12 @@ impl Mux {
         let streams: Streams = Arc::new(Mutex::new(HashMap::new()));
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(256);
         let (inc_tx, incoming) = mpsc::channel::<Stream>(32);
+        let (closed_tx, closed_rx) = watch::channel(false);
 
         // --- writer task: drains cmd_rx, registers streams, sends frames ---
         {
             let w_streams = streams.clone();
+            let w_closed = closed_tx.clone();
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
@@ -146,6 +149,7 @@ impl Mux {
                         }
                     }
                 }
+                let _ = w_closed.send(true);
             });
         }
 
@@ -153,6 +157,7 @@ impl Mux {
         {
             let r_streams = streams.clone();
             let r_cmd_tx = cmd_tx.clone();
+            let r_closed = closed_tx;
             tokio::spawn(async move {
                 loop {
                     let f = match reader.read_frame().await {
@@ -187,6 +192,7 @@ impl Mux {
                     }
                     // unknown non-critical frame → silently ignore (continue)
                 }
+                let _ = r_closed.send(true);
             });
         }
 
@@ -196,6 +202,7 @@ impl Mux {
             incoming,
             next_id,
             negotiated,
+            closed_rx,
         })
     }
 
@@ -221,6 +228,14 @@ impl Mux {
     pub async fn accept(&mut self) -> Result<Stream> {
         self.incoming.recv().await.ok_or(Error::Closed)
     }
+
+    /// A receiver that flips to `true` once this mux's reader or writer task exits
+    /// (the underlying connection dropped). Clients `select!`/`wait_for` on this to
+    /// detect tunnel loss. The state latches, so a receiver cloned after closure still
+    /// observes `true`.
+    pub fn closed_receiver(&self) -> watch::Receiver<bool> {
+        self.closed_rx.clone()
+    }
 }
 
 #[cfg(test)]
@@ -236,6 +251,62 @@ mod tests {
             min_supported: 1,
             capabilities: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn closed_fires_when_reader_errors() {
+        use crate::error::Error;
+        use crate::frame::{Frame, FrameType};
+        use crate::transport::{FrameRead, FrameWrite};
+        use core::future::Future;
+
+        // Reader: first call returns a valid HELLO (consumed by `start`); the second
+        // call (the reader task's first read) errors, simulating a dropped transport.
+        struct MockReader {
+            sent_hello: bool,
+        }
+        impl FrameRead for MockReader {
+            fn read_frame(&mut self) -> impl Future<Output = crate::Result<Frame>> + Send {
+                let first = !self.sent_hello;
+                self.sent_hello = true;
+                async move {
+                    if first {
+                        Ok(Frame {
+                            stream_id: 0,
+                            ftype: FrameType::Hello as u8,
+                            payload: hello().encode(),
+                        })
+                    } else {
+                        Err(Error::Closed)
+                    }
+                }
+            }
+        }
+
+        struct MockWriter;
+        impl FrameWrite for MockWriter {
+            async fn write_frame(&mut self, _frame: &Frame) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mux = Mux::start(
+            MockReader { sent_hello: false },
+            MockWriter,
+            hello(),
+            Role::Client,
+        )
+        .await
+        .unwrap();
+
+        let mut closed = mux.closed_receiver();
+        tokio::time::timeout(std::time::Duration::from_secs(2), closed.wait_for(|v| *v))
+            .await
+            .expect("closed signal should fire when the reader task errors")
+            .unwrap();
+
+        // The state is latched: a freshly-cloned receiver also observes `true`.
+        assert!(*mux.closed_receiver().borrow());
     }
 
     #[tokio::test]
