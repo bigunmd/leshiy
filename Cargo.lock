@@ -1085,12 +1085,22 @@ name = "leshiy-client"
 version = "1.0.0"
 dependencies = [
  "async-trait",
+ "bytes",
+ "h3",
+ "h3-quinn",
+ "leshiy-core",
+ "leshiy-quic",
  "leshiy-reality",
+ "rcgen",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "uuid",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
