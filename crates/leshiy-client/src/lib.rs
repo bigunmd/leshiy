@@ -6,9 +6,11 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
+pub mod profile;
 pub mod settings;
 pub mod stats;
 
 pub use error::{ClientError, Result};
+pub use profile::Profile;
 pub use settings::{Settings, TransportPref};
 pub use stats::{ByteCounters, Rates, Throughput};
