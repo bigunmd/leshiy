@@ -32,6 +32,12 @@ mod tests {
     }
 
     #[test]
+    fn invalid_uri_has_no_detail() {
+        // Symmetric to the ConnectFailed test: the message must not vary by cause.
+        assert_eq!(ClientError::InvalidUri.to_string(), "invalid config link");
+    }
+
+    #[test]
     fn io_error_converts() {
         let io = std::io::Error::new(std::io::ErrorKind::NotFound, "x");
         let err: ClientError = io.into();
