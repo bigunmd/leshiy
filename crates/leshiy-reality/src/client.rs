@@ -20,7 +20,9 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 const SID_OFFSET: usize = 39;
-const LESHIY_VERSION: [u8; 3] = [0, 1, 0];
+/// Leshiy application version sealed into the (encrypted) auth payload — tracks the
+/// crate release version, distinct from the wire PROTOCOL_MAJOR. Never sent in clear.
+const LESHIY_VERSION: [u8; 3] = [1, 0, 0];
 
 /// Returns (ClientHello bytes, ephemeral x25519 private key bytes, ML-KEM-768 decap key).
 /// The ephemeral x25519 private and the ML-KEM decap key are BOTH reused in M1.3 for

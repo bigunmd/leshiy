@@ -42,12 +42,12 @@ shred -u /tmp/leshiy-minisign.key 2>/dev/null || rm -f /tmp/leshiy-minisign.key
 ## 3. Cut a release
 
 ```sh
-git tag v0.1.0 && git push github v0.1.0
+git tag v1.0.0 && git push github v1.0.0
 ```
 
 The workflow will publish (to the GitHub Release): both arch tarballs, `SHA256SUMS`,
 `SHA256SUMS.minisig`, `install.sh`, and `minisign.pub`; and push + cosign-sign the image at
-`ghcr.io/bigunmd/leshiy:v0.1.0` and `:latest`.
+`ghcr.io/bigunmd/leshiy:v1.0.0` and `:latest`.
 
 ## 4. Verify a release locally (recommended)
 
@@ -75,5 +75,5 @@ minisign -Vm SHA256SUMS -p scripts/minisign.pub
   signing-key blast radius. The workflow currently pins to mutable tags
   (`actions/checkout@v4`, `actions/download-artifact@v4`, `softprops/action-gh-release@v2`,
   `docker/*@v3`/`@v6`, `sigstore/cosign-installer@v3`). Replace each `@vN` with the action's
-  full commit SHA (the tag is mutable; the SHA is not) before tagging `v0.1.0`. Per-job
+  full commit SHA (the tag is mutable; the SHA is not) before tagging `v1.0.0`. Per-job
   `permissions:` are already scoped to least privilege.
