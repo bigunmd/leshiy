@@ -77,12 +77,13 @@ impl HostOps for RealHostOps {
 repo="$1"; version="$2"; target="$3"; dest="$4"; pubkey="$5"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 base="https://github.com/$repo/releases/download/$version"
-curl -fsSL "$base/leshiy-$version-$target.tar.gz" -o "$tmp/p.tgz"
+tarball="leshiy-$version-$target.tar.gz"
+curl -fsSL "$base/$tarball" -o "$tmp/$tarball"
 curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
 curl -fsSL "$base/SHA256SUMS.minisig" -o "$tmp/SHA256SUMS.minisig"
 minisign -Vm "$tmp/SHA256SUMS" -P "$pubkey" -x "$tmp/SHA256SUMS.minisig"
-( cd "$tmp" && grep "leshiy-$version-$target.tar.gz" SHA256SUMS | sha256sum -c - )
-tar -C "$tmp" -xzf "$tmp/p.tgz"
+( cd "$tmp" && grep "$tarball" SHA256SUMS | sha256sum -c - )
+tar -C "$tmp" -xzf "$tmp/$tarball"
 install -Dm755 "$tmp/leshiy" "$dest"
 "#;
         let st = std::process::Command::new("sh")

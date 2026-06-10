@@ -4,7 +4,7 @@
 set -eu
 
 REPO="${LESHIY_REPO:-bigunmd/leshiy}"    # override with LESHIY_REPO for forks
-BINDIR="/usr/local/bin"
+BINDIR="${LESHIY_BINDIR:-/usr/local/bin}"
 CFGDIR="/etc/leshiy"
 # Embedded minisign public key — the base64 key line of scripts/minisign.pub.
 MINISIGN_PUB="RWTdtVTZBm+928JVtALfb1pBJf013uPjatAh3WwNV20EqaEoQmulZgXU"
@@ -52,11 +52,14 @@ resolve_version() {
 verify_and_install_binary() {
   target="$(detect_target)"
   ver="$(resolve_version)"
-  base="https://github.com/$REPO/releases/download/$ver"
+  base="${LESHIY_BASE_URL:-https://github.com/$REPO/releases/download/$ver}"
+  tarball="leshiy-$ver-$target.tar.gz"
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   echo "downloading leshiy $ver ($target)..."
-  curl -fsSL "$base/leshiy-$ver-$target.tar.gz" -o "$tmp/pkg.tgz"
+  # Download under the REAL artifact name so `sha256sum -c` (which checks the names listed
+  # inside SHA256SUMS) can find the file.
+  curl -fsSL "$base/$tarball" -o "$tmp/$tarball"
   curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
   curl -fsSL "$base/SHA256SUMS.minisig" -o "$tmp/SHA256SUMS.minisig"
   # 1) signature over the checksum file — pass the pubkey as a base64 string via -P (no file;
@@ -65,9 +68,9 @@ verify_and_install_binary() {
   minisign -Vm "$tmp/SHA256SUMS" -P "$MINISIGN_PUB" -x "$tmp/SHA256SUMS.minisig" \
     || die "signature verification FAILED — aborting"
   # 2) checksum over the artifact we actually downloaded
-  ( cd "$tmp" && grep "leshiy-$ver-$target.tar.gz" SHA256SUMS | sha256sum -c - ) \
+  ( cd "$tmp" && grep "$tarball" SHA256SUMS | sha256sum -c - ) \
     || die "checksum mismatch — aborting"
-  tar -C "$tmp" -xzf "$tmp/pkg.tgz"
+  tar -C "$tmp" -xzf "$tmp/$tarball"
   install -Dm755 "$tmp/leshiy" "$BINDIR/leshiy"
   echo "installed $BINDIR/leshiy"
 }
@@ -220,4 +223,6 @@ COMPOSE
     die "service failed to start"
   fi
 }
-main
+# Run main unless sourced for testing (the smoke test sources this file to exercise
+# verify_and_install_binary directly against a local fake release).
+[ "${LESHIY_SOURCED:-}" = 1 ] || main
