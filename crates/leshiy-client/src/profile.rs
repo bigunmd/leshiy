@@ -112,9 +112,15 @@ impl ProfileStore {
         }
         let data =
             serde_json::to_vec_pretty(self).map_err(|e| ClientError::Store(e.to_string()))?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, data)?;
-        std::fs::rename(&tmp, path)?;
+        let tmp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
+        if let Err(e) = std::fs::write(&tmp, &data) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(ClientError::Io(e));
+        }
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(ClientError::Io(e));
+        }
         Ok(())
     }
 
@@ -230,6 +236,17 @@ mod tests {
         assert_eq!(reloaded.list().len(), 1);
         assert_eq!(reloaded.active().unwrap().id, id);
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_rejects_corrupt_json() {
+        let path = temp_path();
+        std::fs::write(&path, b"{ not valid json").unwrap();
+        assert!(matches!(
+            ProfileStore::load(&path),
+            Err(ClientError::Store(_))
+        ));
         let _ = std::fs::remove_file(&path);
     }
 }
