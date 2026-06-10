@@ -102,6 +102,15 @@ ensure_compose() {  # get.docker.com bundles compose, but an existing docker may
   or see https://docs.docker.com/compose/install/"
 }
 
+install_leshiyctl() {  # day-2 dispatcher, published alongside install.sh in each release
+  if curl -fsSL "https://github.com/$REPO/releases/latest/download/leshiyctl" \
+       -o /usr/local/bin/leshiyctl 2>/dev/null; then
+    chmod +x /usr/local/bin/leshiyctl
+  else
+    echo "note: leshiyctl not fetched (older release?); manage directly instead"
+  fi
+}
+
 open_firewall() {
   if have ufw; then
     ufw allow 443/tcp
@@ -221,17 +230,13 @@ COMPOSE
     printf '{"mode":"docker"}\n' > "$CFGDIR/install.json"
     open_firewall
     ( cd "$CFGDIR" && compose up -d )
+    install_leshiyctl
     echo "leshiy running under docker compose."
     exit 0
   fi
 
   verify_and_install_binary
-  # Install the day-2 dispatcher (published alongside install.sh in each release).
-  if curl -fsSL "https://github.com/$REPO/releases/latest/download/leshiyctl" -o /usr/local/bin/leshiyctl 2>/dev/null; then
-    chmod +x /usr/local/bin/leshiyctl
-  else
-    echo "note: leshiyctl not fetched (older release?); manage with 'leshiy <verb>' directly"
-  fi
+  install_leshiyctl
   install -d -m700 "$CFGDIR"
   if [ -f "$CFGDIR/server.toml" ]; then
     echo "existing install detected at $CFGDIR/server.toml — upgrading binary, keeping identity."
