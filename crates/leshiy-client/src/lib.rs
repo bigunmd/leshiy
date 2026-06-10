@@ -8,6 +8,7 @@
 //! land in later plans.
 #![forbid(unsafe_code)]
 
+pub mod adapter;
 pub mod error;
 pub mod profile;
 pub mod pump;
@@ -18,6 +19,7 @@ pub mod supervisor;
 pub mod sysproxy;
 pub mod transport;
 
+pub use adapter::RealityTunnel;
 pub use error::{ClientError, Result};
 pub use profile::{Profile, ProfileStore};
 pub use pump::pump;
