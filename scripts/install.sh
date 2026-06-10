@@ -7,7 +7,7 @@ REPO="${LESHIY_REPO:-bigunmd/leshiy}"    # override with LESHIY_REPO for forks
 BINDIR="/usr/local/bin"
 CFGDIR="/etc/leshiy"
 # Embedded minisign public key (matches scripts/minisign.pub):
-MINISIGN_PUB="RWQ_REPLACE_WITH_REAL_PUBKEY_LINE"
+MINISIGN_PUB="RWTdtVTZBm+928JVtALfb1pBJf013uPjatAh3WwNV20EqaEoQmulZgXU"
 
 DOCKER=0; ASSUME_YES=0; HOST=""; DEST=""; QUIC=0; VERSION="latest"
 ROLE="single"; EXIT_URI=""
