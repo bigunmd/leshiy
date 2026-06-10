@@ -7,6 +7,7 @@
 
 pub mod error;
 pub mod profile;
+pub mod pump;
 pub mod settings;
 pub mod stats;
 pub mod stream;
@@ -15,6 +16,7 @@ pub mod transport;
 
 pub use error::{ClientError, Result};
 pub use profile::{Profile, ProfileStore};
+pub use pump::pump;
 pub use settings::{Settings, TransportPref};
 pub use stats::{ByteCounters, Rates, Throughput};
 pub use stream::ProxyStream;
