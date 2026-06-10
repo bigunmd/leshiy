@@ -77,6 +77,11 @@ async fn main() -> anyhow::Result<()> {
             socks,
             transport,
         } => client::run(&uri, &socks, transport).await?,
+        cli::Cmd::Connect {
+            uri,
+            socks,
+            transport,
+        } => client::run(&uri, &socks, transport).await?,
         cli::Cmd::User { cmd } => user_cli::run(cmd).await?,
         cli::Cmd::Status { config } => {
             lifecycle::status(&config, &host::RealHostOps)?;

@@ -39,6 +39,16 @@ docker run --rm -v "$here":/work -w /work debian:12 sh -eu -c '
   /tmp/bin/leshiy | grep -q fake-leshiy || { echo "BINARY-NOT-RUNNABLE"; exit 1; }
   echo "GOOD-PATH-OK"
 
+  # Client installer: run its REAL install_client into a non-root user dir (tarball still good).
+  export LESHIY_BINDIR=/tmp/cbin
+  sed "s|^MINISIGN_PUB=.*|MINISIGN_PUB=\"$PUB\"|" /work/scripts/install-client.sh > /tmp/install-client.sh
+  . /tmp/install-client.sh
+  VERSION=vT
+  install_client
+  [ -x /tmp/cbin/leshiy ] || { echo "CLIENT-NOT-INSTALLED"; exit 1; }
+  /tmp/cbin/leshiy | grep -q fake-leshiy || { echo "CLIENT-NOT-RUNNABLE"; exit 1; }
+  echo "CLIENT-OK"
+
   # Tamper: corrupt the served tarball; verify must now abort at the checksum step.
   printf "x" >> /srv/rel/leshiy-vT-x86_64-unknown-linux-musl.tar.gz
   rm -f /tmp/bin/leshiy

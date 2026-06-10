@@ -63,6 +63,18 @@ pub enum Cmd {
         #[arg(long, default_value = "auto")]
         transport: Transport,
     },
+    /// Connect a client: shorthand for `client` with friendly defaults (local SOCKS5 on
+    /// 127.0.0.1:1080, transport auto). Just pass the leshiy:// URI your server printed.
+    Connect {
+        /// The leshiy:// share URI from your server.
+        uri: String,
+        /// Local SOCKS5 listen address.
+        #[arg(long, default_value = "127.0.0.1:1080")]
+        socks: String,
+        /// Transport: auto (default, prefer QUIC), quic, or tcp.
+        #[arg(long, default_value = "auto")]
+        transport: Transport,
+    },
     /// Interactive (or flag-driven) single-server setup: probe dest, init, print URI + QR.
     Quickstart {
         /// Public host:port clients dial.
@@ -281,4 +293,29 @@ pub enum UserCmd {
         #[arg(long)]
         qr: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn connect_takes_positional_uri_with_defaults() {
+        let cli =
+            Cli::try_parse_from(["leshiy", "connect", "leshiy://abc@1.2.3.4:443?sni=x&sid=00"])
+                .expect("connect should parse");
+        match cli.cmd {
+            Cmd::Connect {
+                uri,
+                socks,
+                transport,
+            } => {
+                assert_eq!(uri, "leshiy://abc@1.2.3.4:443?sni=x&sid=00");
+                assert_eq!(socks, "127.0.0.1:1080");
+                assert!(matches!(transport, Transport::Auto));
+            }
+            _ => panic!("expected Connect"),
+        }
+    }
 }

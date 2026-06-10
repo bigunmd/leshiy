@@ -135,16 +135,33 @@ leshiy server --config leshiy-server.toml
 
 ### 2. Connect a client
 
+On the machine you want to tunnel from (Linux, **no root needed** — the client only opens a
+local port), install the verified binary into `~/.local/bin`:
+
 ```sh
-leshiy client \
-    --uri 'leshiy://<pubkey>@<public-ip>:443?sni=www.microsoft.com&sid=<hex>' \
-    --transport auto \
-    --socks 127.0.0.1:1080
-# Point your browser / curl / any app at the SOCKS5 proxy on 127.0.0.1:1080:
+# minisign is required to verify the download (one-time): apt/dnf/pacman/apk install minisign, or `brew install minisign`
+curl -fsSL https://github.com/bigunmd/leshiy/releases/latest/download/install-client.sh | sh
+```
+
+Then start the local SOCKS5 proxy with the `leshiy://` URI your server printed:
+
+```sh
+leshiy connect 'leshiy://<pubkey>@<public-ip>:443?sni=www.microsoft.com&sid=<hex>'
+# `connect` defaults to SOCKS5 on 127.0.0.1:1080, transport auto. Point any app at it:
 curl --socks5-hostname 127.0.0.1:1080 https://example.com
 ```
 
+`connect` is shorthand for the full form, if you prefer explicit flags:
+
+```sh
+leshiy client \
+    --uri 'leshiy://…' \
+    --transport auto \
+    --socks 127.0.0.1:1080
+```
+
 `--transport`: `auto` (default — QUIC then REALITY), `quic`, or `tcp`.
+`--socks`: change the local listen address (default `127.0.0.1:1080`).
 
 ### 3. Manage users (optional)
 
