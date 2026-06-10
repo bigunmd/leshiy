@@ -11,6 +11,6 @@ pub mod settings;
 pub mod stats;
 
 pub use error::{ClientError, Result};
-pub use profile::Profile;
+pub use profile::{Profile, ProfileStore};
 pub use settings::{Settings, TransportPref};
 pub use stats::{ByteCounters, Rates, Throughput};
