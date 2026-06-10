@@ -58,12 +58,29 @@ pnpm tauri icon icon-src.png   # regenerate src-tauri/icons/*
 
 (The repo's `ci.yml` / `release.yml` cover the CLI/server and are independent of this app.)
 
-## Code signing (deferred)
+## Signing (deferred)
 
-Releases are currently unsigned. To sign, set the corresponding secrets and wire them in `desktop-release.yml`:
+Releases currently ship unsigned. Two **separate** mechanisms:
 
-- **Windows (Authenticode):** `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
-- **macOS (Developer ID + notarization):** requires a paid Apple Developer account — `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`.
-- **Updater:** if the Tauri updater is enabled later, generate an updater keypair with `pnpm tauri signer generate`.
+### Updater signing — `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+
+Signs auto-update artifacts so the built-in updater can verify them (minisign-style; **not** OS code signing). Only used once the updater plugin is wired up.
+
+```bash
+pnpm tauri signer generate -w ~/.tauri/leshiy-updater.key   # run LOCALLY; prompts for a password
+```
+- `TAURI_SIGNING_PRIVATE_KEY` secret ← the **contents** of `~/.tauri/leshiy-updater.key`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secret ← that password
+- the printed **public** key ← `tauri.conf.json` → `plugins.updater.pubkey`
+
+Never commit the private key. Set secrets at GitHub → Settings → Secrets and variables → Actions.
+
+### Windows Authenticode (publisher signature / SmartScreen)
+
+A real **code-signing certificate** (OV/EV from a CA; EV gives instant SmartScreen reputation). Configure `bundle.windows.certificateThumbprint` + `digestAlgorithm: "sha256"` + a `timestampUrl`, and sign with the cert in CI. Not the updater keys above.
+
+### macOS (Developer ID + notarization)
+
+Requires a paid Apple Developer account — `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`.
 
 License: **AGPL-3.0-only** (same as the rest of the workspace).

@@ -33,8 +33,9 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Code signing (deferred — set these secrets to enable):
-          # Windows Authenticode: TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+          # Signing (deferred — set these secrets to enable):
+          # Updater signing (NOT OS code signing): TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+          # Windows Authenticode: a code-signing cert (bundle.windows.certificateThumbprint) — separate from the updater keys
           # macOS Developer ID + notarization: APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID
         with:
           projectPath: apps/desktop
