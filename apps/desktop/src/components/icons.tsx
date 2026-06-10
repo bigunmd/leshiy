@@ -50,3 +50,31 @@ export function ArrowUp({ className }: IconProps) {
     </svg>
   );
 }
+
+export function ClipboardIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="8" y="3" width="8" height="4" rx="1" />
+      <path d="M9 5H6.5A1.5 1.5 0 0 0 5 6.5v13A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 17.5 5H15" />
+    </svg>
+  );
+}
+
+export function QrIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} aria-hidden="true">
+      <rect x="3.5" y="3.5" width="6" height="6" rx="1.2" />
+      <rect x="14.5" y="3.5" width="6" height="6" rx="1.2" />
+      <rect x="3.5" y="14.5" width="6" height="6" rx="1.2" />
+      <g fill="currentColor" stroke="none">
+        <rect x="5.5" y="5.5" width="2" height="2" />
+        <rect x="16.5" y="5.5" width="2" height="2" />
+        <rect x="5.5" y="16.5" width="2" height="2" />
+        <rect x="14" y="14" width="2.4" height="2.4" />
+        <rect x="18" y="14" width="2.4" height="2.4" />
+        <rect x="14" y="18" width="2.4" height="2.4" />
+        <rect x="18" y="18" width="2.4" height="2.4" />
+      </g>
+    </svg>
+  );
+}

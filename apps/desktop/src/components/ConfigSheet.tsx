@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type { Profile } from "@/lib/types";
+import { ClipboardIcon, QrIcon } from "./icons";
 
 interface Props {
   open: boolean; onOpenChange: (o: boolean) => void;
@@ -38,20 +39,57 @@ export function ConfigSheet(p: Props) {
     <Sheet open={p.open} onOpenChange={p.onOpenChange}>
       <SheetContent side="bottom" className="bg-panel border-border max-h-[80%] overflow-y-auto rounded-t-2xl">
         <SheetHeader><SheetTitle>{t("config.title")}</SheetTitle></SheetHeader>
+        {/* Primary import: big icon buttons */}
+        <div className="grid grid-cols-2 gap-2.5 px-4 pt-1">
+          <button
+            type="button"
+            onClick={async () => {
+              setError(null);
+              try {
+                const text = await navigator.clipboard.readText();
+                if (text) setUri(text.trim());
+              } catch {
+                /* clipboard blocked; use the manual field */
+              }
+            }}
+            className="flex flex-col items-center justify-center gap-2 rounded-xl border border-border bg-bg1 py-5 transition hover:-translate-y-0.5 hover:border-wisp/60"
+          >
+            <ClipboardIcon className="h-7 w-7 text-wisp" />
+            <span className="text-xs text-foreground">{t("config.fromClipboard")}</span>
+          </button>
+          <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-border bg-bg1 py-5 transition hover:-translate-y-0.5 hover:border-wisp/60">
+            <QrIcon className="h-7 w-7 text-wisp" />
+            <span className="text-xs text-foreground">{t("config.fromImage")}</span>
+            <input
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={async (e) => {
+                setError(null);
+                const f = e.target.files?.[0];
+                if (f) {
+                  const decoded = await decodeQrFile(f);
+                  if (decoded) setUri(decoded);
+                  else setError(t("config.invalid"));
+                }
+              }}
+            />
+          </label>
+        </div>
+
+        {/* Divider */}
+        <div className="flex items-center gap-3 px-4 py-3">
+          <span className="h-px flex-1 bg-border" />
+          <span className="font-mono text-[10px] uppercase tracking-widest text-dim">{t("config.orPaste")}</span>
+          <span className="h-px flex-1 bg-border" />
+        </div>
+
+        {/* Manual entry */}
         <div className="flex flex-col gap-2 px-4 pb-4">
           <Input className="font-mono bg-bg1" placeholder={t("config.paste")} value={uri} onChange={(e) => setUri(e.target.value)} />
           <div className="flex gap-2">
             <Input className="flex-1 bg-bg1" placeholder={t("config.name")} value={name} onChange={(e) => setName(e.target.value)} />
             <Button onClick={doImport} disabled={!uri.trim()}>{t("config.add")}</Button>
-          </div>
-          <div className="flex gap-4 text-[10px] uppercase tracking-widest">
-            <button className="font-mono text-moss"
-              onClick={async () => { try { setUri((await navigator.clipboard.readText()) ?? ""); } catch { /* ignore */ } }}>{t("config.fromClipboard")}</button>
-            <label className="font-mono text-moss cursor-pointer">
-              {t("config.fromImage")}
-              <input type="file" accept="image/*" className="hidden"
-                onChange={async (e) => { const f = e.target.files?.[0]; if (f) { const d = await decodeQrFile(f); d ? setUri(d) : setError(t("config.invalid")); } }} />
-            </label>
           </div>
           {error && <div className="text-warn text-xs">{error}</div>}
         </div>
