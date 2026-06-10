@@ -86,20 +86,16 @@ install_pkg() {  # best-effort installer for a host tool ($1)
 
 public_ip() { curl -fsSL https://api.ipify.org || curl -fsSL https://ifconfig.me; }
 
-compose() {  # docker compose v2 (plugin) if present, else the v1 docker-compose standalone
-  if docker compose version >/dev/null 2>&1; then
-    docker compose "$@"
-  else
-    docker-compose "$@"
-  fi
-}
-ensure_compose() {  # get.docker.com bundles compose, but an existing docker may lack it
-  docker compose version >/dev/null 2>&1 && return 0
-  have docker-compose && return 0
-  die "docker compose is not installed. Add it and re-run, e.g.:
-    Debian/Ubuntu (docker apt repo):  apt-get install -y docker-compose-plugin
-    Fedora:                           dnf install -y docker-compose-plugin
-  or see https://docs.docker.com/compose/install/"
+# Run the leshiy server as a plain, restart-on-failure docker container named `leshiy`.
+# Host networking so it binds the public :443 (tcp+udp); root in-container to bind the
+# privileged port and own its files in the /etc/leshiy bind mount. Idempotent (removes any
+# existing container first).
+run_server_container() {  # $1 = image ref
+  docker rm -f leshiy >/dev/null 2>&1 || true
+  docker run -d --name leshiy --restart unless-stopped \
+    --user 0:0 --network host \
+    -v "$CFGDIR":/etc/leshiy \
+    "$1" server --config /etc/leshiy/server.toml
 }
 
 install_leshiyctl() {  # day-2 dispatcher, published alongside install.sh in each release
@@ -203,35 +199,27 @@ main() {
 
   if [ "$DOCKER" -eq 1 ]; then
     have docker || sh -c "$(curl -fsSL https://get.docker.com)"
-    ensure_compose   # an already-present docker may not include the compose plugin
     install -d -m700 "$CFGDIR"
     IMG_TAG="$VERSION"
     if [ "$IMG_TAG" = "latest" ]; then
       IMG_TAG="$(resolve_version)"
     fi
-    # Generate config inside the image, mounting the config dir. Run as root (--user 0:0):
-    # the image's default 'nonroot' user can't write the root-owned /etc/leshiy bind mount.
-    # shellcheck disable=SC2046  # intentional word-splitting of quic_args (0 or 2 args)
-    docker run --rm --user 0:0 -v "$CFGDIR":/etc/leshiy "ghcr.io/$REPO:$IMG_TAG" \
-      quickstart --host "$HOST" --dest "$DEST" --out /etc/leshiy/server.toml \
-      $(quic_args) $(role_args)
-    cat > "$CFGDIR/docker-compose.yaml" <<COMPOSE
-services:
-  leshiy:
-    image: ghcr.io/$REPO:$IMG_TAG
-    command: server --config /etc/leshiy/server.toml
-    # Run as root in-container: with network_mode host the server binds the privileged :443
-    # and must read/write its root-owned config + DB + control socket in /etc/leshiy.
-    user: "0:0"
-    network_mode: host
-    volumes: ["$CFGDIR:/etc/leshiy"]
-    restart: unless-stopped
-COMPOSE
-    printf '{"mode":"docker"}\n' > "$CFGDIR/install.json"
+    IMG="ghcr.io/$REPO:$IMG_TAG"
+    if [ -f "$CFGDIR/server.toml" ]; then
+      echo "existing install detected at $CFGDIR/server.toml — keeping identity, recreating container."
+    else
+      # Generate config inside the image, mounting the config dir. Run as root (--user 0:0):
+      # the image's default 'nonroot' user can't write the root-owned /etc/leshiy bind mount.
+      # shellcheck disable=SC2046  # intentional word-splitting of quic_args (0 or 2 args)
+      docker run --rm --user 0:0 -v "$CFGDIR":/etc/leshiy "$IMG" \
+        quickstart --host "$HOST" --dest "$DEST" --out /etc/leshiy/server.toml \
+        $(quic_args) $(role_args)
+    fi
+    printf '{"mode":"docker","image":"%s"}\n' "$IMG" > "$CFGDIR/install.json"
     open_firewall
-    ( cd "$CFGDIR" && compose up -d )
+    run_server_container "$IMG"
     install_leshiyctl
-    echo "leshiy running under docker compose."
+    echo "leshiy running in docker (container: leshiy). Logs: docker logs -f leshiy"
     exit 0
   fi
 

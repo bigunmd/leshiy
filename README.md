@@ -106,7 +106,7 @@ URL=https://github.com/bigunmd/leshiy/releases/latest/download/install.sh
 # Also enable the QUIC/HTTP-3 transport (443/udp) alongside REALITY:
 curl -fsSL $URL | sh -s -- --quic
 
-# Install via Docker + compose instead of native systemd:
+# Install as a Docker container instead of a native systemd service:
 curl -fsSL $URL | sh -s -- --docker
 
 # QUIC with a custom SNI (the qsni in the URI); defaults to the --dest hostname:
@@ -187,9 +187,10 @@ leshiy user add --data-cap 50GB --qr      # prints the leshiy:// URI + a QR to s
 The installer drops a `leshiyctl` helper that works for both native and Docker installs:
 
 ```sh
-leshiyctl status      # service + config summary (or `docker compose ps`)
-leshiyctl upgrade     # verified binary download + restart (or `compose pull && up -d`)
-leshiyctl uninstall   # stop + remove service and binary (add --purge to delete config/keys)
+leshiyctl status      # native: service + config summary;  docker: container status + logs
+leshiyctl upgrade     # native: verified binary swap + restart;  docker: pull image + recreate
+leshiyctl uninstall   # stop + remove the server (add --purge to delete config/keys)
+leshiyctl user ...    # manage users (runs inside the container on a docker install)
 ```
 
 ### 4. Enable the QUIC transport (optional)

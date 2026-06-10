@@ -1,13 +1,14 @@
 #!/bin/sh
 # leshiyctl — mode-aware day-2 dispatcher. Reads /etc/leshiy/install.json (written by the
-# installer) to route verbs to native `leshiy` subcommands or docker compose. POSIX sh.
+# installer) to route verbs to native `leshiy` subcommands or a plain docker container. POSIX sh.
 set -eu
 
 CFGDIR="/etc/leshiy"
 CONFIG="$CFGDIR/server.toml"
 STATE="$CFGDIR/install.json"
+DOCKER_NAME="leshiy"
 
-mode() {  # "docker" if the install used compose, else "native"
+mode() {  # "docker" if the install used a container, else "native"
   if [ -f "$STATE" ] && grep -q '"mode" *: *"docker"' "$STATE" 2>/dev/null; then
     echo docker
   else
@@ -15,12 +16,18 @@ mode() {  # "docker" if the install used compose, else "native"
   fi
 }
 
-compose() {  # docker compose v2 (plugin) if present, else the v1 docker-compose standalone
-  if docker compose version >/dev/null 2>&1; then
-    docker compose "$@"
-  else
-    docker-compose "$@"
-  fi
+docker_image() {  # the image ref the installer recorded in install.json
+  grep -o '"image":"[^"]*"' "$STATE" 2>/dev/null | cut -d'"' -f4
+}
+
+run_server_container() {  # (re)create the leshiy container from the recorded image
+  img="$(docker_image)"
+  [ -n "$img" ] || { echo "no image recorded in $STATE" >&2; exit 1; }
+  docker rm -f "$DOCKER_NAME" >/dev/null 2>&1 || true
+  docker run -d --name "$DOCKER_NAME" --restart unless-stopped \
+    --user 0:0 --network host \
+    -v "$CFGDIR":/etc/leshiy \
+    "$img" server --config /etc/leshiy/server.toml
 }
 
 usage() {
@@ -34,28 +41,36 @@ verb="$1"; shift
 case "$verb" in
   status)
     if [ "$(mode)" = docker ]; then
-      ( cd "$CFGDIR" && compose ps )
+      docker ps -a --filter "name=^${DOCKER_NAME}$" \
+        --format 'container: {{.Names}}  status: {{.Status}}  image: {{.Image}}'
+      docker logs --tail 5 "$DOCKER_NAME" 2>&1 || true
     else
       leshiy status --config "$CONFIG"
     fi
     ;;
   upgrade)
     if [ "$(mode)" = docker ]; then
-      ( cd "$CFGDIR" && compose pull && compose up -d )
+      docker pull "$(docker_image)"
+      run_server_container
     else
       leshiy upgrade "$@"
     fi
     ;;
   uninstall)
     if [ "$(mode)" = docker ]; then
-      ( cd "$CFGDIR" && compose down )
+      docker rm -f "$DOCKER_NAME" >/dev/null 2>&1 || true
       case "${1:-}" in --purge) rm -rf "$CFGDIR" ;; esac
     else
       leshiy uninstall --config "$CONFIG" "$@"
     fi
     ;;
   user)
-    leshiy user "$@" --config "$CONFIG"
+    if [ "$(mode)" = docker ]; then
+      # Run the user command inside the container, where the control socket + DB live.
+      docker exec "$DOCKER_NAME" /usr/local/bin/leshiy user "$@" --config /etc/leshiy/server.toml
+    else
+      leshiy user "$@" --config "$CONFIG"
+    fi
     ;;
   *) usage ;;
 esac
