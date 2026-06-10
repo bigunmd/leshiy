@@ -44,6 +44,8 @@ jobs:
         with: { pattern: "tar-*", merge-multiple: true }
       - name: Checksums
         run: sha256sum leshiy-*.tar.gz > SHA256SUMS
+      - name: Install minisign
+        run: sudo apt-get update && sudo apt-get install -y minisign
       - name: Sign checksums (minisign)
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
