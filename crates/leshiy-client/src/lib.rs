@@ -11,6 +11,7 @@ pub mod pump;
 pub mod settings;
 pub mod stats;
 pub mod stream;
+pub mod supervisor;
 pub mod sysproxy;
 pub mod transport;
 
@@ -20,5 +21,6 @@ pub use pump::pump;
 pub use settings::{Settings, TransportPref};
 pub use stats::{ByteCounters, Rates, Throughput};
 pub use stream::ProxyStream;
+pub use supervisor::{Action, Input, Machine, State, backoff_delay};
 pub use sysproxy::{NoopProxy, SystemProxy};
 pub use transport::{Transport, Tunnel};
