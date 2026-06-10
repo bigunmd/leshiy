@@ -44,6 +44,68 @@ impl Profile {
     }
 }
 
+/// In-memory collection of profiles plus the currently-selected one. Persistence is
+/// added in the next task; the struct already derives `Serialize`/`Deserialize`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProfileStore {
+    profiles: Vec<Profile>,
+    active_id: Option<String>,
+}
+
+impl ProfileStore {
+    /// Validate `uri`, store a new profile, and return its id.
+    pub fn import(&mut self, uri: &str, name: &str) -> Result<String> {
+        let profile = Profile::from_uri(uri, name)?;
+        let id = profile.id.clone();
+        self.profiles.push(profile);
+        Ok(id)
+    }
+
+    /// All stored profiles, in insertion order.
+    pub fn list(&self) -> &[Profile] {
+        &self.profiles
+    }
+
+    /// The active profile, if one is selected and still present.
+    pub fn active(&self) -> Option<&Profile> {
+        let id = self.active_id.as_deref()?;
+        self.profiles.iter().find(|p| p.id == id)
+    }
+
+    /// Select the active profile. Returns `false` if no profile has that id.
+    pub fn set_active(&mut self, id: &str) -> bool {
+        if self.profiles.iter().any(|p| p.id == id) {
+            self.active_id = Some(id.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Rename a profile. Returns `false` if not found.
+    pub fn rename(&mut self, id: &str, name: &str) -> bool {
+        match self.profiles.iter_mut().find(|p| p.id == id) {
+            Some(p) => {
+                p.name = name.to_string();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Remove a profile. Clears the active pointer if it pointed at this one.
+    /// Returns `false` if not found.
+    pub fn remove(&mut self, id: &str) -> bool {
+        let before = self.profiles.len();
+        self.profiles.retain(|p| p.id != id);
+        let removed = self.profiles.len() != before;
+        if removed && self.active_id.as_deref() == Some(id) {
+            self.active_id = None;
+        }
+        removed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,5 +141,44 @@ mod tests {
         let a = Profile::from_uri(&sample_uri(), "a").unwrap();
         let b = Profile::from_uri(&sample_uri(), "b").unwrap();
         assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn store_import_list_and_active() {
+        let mut store = ProfileStore::default();
+        assert_eq!(store.list().len(), 0);
+
+        let id = store.import(&sample_uri(), "Frankfurt").unwrap();
+        assert_eq!(store.list().len(), 1);
+        assert_eq!(store.list()[0].name, "Frankfurt");
+
+        // Garbage import is rejected and does not mutate the store.
+        assert!(matches!(
+            store.import("nope", "x"),
+            Err(ClientError::InvalidUri)
+        ));
+        assert_eq!(store.list().len(), 1);
+
+        // Activation.
+        assert!(store.set_active(&id));
+        assert_eq!(store.active().unwrap().id, id);
+        assert!(!store.set_active("missing"));
+    }
+
+    #[test]
+    fn store_rename_and_remove() {
+        let mut store = ProfileStore::default();
+        let id = store.import(&sample_uri(), "Old").unwrap();
+
+        assert!(store.rename(&id, "New"));
+        assert_eq!(store.list()[0].name, "New");
+        assert!(!store.rename("missing", "x"));
+
+        store.set_active(&id);
+        assert!(store.remove(&id));
+        assert_eq!(store.list().len(), 0);
+        // Removing the active profile clears the active pointer.
+        assert!(store.active().is_none());
+        assert!(!store.remove(&id));
     }
 }
