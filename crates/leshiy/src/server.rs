@@ -156,7 +156,9 @@ pub fn init(opts: InitOptions<'_>) -> Result<InitOutput> {
             .ok()
             .and_then(|v| v.as_slice().try_into().ok());
         Some(QuicEndpoint {
-            addr: ql.to_string(),
+            // Advertise the QUIC endpoint on the PUBLIC host, not the bind address (`ql`, which
+            // is typically 0.0.0.0 and undialable). The runtime still BINDS `ql`.
+            addr: advertised_quic_addr(host, ql),
             sni: domain,
             cert_sha256: fingerprint_bytes,
         })
@@ -174,7 +176,8 @@ pub fn init(opts: InitOptions<'_>) -> Result<InitOutput> {
         host: host.to_string(),
         control_socket: None,
         user_db: Some(db_path_str),
-        quic_listen: quic_endpoint.as_ref().map(|q| q.addr.clone()),
+        // The BIND address (e.g. 0.0.0.0:443) — what the server listens on at runtime.
+        quic_listen: quic_listen.map(|s| s.to_string()),
         quic_cert_path: quic_endpoint.as_ref().and_then(|_| {
             if quic_cert.is_some() {
                 quic_cert.map(|s| s.to_string())
@@ -219,7 +222,7 @@ pub fn init(opts: InitOptions<'_>) -> Result<InitOutput> {
         config_path: out.to_string(),
         uri,
         listen: cfg.listen.clone(),
-        quic_listen: quic_endpoint.as_ref().map(|q| q.addr.clone()),
+        quic_listen: cfg.quic_listen.clone(),
     })
 }
 
@@ -239,6 +242,15 @@ fn write_secret_file(path: &str, contents: &str) -> Result<()> {
     f.write_all(contents.as_bytes())
         .with_context(|| format!("write {path}"))?;
     Ok(())
+}
+
+/// Derive the publicly-advertised QUIC endpoint address from the public `host` and the QUIC
+/// `bind` address. The bind address is often `0.0.0.0:<port>` (all interfaces), which must NOT
+/// be put in a client URI — advertise the public host's IP with the QUIC bind port instead.
+fn advertised_quic_addr(host: &str, bind: &str) -> String {
+    let host_ip = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
+    let port = bind.rsplit_once(':').map(|(_, p)| p).unwrap_or("443");
+    format!("{host_ip}:{port}")
 }
 
 /// Compute the default control socket path: `<config_dir>/leshiy.sock`.
@@ -395,7 +407,8 @@ pub async fn run(config: &str) -> Result<()> {
         tracing::info!(quic_listen = %qaddr, "leshiy QUIC server up");
 
         Some(QuicEndpoint {
-            addr: ql.clone(),
+            // Advertise on the public host, not the bind address (`ql`, often 0.0.0.0).
+            addr: advertised_quic_addr(&cfg.host, ql),
             sni: domain,
             cert_sha256,
         })
@@ -460,6 +473,61 @@ mod tests {
         assert_eq!(res.listen, "0.0.0.0:443");
         assert!(res.quic_listen.is_none());
         assert_eq!(res.config_path, out_s);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn advertised_quic_addr_uses_public_host_with_bind_port() {
+        assert_eq!(
+            advertised_quic_addr("203.0.113.5:443", "0.0.0.0:443"),
+            "203.0.113.5:443"
+        );
+        assert_eq!(
+            advertised_quic_addr("203.0.113.5:443", "0.0.0.0:8443"),
+            "203.0.113.5:8443"
+        );
+        // IPv6 host literal: rsplit on ':' keeps the bracketed address intact.
+        assert_eq!(
+            advertised_quic_addr("[2001:db8::1]:443", "0.0.0.0:443"),
+            "[2001:db8::1]:443"
+        );
+    }
+
+    #[test]
+    fn init_advertises_quic_on_public_host_not_bind_addr() {
+        let dir = std::env::temp_dir().join(format!("leshiy-quic-adv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("server.toml");
+        let out_s = out.to_str().unwrap();
+        let res = init(InitOptions {
+            host: "203.0.113.5:443",
+            dest: "www.microsoft.com:443",
+            listen: None,
+            out: out_s,
+            quic_listen: Some("0.0.0.0:443"),
+            quic_domain: None,
+            quic_cert: None,
+            quic_key: None,
+            connector: None,
+        })
+        .unwrap();
+        // The client URI must advertise the PUBLIC host, never the all-interfaces bind addr.
+        assert!(
+            res.uri.contains("quic=203.0.113.5:443"),
+            "uri should advertise public host: {}",
+            res.uri
+        );
+        assert!(
+            !res.uri.contains("0.0.0.0"),
+            "uri must not leak the bind addr: {}",
+            res.uri
+        );
+        // The written config still BINDS on all interfaces.
+        let cfg_txt = std::fs::read_to_string(&out).unwrap();
+        assert!(
+            cfg_txt.contains("quic_listen = \"0.0.0.0:443\""),
+            "config should bind 0.0.0.0: {cfg_txt}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -149,9 +149,10 @@ quic_args() {  # echo the quic flag (word-split intentionally by caller) when en
 role_args() {  # echo role/exit/quic flags (word-split intentionally by caller)
   printf '%s' "--role $ROLE"
   [ -n "$EXIT_URI" ] && printf '%s' " --exit-uri $EXIT_URI"
-  # Exit role needs a reachable QUIC carrier; default it to the public host if unset.
+  # Exit role needs a QUIC carrier; bind all interfaces (NAT-friendly). The server advertises
+  # it to clients on the public --host, so binding 0.0.0.0 here is correct.
   if [ "$ROLE" = "exit" ] && [ "$QUIC" -eq 0 ]; then
-    printf '%s' " --quic-listen ${HOST}"
+    printf '%s' " --quic-listen 0.0.0.0:443"
   fi
   return 0
 }
