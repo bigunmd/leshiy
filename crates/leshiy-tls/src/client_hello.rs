@@ -4,7 +4,9 @@
 //! and produce the same JA4/JA3 as the committed fixture. Extension order and
 //! GREASE placement follow the `Profile` exactly; only SNI (0x0000) and
 //! key_share (0x0033) are injected from the call arguments.
+use crate::camouflage::{Grease, derive_grease, is_grease};
 use crate::fingerprint::Profile;
+use rand::RngCore;
 
 /// Build a ClientHello handshake message (starts with 0x01) from `profile`.
 ///
@@ -18,7 +20,7 @@ use crate::fingerprint::Profile;
 /// is correct for JA4/JA3 round-trips (those fingerprints only care about the type IDs).
 ///
 /// The key_share (0x0033) extension emits three entries in order:
-///   1. GREASE (group 0x0a0a, 1-byte key 0x00) — matches browser CH
+///   1. GREASE (group = per-connection GREASE value, 1-byte key 0x00) — matches browser CH
 ///   2. X25519MLKEM768 (0x11EC): mlkem_ek(1184) ‖ x25519_pub(32) = 1216 bytes
 ///   3. X25519 (0x001D): x25519_pub(32) bytes
 pub fn build_client_hello(
@@ -28,6 +30,26 @@ pub fn build_client_hello(
     mlkem_ek: &[u8; 1184],
     random: [u8; 32],
 ) -> Vec<u8> {
+    // Fresh per-connection entropy for GREASE values + extension shuffle. This MUST
+    // be independent of `random` (which is sent in clear): deriving the camouflage
+    // from an on-wire value would let an adversary recompute and detect it.
+    let mut entropy = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut entropy);
+    build_client_hello_with_entropy(profile, sni, x25519_pub, mlkem_ek, random, entropy)
+}
+
+/// Like [`build_client_hello`] but with caller-supplied camouflage `entropy`, for
+/// deterministic tests. `entropy` drives the per-connection GREASE values and the
+/// extension shuffle; it is never transmitted.
+pub fn build_client_hello_with_entropy(
+    profile: &Profile,
+    sni: &str,
+    x25519_pub: &[u8; 32],
+    mlkem_ek: &[u8; 1184],
+    random: [u8; 32],
+    entropy: [u8; 32],
+) -> Vec<u8> {
+    let grease = derive_grease(&entropy);
     let mut body = Vec::new();
 
     // legacy_version: 0x0303 (TLS 1.2 compat)
@@ -40,10 +62,12 @@ pub fn build_client_hello(
     body.push(32u8);
     body.extend_from_slice(&random);
 
-    // cipher_suites: u16 length-prefixed list
+    // cipher_suites: u16 length-prefixed list; substitute the per-connection cipher
+    // GREASE value into the GREASE placeholder.
     let cs_bytes: Vec<u8> = profile
         .cipher_suites
         .iter()
+        .map(|&c| if is_grease(c) { grease.cipher } else { c })
         .flat_map(|c| c.to_be_bytes())
         .collect();
     body.extend_from_slice(&(cs_bytes.len() as u16).to_be_bytes());
@@ -52,11 +76,26 @@ pub fn build_client_hello(
     // compression methods: 1 method = null (0x00)
     body.extend_from_slice(&[0x01, 0x00]);
 
-    // extensions: iterate in profile order, building each body
+    // extensions: iterate in profile order. The two GREASE extension placeholders are
+    // replaced with the per-connection ext1 (leading, empty body) and ext2 (trailing,
+    // single 0x00 byte) — matching Chromium's emission. Real extensions get their body.
     let mut ext_bytes = Vec::new();
+    let mut grease_idx = 0u8;
     for &etype in &profile.extensions {
-        let ebody = build_extension(etype, profile, sni, x25519_pub, mlkem_ek);
-        ext_bytes.extend_from_slice(&etype.to_be_bytes());
+        let (out_type, ebody) = if is_grease(etype) {
+            grease_idx += 1;
+            if grease_idx == 1 {
+                (grease.ext1, Vec::new())
+            } else {
+                (grease.ext2, vec![0x00])
+            }
+        } else {
+            (
+                etype,
+                build_extension(etype, profile, sni, x25519_pub, mlkem_ek, &grease),
+            )
+        };
+        ext_bytes.extend_from_slice(&out_type.to_be_bytes());
         ext_bytes.extend_from_slice(&(ebody.len() as u16).to_be_bytes());
         ext_bytes.extend_from_slice(&ebody);
     }
@@ -85,6 +124,7 @@ fn build_extension(
     sni: &str,
     x25519_pub: &[u8; 32],
     mlkem_ek: &[u8; 1184],
+    grease: &Grease,
 ) -> Vec<u8> {
     match etype {
         // server_name (SNI) — RFC 6066 §3
@@ -102,8 +142,16 @@ fn build_extension(
         }
 
         // supported_groups (elliptic_curves) — RFC 8422
-        // Structure: [list_len u16][group u16 ...]
-        0x000a => list_u16_with_u16len(&profile.supported_groups),
+        // Structure: [list_len u16][group u16 ...]; GREASE placeholder gets the
+        // per-connection group value (shared with key_share).
+        0x000a => {
+            let groups: Vec<u16> = profile
+                .supported_groups
+                .iter()
+                .map(|&g| if is_grease(g) { grease.group } else { g })
+                .collect();
+            list_u16_with_u16len(&groups)
+        }
 
         // ec_point_formats — RFC 8422
         // Structure: [count u8][format u8 ...]
@@ -138,7 +186,8 @@ fn build_extension(
             let versions_bytes_len = (profile.supported_versions.len() * 2) as u8;
             let mut b = Vec::with_capacity(1 + profile.supported_versions.len() * 2);
             b.push(versions_bytes_len);
-            for v in &profile.supported_versions {
+            for &v in &profile.supported_versions {
+                let v = if is_grease(v) { grease.version } else { v };
                 b.extend_from_slice(&v.to_be_bytes());
             }
             b
@@ -147,13 +196,14 @@ fn build_extension(
         // key_share — RFC 8446 §4.2.8
         // In ClientHello: [client_shares_len u16][group u16][key_exchange_len u16][key_exchange bytes]
         // We emit three entries in browser order:
-        //   1. GREASE (group 0x0a0a, 1-byte key 0x00)
+        //   1. GREASE (group = per-connection GREASE value, 1-byte key 0x00)
         //   2. X25519MLKEM768 (0x11EC): mlkem_ek(1184) || x25519_pub(32) = 1216 bytes
         //   3. X25519 (0x001D): x25519_pub(32) bytes
         0x0033 => {
             let mut entries = Vec::new();
-            // GREASE key_share (group 0x0a0a, 1-byte key) — matches browser CH
-            entries.extend_from_slice(&0x0a0au16.to_be_bytes());
+            // GREASE key_share — group equals the per-connection supported_groups
+            // GREASE value (BoringSSL uses one index for both), 1-byte key.
+            entries.extend_from_slice(&grease.group.to_be_bytes());
             entries.extend_from_slice(&1u16.to_be_bytes());
             entries.push(0x00);
             // X25519MLKEM768 (0x11ec): ek(1184) || x25519(32) = 1216
@@ -329,5 +379,65 @@ mod tests {
         );
         let body = ext_body(&ch, 0x44cd).expect("ALPS extension must be present");
         assert_eq!(body, vec![0x00, 0x03, 0x02, b'h', b'2']);
+    }
+
+    /// Per-connection GREASE: the builder substitutes the BoringSSL-derived GREASE
+    /// values into every GREASE slot. supported_groups and key_share must share one
+    /// value; the two extension GREASE values must differ; JA4 is invariant.
+    #[test]
+    fn per_connection_grease_substituted_into_clienthello() {
+        use crate::camouflage::{derive_grease, is_grease};
+        let mut entropy = [0u8; 32];
+        entropy[0] = 0xc3; // cipher  -> 0xCACA
+        entropy[1] = 0x6f; // group   -> 0x6A6A
+        entropy[2] = 0x5a; // ext1    -> 0x5A5A
+        entropy[3] = 0x40; // ext2    -> 0x4A4A
+        entropy[4] = 0x0e; // version -> 0x0A0A
+        let g = derive_grease(&entropy);
+        let ch = build_client_hello_with_entropy(
+            &Profile::yandex(),
+            "ex.com",
+            &[1u8; 32],
+            &[0u8; 1184],
+            [2u8; 32],
+            entropy,
+        );
+        let view = ClientHelloView::parse(&ch).expect("parse should succeed");
+
+        assert!(
+            view.cipher_suites.contains(&g.cipher),
+            "cipher GREASE must be substituted"
+        );
+        assert_eq!(
+            view.supported_groups.first(),
+            Some(&g.group),
+            "supported_groups GREASE"
+        );
+        assert!(
+            view.supported_versions.contains(&g.version),
+            "supported_versions GREASE"
+        );
+
+        // key_share's GREASE entry must equal the supported_groups GREASE value.
+        let ks_body = ext_body(&ch, 0x0033).expect("key_share present");
+        let first_group = u16::from_be_bytes([ks_body[2], ks_body[3]]);
+        assert_eq!(
+            first_group, g.group,
+            "key_share GREASE must equal supported_groups GREASE"
+        );
+
+        // The two extension-list GREASE values: first == ext1, last == ext2, distinct.
+        let gx: Vec<u16> = view
+            .extensions
+            .iter()
+            .copied()
+            .filter(|x| is_grease(*x))
+            .collect();
+        assert_eq!(gx.first(), Some(&g.ext1), "leading extension GREASE");
+        assert_eq!(gx.last(), Some(&g.ext2), "trailing extension GREASE");
+        assert_ne!(g.ext1, g.ext2);
+
+        // JA4 must be unchanged (GREASE is stripped before hashing).
+        assert_eq!(ja4(&view), fixture_str("yandex.ja4"));
     }
 }

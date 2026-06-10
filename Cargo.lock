@@ -1157,6 +1157,7 @@ dependencies = [
  "md-5",
  "ml-kem",
  "proptest",
+ "rand 0.8.6",
  "rcgen",
  "rustls",
  "sha2",

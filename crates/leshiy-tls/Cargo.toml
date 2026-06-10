@@ -15,6 +15,7 @@ hmac.workspace = true
 aes-gcm.workspace = true
 chacha20poly1305.workspace = true
 ml-kem.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

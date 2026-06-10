@@ -2,6 +2,7 @@
 //! Pure-Rust TLS 1.3 ClientHello fingerprinting + record plumbing for Leshiy's
 //! REALITY-style camouflage. No TLS key schedule here (see M1.2+).
 
+pub mod camouflage;
 pub mod client_hello;
 pub mod error;
 pub mod fingerprint;
