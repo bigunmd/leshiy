@@ -1,8 +1,11 @@
 //! Leshiy desktop client control library (GUI-agnostic).
 //!
-//! Plan 1 scope: typed errors, persisted profiles, persisted settings, and
-//! throughput accounting. Networking (tunnel engine, system proxy, supervisor)
-//! arrives in Plan 2.
+//! Provides the data + stats core (typed errors, persisted profiles and settings,
+//! throughput accounting) and the tunnel engine's functional core: the
+//! [`ProxyStream`]/[`Tunnel`]/[`Transport`]/[`SystemProxy`] seams, the metered
+//! byte-[`pump()`], and the pure supervisor state [`Machine`]. The real REALITY/QUIC
+//! adapters, the async supervisor shell, and the per-OS system-proxy implementations
+//! land in later plans.
 #![forbid(unsafe_code)]
 
 pub mod error;
