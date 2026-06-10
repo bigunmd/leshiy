@@ -10,7 +10,7 @@ CFGDIR="/etc/leshiy"
 MINISIGN_PUB="RWTdtVTZBm+928JVtALfb1pBJf013uPjatAh3WwNV20EqaEoQmulZgXU"
 
 DOCKER=0; ASSUME_YES=0; HOST=""; DEST=""; QUIC=0; VERSION="latest"
-ROLE="single"; EXIT_URI=""
+ROLE="single"; EXIT_URI=""; QUIC_SNI=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --docker) DOCKER=1 ;;
@@ -18,6 +18,7 @@ while [ $# -gt 0 ]; do
     --host) HOST="$2"; shift ;;
     --dest) DEST="$2"; shift ;;
     --quic) QUIC=1 ;;
+    --quic-sni) QUIC_SNI="$2"; shift ;;
     --version) VERSION="$2"; shift ;;
     --role) ROLE="$2"; shift ;;
     --exit-uri) EXIT_URI="$2"; shift ;;
@@ -141,8 +142,15 @@ UNIT
   systemctl restart leshiy
 }
 
-quic_args() {  # echo the quic flag (word-split intentionally by caller) when enabled
-  [ "$QUIC" -eq 1 ] && printf '%s' "--quic-listen 0.0.0.0:443"
+quic_sni_arg() {  # append the optional --quic-sni override (no-op when unset)
+  [ -n "$QUIC_SNI" ] && printf '%s' " --quic-sni $QUIC_SNI"
+  return 0
+}
+quic_args() {  # echo the quic flags (word-split intentionally by caller) when enabled
+  if [ "$QUIC" -eq 1 ]; then
+    printf '%s' "--quic-listen 0.0.0.0:443"
+    quic_sni_arg
+  fi
   return 0
 }
 
@@ -153,6 +161,7 @@ role_args() {  # echo role/exit/quic flags (word-split intentionally by caller)
   # it to clients on the public --host, so binding 0.0.0.0 here is correct.
   if [ "$ROLE" = "exit" ] && [ "$QUIC" -eq 0 ]; then
     printf '%s' " --quic-listen 0.0.0.0:443"
+    quic_sni_arg
   fi
   return 0
 }

@@ -109,12 +109,12 @@ curl -fsSL $URL | sh -s -- --quic
 # Install via Docker + compose instead of native systemd:
 curl -fsSL $URL | sh -s -- --docker
 
-# Pick a camouflage site, enable QUIC, and pin a version:
-curl -fsSL $URL | sh -s -- --dest www.cloudflare.com:443 --quic --version v0.1.2
+# QUIC with a custom SNI (the qsni in the URI); defaults to the --dest hostname:
+curl -fsSL $URL | sh -s -- --quic --quic-sni cdn.cloudflare.com
 ```
 
-Other flags: `--host <ip:port>`, `--dest <host:port>`, `--role single|entry|exit`,
-`--exit-uri '<leshiy://…>'`, `--yes`. Prefer to inspect first? The script is short — read it
+Other flags: `--host <ip:port>`, `--dest <host:port>`, `--quic-sni <domain>`,
+`--role single|entry|exit`, `--exit-uri '<leshiy://…>'`, `--yes`. Prefer to inspect first? The script is short — read it
 at the URL above before piping to `sh`.
 
 ### 1. Run a server

@@ -119,7 +119,9 @@ pub fn init(opts: InitOptions<'_>) -> Result<InitOutput> {
                 "--quic-cert and --quic-key must be provided together"
             ));
         }
-        let domain = quic_domain.unwrap_or("cdn.example.com").to_string();
+        // Default the QUIC SNI to the dest's hostname (a plausible borrowed name) when the
+        // operator didn't set one explicitly — far better than a bare `example.com`.
+        let domain = quic_domain.unwrap_or(sni.as_str()).to_string();
         let (_cert_path_str, _key_path_str, cert_sha256_hex) =
             if let (Some(cp), Some(kp)) = (quic_cert, quic_key) {
                 // Operator-provided cert/key: compute the fingerprint from the PEM.
@@ -527,6 +529,38 @@ mod tests {
         assert!(
             cfg_txt.contains("quic_listen = \"0.0.0.0:443\""),
             "config should bind 0.0.0.0: {cfg_txt}"
+        );
+        // The QUIC SNI defaults to the dest hostname (not a bare example.com).
+        assert!(
+            res.uri.contains("qsni=www.microsoft.com"),
+            "qsni should default to the dest host: {}",
+            res.uri
+        );
+        assert!(!res.uri.contains("cdn.example.com"), "uri: {}", res.uri);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn init_quic_sni_override_is_used() {
+        let dir = std::env::temp_dir().join(format!("leshiy-qsni-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("server.toml");
+        let res = init(InitOptions {
+            host: "203.0.113.5:443",
+            dest: "www.microsoft.com:443",
+            listen: None,
+            out: out.to_str().unwrap(),
+            quic_listen: Some("0.0.0.0:443"),
+            quic_domain: Some("cdn.cloudflare.com"),
+            quic_cert: None,
+            quic_key: None,
+            connector: None,
+        })
+        .unwrap();
+        assert!(
+            res.uri.contains("qsni=cdn.cloudflare.com"),
+            "explicit --quic-sni must win: {}",
+            res.uri
         );
         std::fs::remove_dir_all(&dir).ok();
     }

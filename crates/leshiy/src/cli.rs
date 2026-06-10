@@ -92,6 +92,10 @@ pub enum Cmd {
         /// Enable QUIC by listening on this addr (e.g. 0.0.0.0:443).
         #[arg(long)]
         quic_listen: Option<String>,
+        /// SNI advertised on the QUIC endpoint (qsni= in the URI + the self-signed cert
+        /// domain). Defaults to the --dest hostname when unset.
+        #[arg(long)]
+        quic_sni: Option<String>,
         /// Skip the live TLS1.3 dest probe (for tests / offline).
         #[arg(long)]
         no_probe: bool,
