@@ -35,7 +35,7 @@ impl ByteCounters {
 }
 
 /// A single throughput sample.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Rates {
     pub up_bps: u64,
     pub down_bps: u64,
@@ -108,5 +108,18 @@ mod tests {
         let r = t.sample(50, 50, Duration::from_secs(1));
         assert_eq!(r.up_bps, 0);
         assert_eq!(r.down_bps, 0);
+    }
+
+    #[test]
+    fn rates_round_trips_json() {
+        let r = Rates {
+            up_bps: 1,
+            down_bps: 2,
+            total_up: 3,
+            total_down: 4,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: Rates = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, back);
     }
 }

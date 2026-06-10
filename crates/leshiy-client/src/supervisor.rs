@@ -3,7 +3,7 @@ use std::time::Duration;
 
 /// Observable connection state (mirrors the 4 ConnectButton states; `Reconnecting`
 /// is rendered like `Connecting`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum State {
     Disconnected,
     Connecting,
@@ -317,5 +317,15 @@ mod tests {
         // Proxy already cleared, so only the state emit.
         assert_eq!(actions, vec![Emit(State::Disconnected)]);
         assert_eq!(m.state, State::Disconnected);
+    }
+
+    #[test]
+    fn state_serializes_to_variant_name() {
+        assert_eq!(
+            serde_json::to_string(&State::Connected).unwrap(),
+            "\"Connected\""
+        );
+        let back: State = serde_json::from_str("\"Reconnecting\"").unwrap();
+        assert_eq!(back, State::Reconnecting);
     }
 }
