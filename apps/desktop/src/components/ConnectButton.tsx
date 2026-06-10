@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
 import type { TunnelState } from "@/lib/types";
+import { PowerIcon } from "./icons";
 
 interface Props { state: TunnelState; onToggle: () => void; disabled?: boolean; }
 
@@ -20,8 +21,8 @@ export function ConnectButton({ state, onToggle, disabled }: Props) {
         <span className="orb-spin absolute inset-2 rounded-full border-[3px] border-transparent"
           style={{ borderTopColor: "var(--color-wisp)", borderRightColor: "#7CE07A55" }} />
       )}
-      <span className={cn("orb-core grid h-36 w-36 place-items-center rounded-full text-[40px] transition-colors duration-300", CORE[state])}>
-        ⏻
+      <span className={cn("orb-core grid h-36 w-36 place-items-center rounded-full transition-colors duration-300", CORE[state])}>
+        <PowerIcon className="h-12 w-12" />
       </span>
     </button>
   );
