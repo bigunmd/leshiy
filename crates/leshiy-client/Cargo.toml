@@ -24,3 +24,6 @@ tokio-rustls = { workspace = true }
 rcgen = { workspace = true }
 x25519-dalek = { workspace = true }
 zeroize = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"

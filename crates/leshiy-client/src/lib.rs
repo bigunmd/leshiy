@@ -31,5 +31,5 @@ pub use settings::{Settings, TransportPref};
 pub use stats::{ByteCounters, Rates, Throughput};
 pub use stream::ProxyStream;
 pub use supervisor::{Action, Input, Machine, State, backoff_delay};
-pub use sysproxy::{NoopProxy, SystemProxy};
+pub use sysproxy::{NoopProxy, SystemProxy, system_proxy};
 pub use transport::{Transport, Tunnel};

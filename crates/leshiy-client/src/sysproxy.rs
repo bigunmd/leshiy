@@ -2,7 +2,7 @@
 //! local SOCKS5 port (and, with the kill switch, to *leave it set* on an unexpected
 //! drop so apps fail closed). Real per-OS implementations land in Plan 4; the trait
 //! lets the supervisor be tested with a recording fake.
-use crate::error::Result;
+use crate::error::{ClientError, Result};
 use std::net::SocketAddr;
 
 /// Sets/clears the operating-system proxy.
@@ -47,7 +47,6 @@ pub(crate) fn macos_clear_args(service: &str) -> Vec<String> {
 }
 
 /// Linux GNOME `gsettings` invocations to enable a manual SOCKS proxy.
-#[allow(dead_code)]
 pub(crate) fn linux_set_invocations(host: &str, port: u16) -> Vec<Vec<String>> {
     vec![
         vec![
@@ -72,7 +71,6 @@ pub(crate) fn linux_set_invocations(host: &str, port: u16) -> Vec<Vec<String>> {
 }
 
 /// Linux GNOME `gsettings` invocation to disable the proxy.
-#[allow(dead_code)]
 pub(crate) fn linux_clear_invocations() -> Vec<Vec<String>> {
     vec![vec![
         "set".to_string(),
@@ -98,6 +96,155 @@ impl SystemProxy for NoopProxy {
     }
     fn clear(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+// --- Linux executor (GNOME gsettings) ---
+
+/// Sets the GNOME system SOCKS proxy via `gsettings`.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LinuxProxy;
+
+#[cfg(target_os = "linux")]
+impl SystemProxy for LinuxProxy {
+    fn set(&self, socks: SocketAddr) -> Result<()> {
+        run_gsettings(linux_set_invocations(&socks.ip().to_string(), socks.port()))
+    }
+    fn clear(&self) -> Result<()> {
+        run_gsettings(linux_clear_invocations())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_gsettings(invocations: Vec<Vec<String>>) -> Result<()> {
+    for args in invocations {
+        let status = std::process::Command::new("gsettings")
+            .args(&args)
+            .status()
+            .map_err(|e| ClientError::Proxy(e.to_string()))?;
+        if !status.success() {
+            return Err(ClientError::Proxy("gsettings exited non-zero".to_string()));
+        }
+    }
+    Ok(())
+}
+
+// --- macOS executor (networksetup) ---
+
+/// Sets the macOS SOCKS proxy on every enabled network service via `networksetup`.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MacosProxy;
+
+#[cfg(target_os = "macos")]
+impl SystemProxy for MacosProxy {
+    fn set(&self, socks: SocketAddr) -> Result<()> {
+        let host = socks.ip().to_string();
+        for svc in macos_services()? {
+            run_networksetup(macos_set_args(&svc, &host, socks.port()))?;
+        }
+        Ok(())
+    }
+    fn clear(&self) -> Result<()> {
+        for svc in macos_services()? {
+            run_networksetup(macos_clear_args(&svc))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_services() -> Result<Vec<String>> {
+    let out = std::process::Command::new("networksetup")
+        .arg("-listallnetworkservices")
+        .output()
+        .map_err(|e| ClientError::Proxy(e.to_string()))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    Ok(text
+        .lines()
+        .skip(1)
+        .filter(|l| !l.starts_with('*') && !l.trim().is_empty())
+        .map(|l| l.trim().to_string())
+        .collect())
+}
+
+#[cfg(target_os = "macos")]
+fn run_networksetup(args: Vec<String>) -> Result<()> {
+    let status = std::process::Command::new("networksetup")
+        .args(&args)
+        .status()
+        .map_err(|e| ClientError::Proxy(e.to_string()))?;
+    if !status.success() {
+        return Err(ClientError::Proxy(
+            "networksetup exited non-zero".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+// --- Windows executor (WinINET registry via winreg) ---
+
+/// Sets the Windows WinINET system proxy to the local SOCKS port via the registry.
+/// Note: does not emit the WinINET refresh notification (unsafe FFI; see plan).
+#[cfg(target_os = "windows")]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WindowsProxy;
+
+#[cfg(target_os = "windows")]
+const WININET_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+
+#[cfg(target_os = "windows")]
+impl SystemProxy for WindowsProxy {
+    fn set(&self, socks: SocketAddr) -> Result<()> {
+        use winreg::RegKey;
+        use winreg::enums::HKEY_CURRENT_USER;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let (key, _) = hkcu
+            .create_subkey(WININET_KEY)
+            .map_err(|e| ClientError::Proxy(e.to_string()))?;
+        key.set_value(
+            "ProxyServer",
+            &windows_proxy_server(&socks.ip().to_string(), socks.port()),
+        )
+        .map_err(|e| ClientError::Proxy(e.to_string()))?;
+        key.set_value("ProxyEnable", &1u32)
+            .map_err(|e| ClientError::Proxy(e.to_string()))?;
+        Ok(())
+    }
+    fn clear(&self) -> Result<()> {
+        use winreg::RegKey;
+        use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let key = hkcu
+            .open_subkey_with_flags(WININET_KEY, KEY_SET_VALUE)
+            .map_err(|e| ClientError::Proxy(e.to_string()))?;
+        key.set_value("ProxyEnable", &0u32)
+            .map_err(|e| ClientError::Proxy(e.to_string()))?;
+        Ok(())
+    }
+}
+
+// --- factory ---
+
+/// Returns the system-proxy implementation for the current OS, or `NoopProxy` on
+/// unsupported platforms. The supervisor accepts the boxed result via the blanket impl.
+pub fn system_proxy() -> Box<dyn SystemProxy> {
+    #[cfg(target_os = "linux")]
+    {
+        return Box::new(LinuxProxy);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return Box::new(MacosProxy);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return Box::new(WindowsProxy);
+    }
+    #[allow(unreachable_code)]
+    {
+        Box::new(NoopProxy)
     }
 }
 
