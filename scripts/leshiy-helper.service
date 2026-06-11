@@ -1,0 +1,38 @@
+# Leshiy privileged VPN helper. Install to /etc/systemd/system/leshiy-helper.service.
+# Grants ONLY CAP_NET_ADMIN (create TUN, edit routes/DNS). The control socket is created
+# 0o660 owner root, group `leshiy`, so the unprivileged desktop user (in group `leshiy`)
+# can drive it; SO_PEERCRED additionally restricts callers to --allow-uid.
+#
+# Templated unit (%i = the allowed uid):
+#   systemctl enable --now leshiy-helper@$(id -u)
+#
+# Alternative (no systemd): grant the file capability and run it directly.
+#   sudo setcap cap_net_admin+ep /usr/local/bin/leshiy-helper
+#   leshiy-helper --socket /run/leshiy/helper.sock --allow-uid "$(id -u)"
+# (CAP_NET_ADMIN on the binary lets a non-root user create the TUN + edit routes/DNS.)
+[Unit]
+Description=Leshiy VPN privileged helper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Runs as root but drops all capabilities except CAP_NET_ADMIN.
+ExecStart=/usr/local/bin/leshiy-helper --socket /run/leshiy/helper.sock --allow-uid %i
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+# /run/leshiy is created with group `leshiy` so the socket is reachable by the GUI user.
+RuntimeDirectory=leshiy
+RuntimeDirectoryMode=0750
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+# ReadWritePaths=/etc is needed for the resolv.conf DNS edit leshiy-tun performs; narrow
+# to /etc/resolv.conf if the backend is changed to only touch that file. AF_NETLINK above
+# is required by net-route for routing-table edits. NoNewPrivileges is omitted deliberately
+# (compatible here, but validate against net-route/tun on the target distro before adding).
+ReadWritePaths=/etc /run/leshiy
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

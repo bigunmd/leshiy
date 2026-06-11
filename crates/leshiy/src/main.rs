@@ -7,6 +7,7 @@ mod reality_config;
 mod server;
 mod tun;
 mod user_cli;
+mod vpn;
 
 use clap::Parser;
 
@@ -92,6 +93,14 @@ async fn main() -> anyhow::Result<()> {
             tun_name,
             dns,
         } => tun::run(&uri, transport, mtu, &tun_name, &dns).await?,
+        cli::Cmd::Vpn {
+            uri,
+            transport,
+            mtu,
+            tun_name,
+            dns,
+            socket,
+        } => vpn::run(&uri, transport, mtu, &tun_name, &dns, &socket).await?,
         cli::Cmd::User { cmd } => user_cli::run(cmd).await?,
         cli::Cmd::Status { config } => {
             lifecycle::status(&config, &host::RealHostOps)?;
