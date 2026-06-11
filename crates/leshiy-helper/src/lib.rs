@@ -12,9 +12,11 @@ pub mod auth;
 pub mod error;
 pub mod proto;
 pub mod runner;
+pub mod server;
 pub use error::HelperError;
 pub use proto::{Event, Request, Response, StartParams, Status};
 pub use runner::{EngineRunner, VpnRunner};
+pub use server::serve_control;
 
 // Re-exported so callers speak the same state/stats vocabulary as the supervisor.
 pub use leshiy_client::{Rates, State};
