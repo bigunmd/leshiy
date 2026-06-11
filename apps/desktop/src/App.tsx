@@ -28,7 +28,8 @@ export default function App() {
     <>
       <Atmosphere />
       <ConnectScreen
-        state={state} rates={rates} active={profiles.active} onToggle={onToggle}
+        state={state} rates={rates} active={profiles.active} mode={settings.mode} vpnDns={settings.vpn_dns}
+        onToggle={onToggle} onModeChange={(m) => void update({ mode: m })}
         onOpenConfigs={() => setSheet("config")} onOpenSettings={() => setSheet("settings")} onOpenLanguage={() => setSheet("language")}
       />
       <ConfigSheet open={sheet === "config"} onOpenChange={close}
