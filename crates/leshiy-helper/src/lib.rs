@@ -8,4 +8,5 @@
 //! helper runs the full `TunEngine` in-process (the spec's allowed engine-in-helper
 //! model); fd-passing (`SCM_RIGHTS`) to keep keys unprivileged is future hardening.
 //!
-//! Modules land task-by-task; this scaffold compiles as an empty lib + stub bin.
+pub mod error;
+pub use error::HelperError;
