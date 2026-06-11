@@ -9,10 +9,12 @@
 //! model); fd-passing (`SCM_RIGHTS`) to keep keys unprivileged is future hardening.
 //!
 pub mod auth;
+pub mod client;
 pub mod error;
 pub mod proto;
 pub mod runner;
 pub mod server;
+pub use client::HelperClient;
 pub use error::HelperError;
 pub use proto::{Event, Request, Response, StartParams, Status};
 pub use runner::{EngineRunner, VpnRunner};
