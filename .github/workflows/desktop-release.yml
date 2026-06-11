@@ -14,6 +14,11 @@ jobs:
           - platform: windows-latest
           - platform: macos-latest
     runs-on: ${{ matrix.platform }}
+    # Windows Authenticode signing is opt-in: set the WINDOWS_CERTIFICATE (base64 .pfx) and
+    # WINDOWS_CERTIFICATE_PASSWORD secrets to enable it. Absent → unsigned build (forks/PRs).
+    env:
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -30,13 +35,33 @@ jobs:
       - name: Install JS deps
         working-directory: apps/desktop
         run: pnpm install --frozen-lockfile
+      - name: Import Windows code-signing certificate
+        if: matrix.platform == 'windows-latest' && env.WINDOWS_CERTIFICATE != ''
+        shell: pwsh
+        run: |
+          # Decode the base64 .pfx secret, import it into the runner's cert store, then write
+          # a Windows-only config overlay carrying the thumbprint. Tauri auto-merges
+          # src-tauri/tauri.windows.conf.json (RFC 7396) on Windows, so `tauri build` signs.
+          # Secrets are read via $env:* (never interpolated into the command line) per
+          # GitHub Actions injection guidance.
+          [IO.File]::WriteAllBytes("$PWD/cert.pfx", [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $pw = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+          $c = Import-PfxCertificate -FilePath cert.pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
+          Remove-Item cert.pfx
+          $overlay = @{ bundle = @{ windows = @{ certificateThumbprint = $c.Thumbprint } } } | ConvertTo-Json -Depth 6
+          Set-Content -Path apps/desktop/src-tauri/tauri.windows.conf.json -Value $overlay -Encoding utf8
+          Write-Host "Wrote signing overlay (thumbprint $($c.Thumbprint))."
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Signing (deferred — set these secrets to enable):
-          # Updater signing (NOT OS code signing): TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD
-          # Windows Authenticode: a code-signing cert (bundle.windows.certificateThumbprint) — separate from the updater keys
-          # macOS Developer ID + notarization: APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID
+          # Signing posture:
+          # Windows Authenticode — ENABLED when the WINDOWS_CERTIFICATE/_PASSWORD secrets are
+          #   set: the step above imports the .pfx and writes the thumbprint overlay that
+          #   `tauri build` auto-merges (digestAlgorithm/timestampUrl live in tauri.conf.json).
+          #   Generate a self-signed cert with scripts/gen-windows-cert.ps1; see
+          #   apps/desktop/WINDOWS-SIGNING.md.
+          # Updater signing (NOT OS code signing) — deferred: TAURI_SIGNING_PRIVATE_KEY / _PASSWORD.
+          # macOS Developer ID + notarization — deferred: APPLE_CERTIFICATE / _PASSWORD / APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID.
         with:
           projectPath: apps/desktop
           tagName: ${{ github.ref_name }}

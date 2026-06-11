@@ -1,156 +1,143 @@
 # Windows Code-Signing — quick guide
 
-How to generate / obtain a code-signing certificate and wire it into the Windows desktop
-build so the `.exe` and installers (NSIS/MSI) are **Authenticode-signed**. Signed binaries
-avoid the "Unknown publisher" block and (with an EV cert or enough reputation) the SmartScreen
-warning.
+How to sign the Windows desktop `.exe` / installers (NSIS/MSI) with **Authenticode**. Signed
+binaries avoid the "Unknown publisher" block and (with an EV cert or enough reputation) the
+SmartScreen warning. Signing is **already wired** in `.github/workflows/desktop-release.yml`
+and `tauri.conf.json` — you just supply a certificate.
 
 > **Two different "signings" — don't confuse them.** Tauri's **updater** signature
-> (`TAURI_SIGNING_PRIVATE_KEY` / `…_PASSWORD`, used by the auto-updater) is *not* OS code
-> signing. This guide is about **Windows Authenticode** — the OS-trust signature on the
-> `.exe`/installer, configured via `bundle.windows.certificateThumbprint` in
-> `src-tauri/tauri.conf.json`. The two are independent; a release can use either, both, or
-> neither. See `.github/workflows/desktop-release.yml` (the signing env block is deferred).
+> (`TAURI_SIGNING_PRIVATE_KEY`) is *not* OS code signing. This guide is **Windows
+> Authenticode** — the OS-trust signature on the `.exe`/installer, driven by
+> `bundle.windows.certificateThumbprint`. The two are independent.
 
 ---
 
-## 1. Self-signed certificate (LOCAL / TEST ONLY)
+## Quick start — self-signed (what's wired here)
 
-Self-signed certs prove the build pipeline works but are **not** trusted by Windows on other
-machines — SmartScreen/"Unknown publisher" will still fire. Never ship one. Run in
-**PowerShell (Windows)**:
+Self-signed is fine for internal/test builds. It is **not** trusted on machines that haven't
+imported the cert, so public users still see SmartScreen / "Unknown publisher". For public
+distribution use a CA cert (§2).
+
+1. **Generate the cert** on your Windows box (one time):
+
+   ```powershell
+   pwsh ./scripts/gen-windows-cert.ps1 -PfxPassword 'choose-a-strong-pass' -TrustLocally
+   ```
+
+   It creates the cert in your store, exports `scripts/leshiy-codesign.pfx`, and prints the
+   **thumbprint**, a **base64 of the .pfx**, and the next steps. (`-TrustLocally` makes *this*
+   machine trust the resulting signatures; `*.pfx`/`*.cer`/base64 are git-ignored.)
+
+2. **Enable CI signing** — add two repository secrets
+   (*Settings → Secrets and variables → Actions*):
+
+   | Secret | Value |
+   |---|---|
+   | `WINDOWS_CERTIFICATE` | contents of `scripts/leshiy-codesign.pfx.base64.txt` |
+   | `WINDOWS_CERTIFICATE_PASSWORD` | the PFX password from step 1 |
+
+3. **Release** — push a `desktop-v*` tag (e.g. `git tag desktop-v1.2.0 && git push <remote> desktop-v1.2.0`).
+   The workflow imports the `.pfx`, writes the thumbprint into a Windows config overlay, and
+   `tauri build` signs the bundles. **No secrets → unsigned build** (forks/PRs still pass).
+
+4. **Delete the local key material** once the secrets are set:
+   `Remove-Item scripts/leshiy-codesign.pfx, scripts/leshiy-codesign.pfx.base64.txt`.
+
+That's it. The rest of this doc is reference (manual cert creation, production certs, local
+signed builds, verification).
+
+---
+
+## 1. Self-signed certificate by hand (what the script does)
+
+`scripts/gen-windows-cert.ps1` automates this; here's the underlying PowerShell:
 
 ```powershell
-# Create a code-signing cert in the current user's store. CN must match your publisher name.
 $cert = New-SelfSignedCertificate `
   -Type CodeSigningCert `
   -Subject "CN=Leshiy, O=Leshiy, C=US" `
-  -KeyUsage DigitalSignature `
-  -FriendlyName "Leshiy Dev Code Signing" `
+  -KeyUsage DigitalSignature -KeyAlgorithm RSA -KeyLength 3072 `
   -CertStoreLocation Cert:\CurrentUser\My `
-  -KeyAlgorithm RSA -KeyLength 3072 `
   -NotAfter (Get-Date).AddYears(3)
+$cert.Thumbprint                                  # identifies the cert to tauri/signtool
 
-$cert.Thumbprint   # <-- copy this; it goes into tauri.conf.json
-
-# Optional: export to a password-protected .pfx (needed for CI import — see §4).
-$pw = ConvertTo-SecureString -String "choose-a-strong-password" -Force -AsPlainText
+$pw = ConvertTo-SecureString "a-strong-password" -Force -AsPlainText
 Export-PfxCertificate -Cert $cert -FilePath .\leshiy-codesign.pfx -Password $pw
 ```
 
-To make the **local** machine trust it (so signed test builds verify clean on *this* box
-only), import the cert's public part into the Trusted Root + Trusted Publishers stores:
+To trust it on the **local** machine only:
 
 ```powershell
 Export-Certificate -Cert $cert -FilePath .\leshiy-codesign.cer
-Import-Certificate -FilePath .\leshiy-codesign.cer -CertStoreLocation Cert:\LocalMachine\Root
-Import-Certificate -FilePath .\leshiy-codesign.cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher
+Import-Certificate -FilePath .\leshiy-codesign.cer -CertStoreLocation Cert:\CurrentUser\Root
 ```
 
 ---
 
-## 2. Production certificate (what to actually ship with)
+## 2. Production certificate (for public distribution)
 
-Since **June 2023** the CA/Browser Forum requires code-signing private keys to live on
-**FIPS 140-2 L2 / EAL4+ hardware** — so you can no longer just download a `.pfx` for a new
-public cert. Pick one:
+Since **June 2023** the CA/Browser Forum requires code-signing private keys on
+**FIPS 140-2 L2 / EAL4+ hardware** — no more bare `.pfx` downloads for new public certs.
 
 | Option | SmartScreen | Key storage | Notes |
 |---|---|---|---|
-| **Azure Trusted Signing** (recommended) | builds reputation; instant if org is established | Microsoft-run HSM (no token) | ~$10/mo. CI-friendly via `signtool` + the Azure dlib. Requires a verified org identity (public trust generally needs the org to be 3+ yrs old). |
-| **EV cert** (DigiCert, Sectigo, …) | **instant** trust | USB token (SafeNet) or cloud HSM | Most trusted, most expensive; hardware token is awkward in CI (use a cloud-HSM variant). |
-| **OV cert** | reputation-based (warns until enough installs) | USB token / cloud HSM | Cheaper than EV; no longer issued as a bare `.pfx`. |
+| **Azure Trusted Signing** (recommended) | builds reputation; instant if org is established | Microsoft-run HSM (no token) | ~$10/mo, CI-friendly via `signtool` + Azure dlib. Requires a verified org identity. |
+| **EV cert** | **instant** trust | USB token / cloud HSM | Most trusted, most expensive. |
+| **OV cert** | reputation-based | USB token / cloud HSM | Cheaper than EV; no longer a bare `.pfx`. |
 
-For Leshiy (a censorship-circumvention tool), **Azure Trusted Signing** is the pragmatic
-choice: cheap, no hardware token, scriptable in GitHub Actions.
-
----
-
-## 3. Wire the cert into the Tauri build
-
-### a) Thumbprint method (self-signed, or any cert already in the Windows cert store)
-
-Add to `apps/desktop/src-tauri/tauri.conf.json` under `bundle`:
-
-```jsonc
-"bundle": {
-  "windows": {
-    "certificateThumbprint": "ABCD1234…",   // the $cert.Thumbprint from §1 (no spaces)
-    "digestAlgorithm": "sha256",
-    "timestampUrl": "http://timestamp.digicert.com"   // ALWAYS timestamp (see §5)
-  }
-}
-```
-
-Then build: `pnpm tauri build` (from `apps/desktop`). Tauri runs `signtool` against the cert
-matching that thumbprint in the local store.
-
-> Keep the thumbprint **out of git if it's tied to a private cert** — prefer injecting it in
-> CI (below) over committing it. A self-signed dev thumbprint is harmless to commit but
-> useless to others, so don't.
-
-### b) signCommand method (cloud HSM / Azure Trusted Signing / token)
-
-For keys that aren't a plain store-resident cert, use a custom sign command instead of a
-thumbprint (Tauri passes the file to sign as `%1`):
-
-```jsonc
-"bundle": {
-  "windows": {
-    "signCommand": "trusted-signing-cli -e https://eus.codesigning.azure.net -a <account> -c <cert-profile> %1"
-  }
-}
-```
-
-(or any wrapper that ends up calling `signtool sign /dlib Azure.CodeSigning.Dlib.dll …`.)
+For a CA cert that lives in the Windows store as a normal cert (or is imported from a `.pfx`),
+the wiring below is unchanged — just use that cert's `.pfx`/thumbprint instead of a
+self-signed one. For HSM/token-backed keys, switch `bundle.windows` to a `signCommand` that
+invokes your signing tool (e.g. the Azure Trusted Signing dlib) instead of a thumbprint.
 
 ---
 
-## 4. CI wiring (GitHub Actions, `.pfx`-based)
+## 3. How signing is wired (reference)
 
-For a self-signed or cloud-HSM-exported `.pfx`, base64 it and store it + its password as repo
-**secrets** (`Settings → Secrets and variables → Actions`):
+- `apps/desktop/src-tauri/tauri.conf.json` → `bundle.windows` already sets
+  `digestAlgorithm: "sha256"` and `timestampUrl` (timestamping keeps signatures valid past
+  cert expiry). It deliberately has **no `certificateThumbprint`**, so default builds are
+  **unsigned**.
+- Signing is activated by adding the thumbprint via Tauri's **platform overlay**
+  `src-tauri/tauri.windows.conf.json` (auto-merged on Windows, RFC 7396):
 
-```sh
-base64 -w0 leshiy-codesign.pfx > pfx.b64    # paste into secret WINDOWS_PFX_BASE64
-# secret WINDOWS_PFX_PASSWORD = the export password
+  ```json
+  { "bundle": { "windows": { "certificateThumbprint": "ABCD…" } } }
+  ```
+
+  In CI the import step writes this file from the imported cert; the file is git-ignored so a
+  per-machine thumbprint never lands in git.
+
+---
+
+## 4. Local signed build
+
+The cert must be in your store (step 1). Then either re-run the generator with
+`-WriteLocalOverlay` (it writes the git-ignored overlay), or create the overlay yourself, and
+build from `apps/desktop`:
+
+```powershell
+pwsh ./scripts/gen-windows-cert.ps1 -PfxPassword '…' -WriteLocalOverlay   # writes the overlay
+cd apps/desktop
+pnpm tauri build                                                          # signs the bundles
 ```
 
-Add a step **before** `tauri-apps/tauri-action` in `desktop-release.yml`, guarded to the
-Windows runner, that imports the pfx and exposes the thumbprint:
-
-```yaml
-      - name: Import Windows signing cert
-        if: matrix.platform == 'windows-latest' && secrets.WINDOWS_PFX_BASE64 != ''
-        shell: pwsh
-        run: |
-          [IO.File]::WriteAllBytes("cert.pfx", [Convert]::FromBase64String("${{ secrets.WINDOWS_PFX_BASE64 }}"))
-          $pw = ConvertTo-SecureString "${{ secrets.WINDOWS_PFX_PASSWORD }}" -AsPlainText -Force
-          $c = Import-PfxCertificate -FilePath cert.pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
-          "WINDOWS_CERT_THUMBPRINT=$($c.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Remove-Item cert.pfx
-```
-
-Reference `${{ env.WINDOWS_CERT_THUMBPRINT }}` from a templated `certificateThumbprint`, or
-keep the thumbprint static in `tauri.conf.json` and just rely on the import putting the
-matching cert in the store. For **Azure Trusted Signing**, skip the pfx entirely: authenticate
-with `azure/login` (OIDC) and use the `signCommand` from §3b — no secret key touches the runner.
+> Prefer the overlay file over `tauri build --config '{…}'`: PowerShell mangles quotes in
+> inline JSON passed to native commands, which corrupts the `--config` payload.
 
 ---
 
 ## 5. Verify & timestamp
 
-- **Always set `timestampUrl`** — a timestamped signature stays valid after the cert expires;
-  an un-timestamped one goes invalid the day the cert lapses. Common URLs:
-  `http://timestamp.digicert.com`, `http://timestamp.sectigo.com`.
+- **`timestampUrl` is set** (in `tauri.conf.json`) so signatures stay valid after the cert
+  expires. Alternatives: `http://timestamp.sectigo.com`, `http://timestamp.comodoca.com`.
 - **Verify** a built artifact:
 
 ```powershell
-# PowerShell
 Get-AuthenticodeSignature .\Leshiy_1.2.0_x64-setup.exe | Format-List
-# or, with the Windows SDK signtool:
+# or, with the Windows SDK:
 signtool verify /pa /v .\Leshiy_1.2.0_x64-setup.exe
 ```
 
-A good result shows `Status: Valid`, the expected publisher, and a countersignature
-(timestamp). Self-signed certs report `Valid` only on machines that trust the cert (§1).
+`Status: Valid` + the expected publisher + a countersignature (timestamp) = success.
+Self-signed certs report `Valid` only on machines that trust the cert (§1).
