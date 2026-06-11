@@ -2,9 +2,10 @@
 //! command and map a non-zero exit to an `io::Error`, plus pure argument builders
 //! (unit-tested) so command construction is verifiable without invoking anything.
 //!
-//! The runner functions (`run`/`run_capture`) are compiled only for the real macOS /
-//! Windows targets where the backends use them; the pure argument-builders also compile
-//! under `test`, so they (and their unit tests) run on the Linux host via `cargo test`.
+//! The runner functions (`run`/`run_capture`) compile for the real macOS / Windows targets
+//! where the backends use them, and also under host `test` (so the host-type-checked macOS
+//! backend can call them on Linux); the pure argument-builders likewise compile under
+//! `test`, so they (and their unit tests) run on the Linux host via `cargo test`.
 
 /// Run `program args...`, mapping spawn failure or a non-zero exit to `io::Error`.
 /// Best-effort callers (teardown) ignore the `Result`; setup callers propagate it.
