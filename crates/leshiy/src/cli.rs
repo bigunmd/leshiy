@@ -75,6 +75,24 @@ pub enum Cmd {
         #[arg(long, default_value = "auto")]
         transport: Transport,
     },
+    /// Run as a full-tunnel VPN via a TUN device (all traffic). Requires root / CAP_NET_ADMIN.
+    Tun {
+        /// The leshiy:// server URI.
+        #[arg(long)]
+        uri: String,
+        /// Transport: tcp (REALITY — required for UDP today, the default), quic, or auto.
+        #[arg(long, default_value = "tcp")]
+        transport: Transport,
+        /// TUN MTU (kept below the transport's to absorb TLS + mux framing).
+        #[arg(long, default_value_t = 1400)]
+        mtu: u16,
+        /// TUN interface name.
+        #[arg(long, default_value = "leshiy0")]
+        tun_name: String,
+        /// DNS resolver forced through the tunnel.
+        #[arg(long, default_value = "1.1.1.1")]
+        dns: String,
+    },
     /// Interactive (or flag-driven) single-server setup: probe dest, init, print URI + QR.
     Quickstart {
         /// Public host:port clients dial.
@@ -303,6 +321,32 @@ pub enum UserCmd {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn tun_parses_uri_and_defaults() {
+        let cli = Cli::try_parse_from([
+            "leshiy",
+            "tun",
+            "--uri",
+            "leshiy://abc@1.2.3.4:443?sni=x&sid=0102030400000000",
+        ])
+        .expect("tun should parse");
+        match cli.cmd {
+            Cmd::Tun {
+                uri,
+                transport,
+                mtu,
+                tun_name,
+                ..
+            } => {
+                assert_eq!(uri, "leshiy://abc@1.2.3.4:443?sni=x&sid=0102030400000000");
+                assert!(matches!(transport, Transport::Tcp));
+                assert_eq!(mtu, 1400);
+                assert_eq!(tun_name, "leshiy0");
+            }
+            _ => panic!("expected Tun"),
+        }
+    }
 
     #[test]
     fn connect_takes_positional_uri_with_defaults() {

@@ -8,6 +8,7 @@
 //! process must already be root / `CAP_NET_ADMIN` (the CLI) or be handed the device by
 //! the privileged helper (the GUI, a later phase).
 
+pub mod discover;
 pub mod engine;
 pub mod netstack;
 pub mod route_plan;
