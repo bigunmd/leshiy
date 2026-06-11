@@ -1,12 +1,15 @@
-//! Tauri shell: bridges the webview to the `leshiy-client` supervisor.
+//! Tauri shell: bridges the webview to the `leshiy-client` supervisor (proxy mode) and to
+//! the privileged `leshiy-helper` daemon (VPN mode).
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use leshiy_client::adapter::RealTransport;
 use leshiy_client::{
     spawn_supervisor, system_proxy, Profile, ProfileStore, Settings, SupervisorConfig,
     SupervisorHandle,
 };
+// Free functions for the install probe (NOT HelperClient methods); HelperClient drives VPN mode.
+use leshiy_helper::{default_socket_path, is_installed, HelperClient, StartParams};
 use tauri::{Emitter, Manager, State};
 
 /// Application state managed by Tauri.
@@ -16,6 +19,10 @@ struct AppState {
     settings: Mutex<Settings>,
     profiles_path: PathBuf,
     settings_path: PathBuf,
+    /// Lazily-connected privileged-helper client; `None` until VPN mode connects.
+    helper: Mutex<Option<HelperClient>>,
+    /// App handle for emitting webview events from commands (set in `setup`).
+    app_handle: OnceLock<tauri::AppHandle>,
     /// Owns the tokio runtime the supervisor's tasks run on; kept alive for the app's lifetime.
     _runtime: tokio::runtime::Runtime,
 }
@@ -75,22 +82,159 @@ fn set_active(state: State<AppState>, id: String) -> Result<(), String> {
     state.save_profiles()
 }
 
+/// Whether the given mode routes connect/disconnect through the privileged helper
+/// (VPN) rather than the in-process SOCKS supervisor (Proxy).
+fn mode_uses_helper(mode: leshiy_client::Mode) -> bool {
+    matches!(mode, leshiy_client::Mode::Vpn)
+}
+
 #[tauri::command]
-fn connect(state: State<AppState>) -> Result<(), String> {
-    let uri = state
-        .profiles
-        .lock()
-        .unwrap()
-        .active()
-        .map(|p| p.uri.clone())
-        .ok_or_else(|| "no active profile".to_string())?;
-    state.supervisor.connect(uri);
+async fn connect(state: State<'_, AppState>) -> Result<(), String> {
+    let (uri, settings) = {
+        let prof = state.profiles.lock().unwrap();
+        let uri = prof
+            .active()
+            .map(|p| p.uri.clone())
+            .ok_or_else(|| "no active profile".to_string())?;
+        let settings = state.settings.lock().unwrap().clone();
+        (uri, settings)
+    };
+
+    if mode_uses_helper(settings.mode) {
+        // The caller (App.tsx) has already ensured the helper is installed (lazy install
+        // dialog) before invoking `connect` in VPN mode. `HelperClient` is `Clone` (holds
+        // only a PathBuf), so we connect-or-reuse, then clone the cheap handle OUT of the
+        // guard before any `.await` — never hold the std Mutex across an await point.
+        let client = {
+            let mut guard = state.helper.lock().unwrap();
+            if guard.is_none() {
+                *guard = Some(HelperClient::connect(default_socket_path()));
+            }
+            guard.as_ref().unwrap().clone()
+        };
+        let params = StartParams {
+            uri, // active profile URI
+            transport: settings.transport,
+            mtu: settings.vpn_mtu,
+            tun_name: "leshiy0".into(),
+            dns: settings.vpn_dns.clone(),
+        };
+        client.start_vpn(params).await.map_err(|e| e.to_string())?;
+
+        // Relay the helper's state/stats onto the SAME webview events the proxy path uses,
+        // so `useTunnel` is reused unchanged. The forwarder ends when the helper closes the
+        // subscribe stream (final Disconnected event returns the orb to idle).
+        let app = state
+            .app_handle
+            .get()
+            .cloned()
+            .ok_or_else(|| "app not ready".to_string())?;
+        let mut rx = client.subscribe().await.map_err(|e| e.to_string())?;
+        tauri::async_runtime::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                if let Some(s) = ev.state {
+                    let _ = app.emit("tunnel:state", s);
+                }
+                if let Some(r) = ev.rates {
+                    let _ = app.emit("tunnel:stats", r);
+                }
+            }
+        });
+    } else {
+        // Proxy mode: unchanged from today.
+        state.supervisor.connect(uri);
+    }
     Ok(())
 }
 
 #[tauri::command]
-fn disconnect(state: State<AppState>) {
-    state.supervisor.disconnect();
+async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
+    let mode = state.settings.lock().unwrap().mode;
+    if mode_uses_helper(mode) {
+        // Clone the cheap handle out of the guard, then drop the lock before `stop().await`.
+        let client = { state.helper.lock().unwrap().clone() };
+        if let Some(c) = client {
+            c.stop().await.map_err(|e| e.to_string())?;
+        }
+    } else {
+        state.supervisor.disconnect();
+    }
+    Ok(())
+}
+
+/// True if the privileged VPN helper is already installed on this system (privilege-free).
+#[tauri::command]
+fn helper_installed() -> bool {
+    is_installed()
+}
+
+/// Install the privileged VPN helper. Runs OS elevation to invoke the helper's own
+/// `install` subcommand — it does NOT call any install method on `HelperClient`. Idempotent.
+/// The actual elevation is integration/manual-tested (it pops a system auth prompt).
+#[tauri::command]
+async fn install_helper() -> Result<(), String> {
+    run_helper_subcommand("install")
+}
+
+/// Locate the bundled `leshiy-helper` binary (Tauri sidecar) and run `<bin> <sub>` with OS
+/// elevation. Returns Err on a non-zero exit. Per-OS elevation; manual/integration-tested.
+fn run_helper_subcommand(sub: &str) -> Result<(), String> {
+    let bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("leshiy-helper")))
+        .ok_or_else(|| "cannot locate bundled leshiy-helper binary".to_string())?;
+    let bin = bin.to_string_lossy().to_string();
+
+    #[cfg(target_os = "linux")]
+    let status = std::process::Command::new("pkexec")
+        .arg(&bin)
+        .arg(sub)
+        .status();
+
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(format!(
+            "do shell script \"{} {}\" with administrator privileges",
+            bin, sub
+        ))
+        .status();
+
+    #[cfg(target_os = "windows")]
+    let status = {
+        // Elevate via PowerShell Start-Process -Verb RunAs (UAC), waiting for exit.
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "$p = Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
+                    bin, sub
+                ),
+            ])
+            .status()
+    };
+
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("leshiy-helper {sub} exited with {s}")),
+        Err(e) => Err(format!("failed to elevate leshiy-helper {sub}: {e}")),
+    }
+}
+
+/// Remove the privileged VPN helper (stops it if running, then uninstalls). Like install,
+/// the removal runs the helper's own `uninstall` subcommand under OS elevation — NOT a
+/// `HelperClient` method. The actual elevation is integration/manual-tested.
+#[tauri::command]
+async fn remove_helper(state: State<'_, AppState>) -> Result<(), String> {
+    // Stop any running session first, dropping our cached client handle.
+    {
+        let client = state.helper.lock().unwrap().take();
+        if let Some(c) = client {
+            let _ = c.stop().await;
+        }
+    }
+    run_helper_subcommand("uninstall")
 }
 
 #[tauri::command]
@@ -122,6 +266,8 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         .menu(&menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "connect" => {
+                // Tray quick-connect uses the proxy supervisor path; VPN connect is
+                // initiated from the window so the lazy install dialog can appear.
                 let st = app.state::<AppState>();
                 let uri = st.profiles.lock().unwrap().active().map(|p| p.uri.clone());
                 if let Some(uri) = uri {
@@ -183,6 +329,8 @@ pub fn run() {
         settings: Mutex::new(settings),
         profiles_path,
         settings_path,
+        helper: Mutex::new(None),
+        app_handle: OnceLock::new(),
         _runtime: runtime,
     };
 
@@ -199,10 +347,15 @@ pub fn run() {
             connect,
             disconnect,
             get_settings,
-            set_settings
+            set_settings,
+            helper_installed,
+            install_helper,
+            remove_helper
         ])
         .setup(|app| {
             let handle = app.handle().clone();
+            // Store the app handle so commands (the VPN helper relay) can emit webview events.
+            let _ = app.state::<AppState>().app_handle.set(handle.clone());
             let (mut state_rx, mut stats_rx) = {
                 let st = app.state::<AppState>();
                 (
@@ -237,4 +390,15 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running leshiy desktop");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn vpn_mode_branch_selects_helper() {
+        use leshiy_client::Mode;
+        // VPN routes to the helper, Proxy to the in-process SOCKS supervisor.
+        assert!(super::mode_uses_helper(Mode::Vpn));
+        assert!(!super::mode_uses_helper(Mode::Proxy));
+    }
 }

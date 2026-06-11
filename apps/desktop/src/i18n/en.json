@@ -2,7 +2,21 @@
   "brand": "LESHIY",
   "state": { "Disconnected": "Disconnected", "Connecting": "Connecting…", "Connected": "Connected", "Reconnecting": "Reconnecting…", "Error": "Couldn't connect" },
   "tapToConnect": "Tap to connect", "tapToRetry": "tap to retry", "noConfig": "No config — import one", "manageConfigs": "Manage configs", "total": "total",
+  "mode": { "proxy": "Proxy", "vpn": "VPN", "label": "Mode", "proxyHint": "Proxy — routes proxy-aware apps", "vpnHint": "VPN — ready to route all apps" },
+  "vpnStatus": { "protected": "all traffic protected", "details": "tunnel details", "ip": "Assigned IP", "dns": "DNS", "route": "Active route", "mtu": "MTU", "fullTunnel": "full tunnel" },
+  "install": {
+    "title": "Enable VPN mode",
+    "body": "Leshiy needs to install a small helper to route all of this device's traffic through the tunnel. You'll be asked for your system password once.",
+    "bullet1": "Creates a virtual network adapter (TUN) and updates your routes & DNS",
+    "bullet2": "Runs only while VPN mode is on; restores your network on disconnect",
+    "bullet3": "Open-source & minimal — it never sees your keys or traffic.",
+    "notNow": "Not now",
+    "install": "Install & enable",
+    "authNote": "OS auth prompt (UAC / sudo / Touch ID) follows. Removable anytime from Settings → VPN.",
+    "installing": "Installing helper…",
+    "failed": "Helper install failed"
+  },
   "config": { "title": "Configs", "paste": "Paste a leshiy:// link", "fromClipboard": "From clipboard", "fromImage": "From QR image", "name": "Name", "add": "Add", "rename": "Rename", "delete": "Delete", "empty": "No configs yet. Paste a leshiy:// link or scan a QR image.", "invalid": "That isn't a valid leshiy:// link.", "orPaste": "or paste a link" },
-  "settings": { "title": "Settings", "language": "Language", "killSwitch": "Kill switch (fail closed)", "transport": "Transport", "socksPort": "SOCKS port", "auto": "Auto", "quic": "QUIC", "tcp": "REALITY (TCP)", "restartNote": "Transport and port changes apply on next launch." },
+  "settings": { "title": "Settings", "language": "Language", "killSwitch": "Kill switch (fail closed)", "killSwitchVpn": "Kill switch — blocks traffic if the tunnel drops", "transport": "Transport", "socksPort": "SOCKS port", "vpnMtu": "VPN MTU", "vpnDns": "VPN DNS", "removeHelper": "Remove VPN helper", "remove": "Remove", "auto": "Auto", "quic": "QUIC", "tcp": "REALITY (TCP)", "restartNote": "Transport and port changes apply on next launch." },
   "close": "Close"
 }

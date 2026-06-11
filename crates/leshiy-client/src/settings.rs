@@ -37,6 +37,10 @@ pub struct Settings {
     pub transport: TransportPref,
     #[serde(default)]
     pub mode: Mode,
+    #[serde(default = "default_vpn_mtu")]
+    pub vpn_mtu: u16,
+    #[serde(default = "default_vpn_dns")]
+    pub vpn_dns: String,
     #[serde(default = "default_socks_port")]
     pub socks_port: u16,
     #[serde(default)]
@@ -52,6 +56,12 @@ fn default_true() -> bool {
 fn default_socks_port() -> u16 {
     1080
 }
+fn default_vpn_mtu() -> u16 {
+    1400
+}
+fn default_vpn_dns() -> String {
+    "1.1.1.1".to_string()
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -60,6 +70,8 @@ impl Default for Settings {
             kill_switch: default_true(),
             transport: TransportPref::Auto,
             mode: Mode::Proxy,
+            vpn_mtu: default_vpn_mtu(),
+            vpn_dns: default_vpn_dns(),
             socks_port: default_socks_port(),
             start_minimized: false,
         }
@@ -83,6 +95,22 @@ mod tests {
     #[test]
     fn settings_default_mode_is_proxy() {
         assert_eq!(Settings::default().mode, Mode::Proxy);
+    }
+
+    #[test]
+    fn settings_default_vpn_fields() {
+        let s = Settings::default();
+        assert_eq!(s.vpn_mtu, 1400);
+        assert_eq!(s.vpn_dns, "1.1.1.1");
+    }
+
+    #[test]
+    fn missing_vpn_fields_fall_back_to_defaults() {
+        // Old settings files (pre-VPN) deserialize with the new fields defaulted.
+        let s: Settings = serde_json::from_str(r#"{"language":"en","mode":"vpn"}"#).unwrap();
+        assert_eq!(s.mode, Mode::Vpn);
+        assert_eq!(s.vpn_mtu, 1400);
+        assert_eq!(s.vpn_dns, "1.1.1.1");
     }
 
     #[test]
