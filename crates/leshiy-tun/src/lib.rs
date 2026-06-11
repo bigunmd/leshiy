@@ -13,4 +13,5 @@ pub mod netstack;
 pub mod route_plan;
 pub mod sys;
 
-// Re-exports are added as each module lands (Tasks 2.1–2.4).
+pub use route_plan::RoutePlan;
+// Engine re-exports are added when the engine lands (Task 2.4).
