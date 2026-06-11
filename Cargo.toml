@@ -49,8 +49,9 @@ terminal_size = "0.4"
 rustls-pemfile = "2"
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
-# VPN / full-tunnel (Phase 2)
-tun-rs = { version = "2.8", features = ["async_tokio"] }
+# VPN / full-tunnel (Phase 2). `tun` (rust-tun) is the device crate ipstack's own
+# examples integrate with — its async device implements tokio AsyncRead/AsyncWrite,
+# which `ipstack::IpStack::new` requires.
+tun = { version = "0.8", features = ["async"] }
 ipstack = "1"
 net-route = "0.4"
-netdev = "0.44"
