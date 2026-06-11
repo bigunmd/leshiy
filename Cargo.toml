@@ -49,8 +49,9 @@ terminal_size = "0.4"
 rustls-pemfile = "2"
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
-# Helper IPC (Phase 4): SO_PEERCRED peer-uid auth on the control socket (Linux).
-nix = { version = "0.29", features = ["socket"] }
+# Helper IPC (Phase 4): SO_PEERCRED peer-uid auth on the control socket (`socket`),
+# plus `getuid` for the default allow-uid / SO_PEERCRED tests (`user`). Linux.
+nix = { version = "0.29", features = ["socket", "user"] }
 # VPN / full-tunnel (Phase 2). `tun` (rust-tun) is the device crate ipstack's own
 # examples integrate with — its async device implements tokio AsyncRead/AsyncWrite,
 # which `ipstack::IpStack::new` requires.

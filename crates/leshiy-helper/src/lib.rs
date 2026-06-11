@@ -8,6 +8,7 @@
 //! helper runs the full `TunEngine` in-process (the spec's allowed engine-in-helper
 //! model); fd-passing (`SCM_RIGHTS`) to keep keys unprivileged is future hardening.
 //!
+pub mod auth;
 pub mod error;
 pub mod proto;
 pub mod runner;
