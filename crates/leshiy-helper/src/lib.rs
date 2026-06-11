@@ -10,8 +10,10 @@
 //!
 pub mod error;
 pub mod proto;
+pub mod runner;
 pub use error::HelperError;
 pub use proto::{Event, Request, Response, StartParams, Status};
+pub use runner::{EngineRunner, VpnRunner};
 
 // Re-exported so callers speak the same state/stats vocabulary as the supervisor.
 pub use leshiy_client::{Rates, State};
