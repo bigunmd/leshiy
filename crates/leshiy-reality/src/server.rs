@@ -100,7 +100,7 @@ fn server_hello() -> Hello {
     Hello {
         version: PROTOCOL_MAJOR,
         min_supported: 1,
-        capabilities: 0,
+        capabilities: leshiy_core::version::CAP_DATAGRAM,
     }
 }
 
