@@ -17,6 +17,16 @@ pub trait ProxyStream: Send {
     async fn close(&mut self) -> Result<()>;
 }
 
+/// A bidirectional UDP datagram association to one target inside a tunnel.
+/// Each `send`/`recv` carries exactly one datagram. `recv` returning an `Err`
+/// is treated as end-of-association by callers.
+#[async_trait]
+pub trait DatagramFlow: Send {
+    async fn send(&mut self, data: Vec<u8>) -> Result<()>;
+    async fn recv(&mut self) -> Result<Vec<u8>>;
+    async fn close(&mut self) -> Result<()>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40,6 +50,35 @@ mod tests {
         async fn close(&mut self) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn datagram_flow_roundtrip() {
+        struct Fake {
+            last: Vec<u8>,
+            ret: Option<Vec<u8>>,
+        }
+        #[async_trait]
+        impl DatagramFlow for Fake {
+            async fn send(&mut self, d: Vec<u8>) -> Result<()> {
+                self.last = d;
+                Ok(())
+            }
+            async fn recv(&mut self) -> Result<Vec<u8>> {
+                self.ret.take().ok_or(ClientError::ConnectFailed)
+            }
+            async fn close(&mut self) -> Result<()> {
+                Ok(())
+            }
+        }
+        let mut f = Fake {
+            last: vec![],
+            ret: Some(b"down".to_vec()),
+        };
+        f.send(b"up".to_vec()).await.unwrap();
+        assert_eq!(f.last, b"up");
+        assert_eq!(f.recv().await.unwrap(), b"down");
+        assert!(f.recv().await.is_err());
     }
 
     #[tokio::test]

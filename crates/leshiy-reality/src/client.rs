@@ -159,6 +159,16 @@ impl RealityConn {
             .map_err(|e| crate::RealityError::Malformed(e.to_string()))
     }
 
+    /// Open a UDP datagram association to `target` ("host:port") over the mux.
+    pub async fn open_datagram(&self, target: &str) -> crate::Result<leshiy_core::mux::Stream> {
+        self.mux
+            .lock()
+            .await
+            .open_datagram(target)
+            .await
+            .map_err(|e| crate::RealityError::Malformed(e.to_string()))
+    }
+
     /// Resolves once the underlying tunnel has dropped (the mux's reader or writer
     /// task exited). Used by the supervisor to trigger reconnect.
     pub async fn closed(&self) {

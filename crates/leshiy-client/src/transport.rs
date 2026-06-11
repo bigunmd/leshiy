@@ -3,7 +3,7 @@
 //! by the real REALITY/QUIC adapters in production.
 use crate::error::Result;
 use crate::settings::TransportPref;
-use crate::stream::ProxyStream;
+use crate::stream::{DatagramFlow, ProxyStream};
 use async_trait::async_trait;
 
 /// A live tunnel to one server, capable of opening per-target streams.
@@ -11,6 +11,12 @@ use async_trait::async_trait;
 pub trait Tunnel: Send + Sync {
     /// Open a new proxied stream to `target` ("host:port").
     async fn open(&self, target: &str) -> Result<Box<dyn ProxyStream>>;
+    /// Open a UDP datagram association to `target` ("host:port").
+    /// Default: unsupported — transports without datagram support (e.g. QUIC for now)
+    /// inherit this and return `ConnectFailed`.
+    async fn open_datagram(&self, _target: &str) -> Result<Box<dyn DatagramFlow>> {
+        Err(crate::error::ClientError::ConnectFailed)
+    }
     /// Resolves when the tunnel has dropped (the connection died). The supervisor
     /// `select!`s on this to trigger reconnect. Implementations without a usable
     /// close signal may never resolve.
