@@ -9,4 +9,9 @@
 //! model); fd-passing (`SCM_RIGHTS`) to keep keys unprivileged is future hardening.
 //!
 pub mod error;
+pub mod proto;
 pub use error::HelperError;
+pub use proto::{Event, Request, Response, StartParams, Status};
+
+// Re-exported so callers speak the same state/stats vocabulary as the supervisor.
+pub use leshiy_client::{Rates, State};
