@@ -14,6 +14,7 @@ leshiy-reality = { path = "../leshiy-reality" }
 leshiy-quic = { path = "../leshiy-quic" }
 leshiy-client = { path = "../leshiy-client" }
 leshiy-tun = { path = "../leshiy-tun" }
+leshiy-helper = { path = "../leshiy-helper" }
 rcgen.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true

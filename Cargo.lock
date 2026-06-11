@@ -1280,6 +1280,7 @@ dependencies = [
  "hex",
  "leshiy-client",
  "leshiy-core",
+ "leshiy-helper",
  "leshiy-quic",
  "leshiy-reality",
  "leshiy-tun",

@@ -103,6 +103,28 @@ pub enum Cmd {
         #[arg(long, default_value = "1.1.1.1")]
         dns: String,
     },
+    /// Run a full-tunnel VPN via the privileged `leshiy-helper` daemon (this process
+    /// stays unprivileged). Requires `leshiy-helper` to be installed + running.
+    Vpn {
+        /// The leshiy:// server URI.
+        #[arg(long)]
+        uri: String,
+        /// Transport: tcp (REALITY — required for UDP today, the default), quic, or auto.
+        #[arg(long, default_value = "tcp")]
+        transport: Transport,
+        /// TUN MTU.
+        #[arg(long, default_value_t = 1400)]
+        mtu: u16,
+        /// TUN interface name.
+        #[arg(long, default_value = "leshiy0")]
+        tun_name: String,
+        /// DNS resolver forced through the tunnel.
+        #[arg(long, default_value = "1.1.1.1")]
+        dns: String,
+        /// Path to the helper's control socket.
+        #[arg(long, default_value = "/run/leshiy/helper.sock")]
+        socket: String,
+    },
     /// Interactive (or flag-driven) single-server setup: probe dest, init, print URI + QR.
     Quickstart {
         /// Public host:port clients dial.
@@ -355,6 +377,34 @@ mod tests {
                 assert_eq!(tun_name, "leshiy0");
             }
             _ => panic!("expected Tun"),
+        }
+    }
+
+    #[test]
+    fn vpn_parses_uri_and_defaults() {
+        let cli = Cli::try_parse_from([
+            "leshiy",
+            "vpn",
+            "--uri",
+            "leshiy://abc@1.2.3.4:443?sni=x&sid=0102030400000000",
+        ])
+        .expect("vpn should parse");
+        match cli.cmd {
+            Cmd::Vpn {
+                uri,
+                transport,
+                mtu,
+                tun_name,
+                socket,
+                ..
+            } => {
+                assert_eq!(uri, "leshiy://abc@1.2.3.4:443?sni=x&sid=0102030400000000");
+                assert!(matches!(transport, Transport::Tcp));
+                assert_eq!(mtu, 1400);
+                assert_eq!(tun_name, "leshiy0");
+                assert_eq!(socket, "/run/leshiy/helper.sock");
+            }
+            _ => panic!("expected Vpn"),
         }
     }
 
