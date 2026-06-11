@@ -11,11 +11,13 @@
 pub mod auth;
 pub mod client;
 pub mod error;
+mod install;
 pub mod proto;
 pub mod runner;
 pub mod server;
 pub use client::HelperClient;
 pub use error::HelperError;
+pub use install::{default_socket_path, is_installed};
 pub use proto::{Event, Request, Response, StartParams, Status};
 pub use runner::{EngineRunner, VpnRunner};
 pub use server::serve_control;
