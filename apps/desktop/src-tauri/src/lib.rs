@@ -222,6 +222,21 @@ fn run_helper_subcommand(sub: &str) -> Result<(), String> {
     }
 }
 
+/// Remove the privileged VPN helper (stops it if running, then uninstalls). Like install,
+/// the removal runs the helper's own `uninstall` subcommand under OS elevation — NOT a
+/// `HelperClient` method. The actual elevation is integration/manual-tested.
+#[tauri::command]
+async fn remove_helper(state: State<'_, AppState>) -> Result<(), String> {
+    // Stop any running session first, dropping our cached client handle.
+    {
+        let client = state.helper.lock().unwrap().take();
+        if let Some(c) = client {
+            let _ = c.stop().await;
+        }
+    }
+    run_helper_subcommand("uninstall")
+}
+
 #[tauri::command]
 fn get_settings(state: State<AppState>) -> Settings {
     state.settings.lock().unwrap().clone()
@@ -334,7 +349,8 @@ pub fn run() {
             get_settings,
             set_settings,
             helper_installed,
-            install_helper
+            install_helper,
+            remove_helper
         ])
         .setup(|app| {
             let handle = app.handle().clone();

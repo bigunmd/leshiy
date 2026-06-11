@@ -15,6 +15,7 @@ export const api = {
   setSettings: (settings: Settings) => invoke<void>("set_settings", { settings }),
   helperInstalled: () => invoke<boolean>("helper_installed"),
   installHelper: () => invoke<void>("install_helper"),
+  removeHelper: () => invoke<void>("remove_helper"),
 };
 export const onState = (cb: (s: TunnelState) => void): Promise<UnlistenFn> =>
   listen<TunnelState>("tunnel:state", (e) => cb(e.payload));
