@@ -41,3 +41,139 @@ pub fn run_capture(program: &str, args: &[&str]) -> std::io::Result<String> {
         )))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Windows `netsh` argument builders (pure; OS-independent; host-testable).
+//
+// These live here — not in `windows.rs` — because the `windows` module is
+// `#[cfg(target_os = "windows")]`, so it is never compiled on the Linux host and its
+// `#[cfg(test)]` would not run here. Placed in `cmd` (gated `any(macos, windows, test)`)
+// they compile and unit-test under host `cargo test -p leshiy-tun`. `win_`-prefixed so a
+// future macOS builder set can coexist in this shared module without a name clash.
+// `windows.rs::start()` calls these via `cmd::win_*`.
+
+/// `netsh interface ipv4 set dnsservers name=<iface> static <ip> primary`.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn win_dns_set_static_args(iface: &str, dns: &str) -> Vec<String> {
+    vec![
+        "interface".into(),
+        "ipv4".into(),
+        "set".into(),
+        "dnsservers".into(),
+        format!("name={iface}"),
+        "static".into(),
+        dns.to_string(),
+        "primary".into(),
+    ]
+}
+
+/// `netsh interface ipv4 set dnsservers name=<iface> dhcp` — restore DHCP-assigned DNS.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn win_dns_reset_dhcp_args(iface: &str) -> Vec<String> {
+    vec![
+        "interface".into(),
+        "ipv4".into(),
+        "set".into(),
+        "dnsservers".into(),
+        format!("name={iface}"),
+        "dhcp".into(),
+    ]
+}
+
+/// `netsh interface ipv4 add route <dest_cidr> <iface> <gateway>` — host-exception
+/// (server) route out the original interface via the original gateway.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn win_route_add_via_gateway_args(
+    dest_cidr: &str,
+    gateway: &str,
+    orig_iface: &str,
+) -> Vec<String> {
+    vec![
+        "interface".into(),
+        "ipv4".into(),
+        "add".into(),
+        "route".into(),
+        dest_cidr.to_string(),
+        orig_iface.to_string(),
+        gateway.to_string(),
+    ]
+}
+
+/// `netsh interface ipv4 add route <dest_cidr> <iface>` — send a CIDR through the tun
+/// interface by name (no ifindex FFI needed).
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn win_route_add_via_iface_args(dest_cidr: &str, iface: &str) -> Vec<String> {
+    vec![
+        "interface".into(),
+        "ipv4".into(),
+        "add".into(),
+        "route".into(),
+        dest_cidr.to_string(),
+        iface.to_string(),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dns_set_static_args() {
+        let args = win_dns_set_static_args("leshiy0", "1.1.1.1");
+        assert_eq!(
+            args,
+            vec![
+                "interface",
+                "ipv4",
+                "set",
+                "dnsservers",
+                "name=leshiy0",
+                "static",
+                "1.1.1.1",
+                "primary"
+            ]
+        );
+    }
+
+    #[test]
+    fn dns_reset_dhcp_args() {
+        let args = win_dns_reset_dhcp_args("leshiy0");
+        assert_eq!(
+            args,
+            vec![
+                "interface",
+                "ipv4",
+                "set",
+                "dnsservers",
+                "name=leshiy0",
+                "dhcp"
+            ]
+        );
+    }
+
+    #[test]
+    fn route_add_via_gateway_args_win() {
+        let args = win_route_add_via_gateway_args("203.0.113.7/32", "192.168.1.1", "Ethernet");
+        assert_eq!(
+            args,
+            vec![
+                "interface",
+                "ipv4",
+                "add",
+                "route",
+                "203.0.113.7/32",
+                "Ethernet",
+                "192.168.1.1"
+            ]
+        );
+    }
+
+    #[test]
+    fn route_add_via_iface_args_win() {
+        let args = win_route_add_via_iface_args("0.0.0.0/1", "leshiy0");
+        assert_eq!(
+            args,
+            vec!["interface", "ipv4", "add", "route", "0.0.0.0/1", "leshiy0"]
+        );
+    }
+}
