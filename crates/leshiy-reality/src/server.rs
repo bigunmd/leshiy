@@ -180,7 +180,14 @@ where
                 let st = store.clone();
                 let eg = egress.clone();
                 tokio::spawn(async move {
-                    let _ = relay_stream(&mut stream, sid, lim, st, eg).await;
+                    match stream.kind {
+                        leshiy_core::mux::StreamKind::Udp => {
+                            let _ = relay_datagram(&mut stream, sid, lim, st, eg).await;
+                        }
+                        leshiy_core::mux::StreamKind::Tcp => {
+                            let _ = relay_stream(&mut stream, sid, lim, st, eg).await;
+                        }
+                    }
                     let _ = stream.close().await;
                 });
             }
@@ -244,6 +251,50 @@ async fn relay_stream(
     }
     uw.shutdown().await.ok();
     store.add_usage(&short_id, acc_up, acc_down); // final flush of the tail
+    Ok(())
+}
+
+/// Relay UDP datagrams between a mux datagram stream and a UDP egress socket.
+/// Each `stream.recv()` is one datagram out; each `udp.recv()` is one datagram back.
+/// A per-iteration idle timer expires the association (UDP has no teardown signal);
+/// the client closing the flow (CLOSE frame) also ends it via a `stream.recv()` error.
+async fn relay_datagram(
+    stream: &mut leshiy_core::mux::Stream,
+    short_id: [u8; 8],
+    limits: UserLimits,
+    store: Arc<dyn UserStore>,
+    egress: Arc<dyn Egress>,
+) -> crate::Result<()> {
+    let mut udp = egress
+        .open_udp(&stream.target)
+        .await
+        .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
+    const IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+    let mut buf = vec![0u8; 65535];
+    loop {
+        tokio::select! {
+            inbound = stream.recv() => match inbound {       // client → target = UP
+                Ok(b) => {
+                    if let Some(tb) = &limits.up { tb.consume(b.len() as u64).await; }
+                    let _ = udp.send(&b).await;
+                    store.add_usage(&short_id, b.len() as u64, 0);
+                }
+                Err(_) => break,
+            },
+            r = udp.recv(&mut buf) => match r {              // target → client = DOWN
+                Ok(n) => {
+                    if let Some(tb) = &limits.down { tb.consume(n as u64).await; }
+                    stream
+                        .send(buf[..n].to_vec())
+                        .await
+                        .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
+                    store.add_usage(&short_id, 0, n as u64);
+                }
+                Err(_) => break,
+            },
+            _ = tokio::time::sleep(IDLE) => break,
+        }
+    }
     Ok(())
 }
 
