@@ -15,6 +15,7 @@ pub enum FrameType {
     Open = 2,
     Data = 3,
     Close = 4,
+    Datagram = 5,
 }
 
 pub fn is_critical(ftype: u8) -> bool {
@@ -97,6 +98,19 @@ mod tests {
         assert_eq!(f.stream_id, 7);
         assert_eq!(f.ftype, FrameType::Close as u8);
         assert!(f.payload.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_datagram_frame() {
+        let f = Frame {
+            stream_id: 9,
+            ftype: FrameType::Datagram as u8,
+            payload: b"udp-payload".to_vec(),
+        };
+        let got = Frame::decode(&f.encode()).unwrap();
+        assert_eq!(got.stream_id, 9);
+        assert_eq!(got.ftype, FrameType::Datagram as u8);
+        assert_eq!(got.payload, b"udp-payload");
     }
 
     use proptest::prelude::*;
