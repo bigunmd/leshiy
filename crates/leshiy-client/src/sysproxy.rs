@@ -47,6 +47,9 @@ pub(crate) fn macos_clear_args(service: &str) -> Vec<String> {
 }
 
 /// Linux GNOME `gsettings` invocations to enable a manual SOCKS proxy.
+// Used by the Linux sysproxy path and the unit tests only; gate it so it isn't dead code
+// when the crate is cross-compiled for a non-Linux target (e.g. the Phase 3 Windows check).
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn linux_set_invocations(host: &str, port: u16) -> Vec<Vec<String>> {
     vec![
         vec![
@@ -71,6 +74,7 @@ pub(crate) fn linux_set_invocations(host: &str, port: u16) -> Vec<Vec<String>> {
 }
 
 /// Linux GNOME `gsettings` invocation to disable the proxy.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn linux_clear_invocations() -> Vec<Vec<String>> {
     vec![vec![
         "set".to_string(),
