@@ -30,8 +30,17 @@ run_server_container() {  # (re)create the leshiy container from the recorded im
     "$img" server --config /etc/leshiy/server.toml
 }
 
+resolve_latest_tag() {  # $1 = owner/repo on GitHub → its latest release tag (e.g. v1.2.3)
+  curl -fsSL "https://api.github.com/repos/$1/releases/latest" 2>/dev/null \
+    | grep -m1 '"tag_name"' | cut -d'"' -f4
+}
+
+write_image() {  # $1 = image ref → record it as the docker install image
+  printf '{"mode":"docker","image":"%s"}\n' "$1" > "$STATE"
+}
+
 usage() {
-  echo "usage: leshiyctl {status|upgrade|uninstall [--purge]|user ...}" >&2
+  echo "usage: leshiyctl {status|upgrade [VERSION]|uninstall [--purge]|user ...}" >&2
   exit 2
 }
 
@@ -49,11 +58,29 @@ case "$verb" in
     fi
     ;;
   upgrade)
+    # Optional positional VERSION (e.g. v1.2.3) pins a specific release; omit for latest.
+    ver="${1:-}"
     if [ "$(mode)" = docker ]; then
-      docker pull "$(docker_image)"
+      img="$(docker_image)"
+      [ -n "$img" ] || { echo "no image recorded in $STATE" >&2; exit 1; }
+      base="${img%:*}"      # strip the :tag → registry/owner/repo
+      ghrepo="${base#*/}"   # strip the registry host → owner/repo (for the GitHub API)
+      tag="$ver"
+      if [ -z "$tag" ]; then
+        tag="$(resolve_latest_tag "$ghrepo")"
+        [ -n "$tag" ] || {
+          echo "could not resolve latest release for $ghrepo (try: leshiyctl upgrade vX.Y.Z)" >&2
+          exit 1
+        }
+      fi
+      newimg="$base:$tag"
+      docker pull "$newimg"
+      write_image "$newimg"  # record the now-running version so `status` stays accurate
       run_server_container
+    elif [ -n "$ver" ]; then
+      leshiy upgrade --version "$ver"
     else
-      leshiy upgrade "$@"
+      leshiy upgrade
     fi
     ;;
   uninstall)
