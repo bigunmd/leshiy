@@ -1,6 +1,11 @@
 //! Encrypted, in-tunnel version + capability negotiation (never on the cleartext wire).
 use crate::error::{Error, Result};
 
+/// Capability bit: the peer understands the `Datagram` frame type (UDP associations
+/// over the mux). Negotiated through `Hello.capabilities`; datagram frames are only
+/// emitted after both peers advertise it.
+pub const CAP_DATAGRAM: u64 = 1 << 0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hello {
     pub version: u16,
@@ -78,6 +83,28 @@ mod tests {
         let n = negotiate(&local, &peer).unwrap();
         assert_eq!(n.version, 2); // min(3,2)
         assert_eq!(n.capabilities, 0b011); // intersection
+    }
+
+    #[test]
+    fn datagram_cap_negotiated_only_when_both_advertise() {
+        let with = Hello {
+            version: 1,
+            min_supported: 1,
+            capabilities: CAP_DATAGRAM,
+        };
+        let without = Hello {
+            version: 1,
+            min_supported: 1,
+            capabilities: 0,
+        };
+        assert_eq!(
+            negotiate(&with, &with).unwrap().capabilities & CAP_DATAGRAM,
+            CAP_DATAGRAM
+        );
+        assert_eq!(
+            negotiate(&with, &without).unwrap().capabilities & CAP_DATAGRAM,
+            0
+        );
     }
 
     #[test]
