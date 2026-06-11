@@ -8,11 +8,8 @@
 
 /// Run `program args...`, mapping spawn failure or a non-zero exit to `io::Error`.
 /// Best-effort callers (teardown) ignore the `Result`; setup callers propagate it.
-// `allow(dead_code)`: the Windows backend starts consuming this in Task 3.7; until then
-// the cross-target check would flag it unused. Remove the allow once it has a caller.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-#[allow(dead_code)]
-pub fn run(program: &str, args: &[&str]) -> std::io::Result<()> {
+pub(crate) fn run(program: &str, args: &[&str]) -> std::io::Result<()> {
     let out = std::process::Command::new(program).args(args).output()?;
     if out.status.success() {
         Ok(())
@@ -28,8 +25,7 @@ pub fn run(program: &str, args: &[&str]) -> std::io::Result<()> {
 /// Run a command and return its captured stdout as a `String` (trimmed).
 /// Used to read state we must restore later (e.g. the current DNS servers).
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-#[allow(dead_code)]
-pub fn run_capture(program: &str, args: &[&str]) -> std::io::Result<String> {
+pub(crate) fn run_capture(program: &str, args: &[&str]) -> std::io::Result<String> {
     let out = std::process::Command::new(program).args(args).output()?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
