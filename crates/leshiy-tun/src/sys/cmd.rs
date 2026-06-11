@@ -8,7 +8,7 @@
 
 /// Run `program args...`, mapping spawn failure or a non-zero exit to `io::Error`.
 /// Best-effort callers (teardown) ignore the `Result`; setup callers propagate it.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(crate) fn run(program: &str, args: &[&str]) -> std::io::Result<()> {
     let out = std::process::Command::new(program).args(args).output()?;
     if out.status.success() {
@@ -24,7 +24,7 @@ pub(crate) fn run(program: &str, args: &[&str]) -> std::io::Result<()> {
 
 /// Run a command and return its captured stdout as a `String` (trimmed).
 /// Used to read state we must restore later (e.g. the current DNS servers).
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(crate) fn run_capture(program: &str, args: &[&str]) -> std::io::Result<String> {
     let out = std::process::Command::new(program).args(args).output()?;
     if out.status.success() {
@@ -109,6 +109,51 @@ pub(crate) fn win_route_add_via_iface_args(dest_cidr: &str, iface: &str) -> Vec<
     ]
 }
 
+// ---------------------------------------------------------------------------
+// macOS `networksetup` / BSD `route` argument builders (pure; host-testable).
+// `mac_`-prefixed to coexist with the `win_*` builders in this shared module.
+// `macos.rs::start()` calls these via `cmd::mac_*`.
+
+/// `networksetup -setdnsservers <service> <ip...>`. An empty list clears DNS via the
+/// literal `empty` keyword (networksetup's reset sentinel).
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn mac_dns_set_args(service: &str, dns: &[std::net::IpAddr]) -> Vec<String> {
+    let mut v = vec!["-setdnsservers".to_string(), service.to_string()];
+    if dns.is_empty() {
+        v.push("empty".to_string());
+    } else {
+        v.extend(dns.iter().map(|ip| ip.to_string()));
+    }
+    v
+}
+
+/// `route -n add -net <dest>/<prefix> <gateway>` — host-exception (server) route via the
+/// original gateway. Used as a fallback if `net-route`'s gateway add is rejected.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn mac_route_add_via_gateway_args(dest: &str, prefix: u8, gateway: &str) -> Vec<String> {
+    vec![
+        "-n".into(),
+        "add".into(),
+        "-net".into(),
+        format!("{dest}/{prefix}"),
+        gateway.to_string(),
+    ]
+}
+
+/// `route -n add -net <dest>/<prefix> -interface <iface>` — send a CIDR through the utun
+/// device by *name* (no ifindex FFI needed).
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn mac_route_add_via_iface_args(dest: &str, prefix: u8, iface: &str) -> Vec<String> {
+    vec![
+        "-n".into(),
+        "add".into(),
+        "-net".into(),
+        format!("{dest}/{prefix}"),
+        "-interface".into(),
+        iface.to_string(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +215,38 @@ mod tests {
         assert_eq!(
             args,
             vec!["interface", "ipv4", "add", "route", "0.0.0.0/1", "leshiy0"]
+        );
+    }
+
+    #[test]
+    fn mac_dns_set_args_lists_each_server() {
+        let dns: Vec<std::net::IpAddr> =
+            vec!["1.1.1.1".parse().unwrap(), "9.9.9.9".parse().unwrap()];
+        let args = mac_dns_set_args("Wi-Fi", &dns);
+        assert_eq!(args, vec!["-setdnsservers", "Wi-Fi", "1.1.1.1", "9.9.9.9"]);
+    }
+
+    #[test]
+    fn mac_dns_set_args_empty_uses_empty_keyword() {
+        let args = mac_dns_set_args("Wi-Fi", &[]);
+        assert_eq!(args, vec!["-setdnsservers", "Wi-Fi", "empty"]);
+    }
+
+    #[test]
+    fn mac_route_add_via_gateway_args_v4() {
+        let args = mac_route_add_via_gateway_args("203.0.113.7", 32, "192.168.1.1");
+        assert_eq!(
+            args,
+            vec!["-n", "add", "-net", "203.0.113.7/32", "192.168.1.1"]
+        );
+    }
+
+    #[test]
+    fn mac_route_add_via_iface_args_v4() {
+        let args = mac_route_add_via_iface_args("0.0.0.0", 1, "utun7");
+        assert_eq!(
+            args,
+            vec!["-n", "add", "-net", "0.0.0.0/1", "-interface", "utun7"]
         );
     }
 }
