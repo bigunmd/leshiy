@@ -1,0 +1,4 @@
+# Code-signing key material produced by gen-windows-cert.ps1 — NEVER commit these.
+*.pfx
+*.pfx.base64.txt
+*.cer
