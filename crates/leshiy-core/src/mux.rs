@@ -15,6 +15,14 @@ pub enum Role {
     Server,
 }
 
+/// Whether a stream carries a reliable byte stream (TCP, `Data` frames) or
+/// discrete datagrams (UDP, `Datagram` frames).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StreamKind {
+    Tcp,
+    Udp,
+}
+
 /// Internal commands sent from Stream/Mux to the writer task.
 enum Command {
     /// Register a new outgoing stream and send an OPEN frame.
@@ -25,31 +33,52 @@ enum Command {
 
 /// A logical stream inside a [`Mux`].
 pub struct Stream {
-    /// The target string that was carried in the OPEN frame.
+    /// The target string carried in the OPEN frame, with any scheme prefix stripped.
     pub target: String,
+    /// Whether this stream carries TCP byte-stream data or UDP datagrams.
+    pub kind: StreamKind,
     id: u32,
     tx: mpsc::Sender<Command>,
     rx: mpsc::Receiver<Vec<u8>>,
 }
 
 impl Stream {
-    /// Send payload bytes, chunked to fit within one Noise frame.
+    /// Send payload bytes. TCP streams chunk into `Data` frames; UDP streams send the
+    /// whole datagram in one `Datagram` frame (oversized datagrams are rejected).
+    ///
+    /// Each plaintext frame = 5-byte header + payload. Cap the payload so the encoded
+    /// frame fits any transport's per-record overhead: Noise adds a 16-byte tag, the
+    /// TLS app-data path adds a 1-byte inner-type + 16-byte tag (the larger). Leaving
+    /// 6 bytes (header 5 + the extra inner-type byte) below MAX_PLAINTEXT is safe for both.
     pub async fn send(&self, data: Vec<u8>) -> Result<()> {
-        // Each plaintext frame = 5-byte header + payload. Cap the payload so the encoded
-        // frame fits any transport's per-record overhead: Noise adds a 16-byte tag, the
-        // TLS app-data path adds a 1-byte inner-type + 16-byte tag (the larger). Leaving
-        // 6 bytes (header 5 + the extra inner-type byte) below MAX_PLAINTEXT is safe for both.
-        for chunk in data.chunks(MAX_PLAINTEXT - 6) {
-            self.tx
-                .send(Command::Write(Frame {
-                    stream_id: self.id,
-                    ftype: FrameType::Data as u8,
-                    payload: chunk.to_vec(),
-                }))
-                .await
-                .map_err(|_| Error::Closed)?;
+        match self.kind {
+            StreamKind::Tcp => {
+                for chunk in data.chunks(MAX_PLAINTEXT - 6) {
+                    self.tx
+                        .send(Command::Write(Frame {
+                            stream_id: self.id,
+                            ftype: FrameType::Data as u8,
+                            payload: chunk.to_vec(),
+                        }))
+                        .await
+                        .map_err(|_| Error::Closed)?;
+                }
+                Ok(())
+            }
+            StreamKind::Udp => {
+                if data.len() > MAX_PLAINTEXT - 6 {
+                    return Err(Error::Protocol("datagram exceeds max frame payload".into()));
+                }
+                self.tx
+                    .send(Command::Write(Frame {
+                        stream_id: self.id,
+                        ftype: FrameType::Datagram as u8,
+                        payload: data,
+                    }))
+                    .await
+                    .map_err(|_| Error::Closed)
+            }
         }
-        Ok(())
     }
 
     /// Receive the next payload chunk from the peer.
@@ -168,9 +197,20 @@ impl Mux {
                     if bt == FrameType::Open as u8 {
                         let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(64);
                         r_streams.lock().unwrap().insert(f.stream_id, data_tx);
-                        let target = String::from_utf8_lossy(&f.payload).into_owned();
+                        // Parse the optional scheme prefix: `udp:` → datagram, `tcp:`/bare → stream.
+                        let raw = String::from_utf8_lossy(&f.payload).into_owned();
+                        let (kind, target) = match raw.strip_prefix("udp:") {
+                            Some(rest) => (StreamKind::Udp, rest.to_string()),
+                            None => (
+                                StreamKind::Tcp,
+                                raw.strip_prefix("tcp:")
+                                    .map(|s| s.to_string())
+                                    .unwrap_or(raw),
+                            ),
+                        };
                         let stream = Stream {
                             target,
+                            kind,
                             id: f.stream_id,
                             tx: r_cmd_tx.clone(),
                             rx: data_rx,
@@ -178,8 +218,9 @@ impl Mux {
                         if inc_tx.send(stream).await.is_err() {
                             break;
                         }
-                    } else if bt == FrameType::Data as u8 {
-                        // Clone the sender out of the map BEFORE awaiting the send
+                    } else if bt == FrameType::Data as u8 || bt == FrameType::Datagram as u8 {
+                        // DATA (stream) and DATAGRAM (one packet) both route to the per-stream
+                        // channel. Clone the sender out of the map BEFORE awaiting the send
                         // so we never hold the Mutex guard across an .await.
                         let tx = r_streams.lock().unwrap().get(&f.stream_id).cloned();
                         if let Some(tx) = tx {
@@ -218,6 +259,30 @@ impl Mux {
             .map_err(|_| Error::Closed)?;
         Ok(Stream {
             target: target.to_string(),
+            kind: StreamKind::Tcp,
+            id,
+            tx: self.cmd_tx.clone(),
+            rx: data_rx,
+        })
+    }
+
+    /// Open a new outgoing UDP datagram association to `target` ("host:port").
+    /// Requires the peer to have advertised `CAP_DATAGRAM` during negotiation.
+    /// The OPEN frame carries the target with a `udp:` scheme prefix.
+    pub async fn open_datagram(&mut self, target: &str) -> Result<Stream> {
+        if self.negotiated.capabilities & crate::version::CAP_DATAGRAM == 0 {
+            return Err(Error::Protocol("peer does not support CAP_DATAGRAM".into()));
+        }
+        let id = self.next_id;
+        self.next_id += 2;
+        let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(64);
+        self.cmd_tx
+            .send(Command::Open(id, format!("udp:{target}"), data_tx))
+            .await
+            .map_err(|_| Error::Closed)?;
+        Ok(Stream {
+            target: target.to_string(),
+            kind: StreamKind::Udp,
             id,
             tx: self.cmd_tx.clone(),
             rx: data_rx,
@@ -251,6 +316,74 @@ mod tests {
             min_supported: 1,
             capabilities: 0,
         }
+    }
+
+    fn hello_dg() -> Hello {
+        Hello {
+            version: 1,
+            min_supported: 1,
+            capabilities: crate::version::CAP_DATAGRAM,
+        }
+    }
+
+    #[tokio::test]
+    async fn datagram_open_send_recv_one_assoc() {
+        let server = generate_keypair().unwrap();
+        let server_pub = server.public.clone();
+        let server_priv = server.private.clone();
+        let (c_io, s_io) = tokio::io::duplex(16384);
+
+        let srv = tokio::spawn(async move {
+            let sess = Session::accept(s_io, &server_priv, PROTOCOL_MAJOR)
+                .await
+                .unwrap();
+            let (r, w) = sess.into_halves();
+            let mut mux = Mux::start(r, w, hello_dg(), Role::Server).await.unwrap();
+            let mut stream = mux.accept().await.unwrap();
+            assert_eq!(stream.kind, StreamKind::Udp);
+            assert_eq!(stream.target, "1.2.3.4:53"); // scheme stripped
+            let dgram = stream.recv().await.unwrap();
+            stream.send(dgram).await.unwrap(); // echo one datagram back
+        });
+
+        let client = generate_keypair().unwrap();
+        let sess = Session::connect(c_io, &server_pub, &client.private, PROTOCOL_MAJOR)
+            .await
+            .unwrap();
+        let (r, w) = sess.into_halves();
+        let mut mux = Mux::start(r, w, hello_dg(), Role::Client).await.unwrap();
+        let mut s = mux.open_datagram("1.2.3.4:53").await.unwrap();
+        assert_eq!(s.kind, StreamKind::Udp);
+        s.send(b"\x00\x01\x02".to_vec()).await.unwrap();
+        let echoed = s.recv().await.unwrap();
+        assert_eq!(echoed, b"\x00\x01\x02");
+        srv.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_datagram_fails_without_cap() {
+        let server = generate_keypair().unwrap();
+        let server_pub = server.public.clone();
+        let server_priv = server.private.clone();
+        let (c_io, s_io) = tokio::io::duplex(16384);
+        let srv = tokio::spawn(async move {
+            let sess = Session::accept(s_io, &server_priv, PROTOCOL_MAJOR)
+                .await
+                .unwrap();
+            let (r, w) = sess.into_halves();
+            // server advertises NO capability
+            let _mux = Mux::start(r, w, hello(), Role::Server).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+        let client = generate_keypair().unwrap();
+        let sess = Session::connect(c_io, &server_pub, &client.private, PROTOCOL_MAJOR)
+            .await
+            .unwrap();
+        let (r, w) = sess.into_halves();
+        let mut mux = Mux::start(r, w, hello_dg(), Role::Client).await.unwrap();
+        // negotiated cap = client(CAP) & server(0) = 0 → open_datagram refused
+        assert!(mux.open_datagram("1.2.3.4:53").await.is_err());
+        srv.abort();
     }
 
     #[tokio::test]
