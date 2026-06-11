@@ -1,0 +1,186 @@
+//! macOS privileged ops: utun device (`tun` crate), routes (`net-route` + BSD `route`),
+//! DNS (`networksetup`), IPv6 leak mitigation (`networksetup -setv6off`), all restored on
+//! teardown.
+//!
+//! Verification note (2026-06-11): this box has no Apple SDK, so the macOS target cannot be
+//! cross-`check`ed (`ring`'s C build needs an Apple clang+SDK). Instead the module is also
+//! compiled under host `test` (see `sys/mod.rs`), which **type-checks** the backend on
+//! Linux — the `tun`/`net-route` calls use the cross-platform `AbstractDevice`/`Handle`
+//! surface that compiles on every OS. Runtime behaviour is verified only on real macOS via
+//! the `#[ignore]`d `macos_tun_up` smoke (Task 3.4).
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+use super::cmd;
+use super::{PrivilegedOps, TunSession};
+use crate::route_plan::RoutePlan;
+use net_route::{Handle, Route};
+use std::net::IpAddr;
+use tun::AbstractDevice; // brings `tun_name()` into scope for the utun device
+
+const NETWORKSETUP: &str = "/usr/sbin/networksetup";
+const ROUTE: &str = "/sbin/route";
+
+pub struct MacOsOps;
+
+#[async_trait::async_trait]
+impl PrivilegedOps for MacOsOps {
+    async fn start(
+        &self,
+        tun_name: &str,
+        mtu: u16,
+        plan: &RoutePlan,
+        dns: &[IpAddr],
+    ) -> std::io::Result<TunSession> {
+        // MVP carries IPv4 through the tunnel; IPv6 is disabled below (fail-closed).
+        let IpAddr::V4(tun4) = plan.tun_addr else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "tun_addr must be IPv4 in this phase",
+            ));
+        };
+
+        // 1. Create + bring up the utun device. `tun` auto-assigns `utunN`; on macOS the
+        //    crate also installs the on-link route from address/netmask. No
+        //    `ensure_root_privileges` here — that platform_config is Linux-only.
+        let mut cfg = tun::Configuration::default();
+        cfg.tun_name(tun_name)
+            .address(tun4)
+            .netmask(std::net::Ipv4Addr::new(255, 255, 255, 0))
+            .mtu(mtu)
+            .up();
+        let device = tun::create_as_async(&cfg).map_err(to_io)?;
+        // Read back the real interface name (e.g. "utun7") for `route -interface`.
+        let iface = device.tun_name().map_err(to_io)?;
+
+        // 2. Routes: server host-exception FIRST (escape the tunnel via the original
+        //    gateway), then the default-override halves via the utun interface.
+        let handle = Handle::new()?;
+        let exc = &plan.server_exception;
+        let exc_route = Route::new(exc.dest.addr, exc.dest.prefix).with_gateway(exc.gateway);
+        if handle.add(&exc_route).await.is_err() {
+            // Fallback to BSD `route` if net-route's gateway add is rejected.
+            let args = cmd::mac_route_add_via_gateway_args(
+                &exc.dest.addr.to_string(),
+                exc.dest.prefix,
+                &exc.gateway.to_string(),
+            );
+            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+            let _ = cmd::run(ROUTE, &argv); // best-effort: an identical host route already existing is fine
+        }
+        for c in &plan.via_tun {
+            // Route by interface name (no ifindex FFI). Use BSD `route` for reliability.
+            let args = cmd::mac_route_add_via_iface_args(&c.addr.to_string(), c.prefix, &iface);
+            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+            cmd::run(ROUTE, &argv)?;
+        }
+
+        // 3. DNS: set the configured resolver(s) on every active network service, backing
+        //    up the prior servers so teardown can restore them.
+        let services = list_network_services()?;
+        let mut dns_backup: Vec<(String, Vec<String>)> = Vec::new();
+        for svc in &services {
+            let prior = current_dns(svc).unwrap_or_default();
+            dns_backup.push((svc.clone(), prior));
+            let args = cmd::mac_dns_set_args(svc, dns);
+            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+            let _ = cmd::run(NETWORKSETUP, &argv);
+        }
+
+        // 4. IPv6 leak mitigation (fail-closed): turn IPv6 off on each service; restore to
+        //    automatic on drop. Full IPv6 tunnelling is out of scope for this phase.
+        let mut v6_services: Vec<String> = Vec::new();
+        for svc in &services {
+            if cmd::run(NETWORKSETUP, &["-setv6off", svc]).is_ok() {
+                v6_services.push(svc.clone());
+            }
+        }
+
+        let guard = MacOsTeardown {
+            dns_backup,
+            v6_services,
+        };
+        Ok(TunSession {
+            device,
+            guard: Box::new(guard),
+        })
+    }
+}
+
+/// List active network service names (e.g. "Wi-Fi", "Ethernet"). The first output line
+/// of `networksetup -listallnetworkservices` is a header and is skipped; a leading `*`
+/// marks a disabled service and is stripped.
+fn list_network_services() -> std::io::Result<Vec<String>> {
+    let out = cmd::run_capture(NETWORKSETUP, &["-listallnetworkservices"])?;
+    Ok(out
+        .lines()
+        .skip(1)
+        .map(|l| l.trim_start_matches('*').trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+/// The current DNS servers for `service`, or empty if "There aren't any DNS Servers set".
+fn current_dns(service: &str) -> std::io::Result<Vec<String>> {
+    let out = cmd::run_capture(NETWORKSETUP, &["-getdnsservers", service])?;
+    if out.contains("aren't any") || out.contains("There aren") {
+        Ok(Vec::new())
+    } else {
+        Ok(out
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect())
+    }
+}
+
+/// Restores DNS + IPv6 on drop. The override/exception routes auto-clear when the utun
+/// device is dropped (the interface disappears), so they need no explicit teardown.
+struct MacOsTeardown {
+    dns_backup: Vec<(String, Vec<String>)>,
+    v6_services: Vec<String>,
+}
+
+impl Drop for MacOsTeardown {
+    fn drop(&mut self) {
+        // Best-effort; teardown must never panic.
+        for (svc, prior) in &self.dns_backup {
+            let prior_ips: Vec<IpAddr> = prior.iter().filter_map(|s| s.parse().ok()).collect();
+            let args = cmd::mac_dns_set_args(svc, &prior_ips); // empty prior -> "empty" (clears)
+            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+            let _ = cmd::run(NETWORKSETUP, &argv);
+        }
+        for svc in &self.v6_services {
+            let _ = cmd::run(NETWORKSETUP, &["-setv6automatic", svc]);
+        }
+    }
+}
+
+fn to_io<E: std::fmt::Display>(e: E) -> std::io::Error {
+    std::io::Error::other(e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    // Imported only where the macOS-gated smoke below uses it; on the host the smoke is
+    // `cfg`-compiled out, so this would otherwise be an unused import.
+    #[cfg(target_os = "macos")]
+    use super::*;
+
+    // Gated to macOS: the smoke needs root + a real utun on macOS, so it never runs (or even
+    // compiles) on the Linux host. `#[ignore]`d so a macOS operator opts in explicitly.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "requires root on real macOS; run with: sudo -E cargo test -p leshiy-tun -- --ignored macos_tun_up"]
+    async fn macos_tun_up() {
+        let plan = RoutePlan::full_tunnel(
+            "203.0.113.7".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(), // harmless gateway for the smoke
+            "10.71.0.2".parse().unwrap(),
+        )
+        .unwrap();
+        let sess = MacOsOps
+            .start("utun9", 1400, &plan, &["1.1.1.1".parse().unwrap()])
+            .await
+            .expect("utun should come up");
+        drop(sess); // should restore DNS + IPv6 cleanly
+    }
+}
