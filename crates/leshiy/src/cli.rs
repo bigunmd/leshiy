@@ -1,6 +1,15 @@
 //! CLI subcommand definitions via clap derive.
 use clap::{Parser, Subcommand, ValueEnum};
 
+/// Shown after `leshiy tun --help`: how to make the binary reachable by sudo, since VPN
+/// mode needs root and `~/.local/bin` is usually absent from root's secure_path.
+const SUDO_PATH_HELP: &str = "\
+VPN mode needs root. If `sudo leshiy …` reports \"command not found\", the binary is on your\n\
+user PATH but not root's secure_path. Symlink it into a root-PATH directory once:\n\
+\n    sudo ln -s \"$(command -v leshiy)\" /usr/local/bin/leshiy\n\n\
+then `sudo leshiy tun …` works. (Avoid adding ~/.local/bin to sudoers secure_path — a\n\
+user-writable dir in root's PATH is a privilege-escalation risk.)";
+
 #[derive(Parser)]
 #[command(
     name = "leshiy",
@@ -76,6 +85,7 @@ pub enum Cmd {
         transport: Transport,
     },
     /// Run as a full-tunnel VPN via a TUN device (all traffic). Requires root / CAP_NET_ADMIN.
+    #[command(after_help = SUDO_PATH_HELP)]
     Tun {
         /// The leshiy:// server URI.
         #[arg(long)]
