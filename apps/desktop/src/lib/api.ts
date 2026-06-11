@@ -13,6 +13,8 @@ export const api = {
   disconnect: () => invoke<void>("disconnect"),
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (settings: Settings) => invoke<void>("set_settings", { settings }),
+  helperInstalled: () => invoke<boolean>("helper_installed"),
+  installHelper: () => invoke<void>("install_helper"),
 };
 export const onState = (cb: (s: TunnelState) => void): Promise<UnlistenFn> =>
   listen<TunnelState>("tunnel:state", (e) => cb(e.payload));
