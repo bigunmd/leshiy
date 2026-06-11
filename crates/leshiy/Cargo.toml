@@ -12,6 +12,8 @@ path = "src/main.rs"
 leshiy-core = { path = "../leshiy-core" }
 leshiy-reality = { path = "../leshiy-reality" }
 leshiy-quic = { path = "../leshiy-quic" }
+leshiy-client = { path = "../leshiy-client" }
+leshiy-tun = { path = "../leshiy-tun" }
 rcgen.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true

@@ -76,7 +76,7 @@ fn client_hello_version() -> Hello {
     Hello {
         version: PROTOCOL_MAJOR,
         min_supported: 1,
-        capabilities: 0,
+        capabilities: leshiy_core::version::CAP_DATAGRAM,
     }
 }
 
@@ -155,6 +155,16 @@ impl RealityConn {
             .lock()
             .await
             .open(target)
+            .await
+            .map_err(|e| crate::RealityError::Malformed(e.to_string()))
+    }
+
+    /// Open a UDP datagram association to `target` ("host:port") over the mux.
+    pub async fn open_datagram(&self, target: &str) -> crate::Result<leshiy_core::mux::Stream> {
+        self.mux
+            .lock()
+            .await
+            .open_datagram(target)
             .await
             .map_err(|e| crate::RealityError::Malformed(e.to_string()))
     }

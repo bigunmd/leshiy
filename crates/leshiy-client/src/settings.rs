@@ -15,6 +15,17 @@ pub enum TransportPref {
     Tcp,
 }
 
+/// Tunnel mode: the existing local SOCKS proxy, or full-device VPN (TUN).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// Local SOCKS5 proxy (today's behavior; the default).
+    #[default]
+    Proxy,
+    /// Full-tunnel VPN via a TUN device (all device traffic).
+    Vpn,
+}
+
 /// Persisted application settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
@@ -24,6 +35,8 @@ pub struct Settings {
     pub kill_switch: bool,
     #[serde(default)]
     pub transport: TransportPref,
+    #[serde(default)]
+    pub mode: Mode,
     #[serde(default = "default_socks_port")]
     pub socks_port: u16,
     #[serde(default)]
@@ -46,6 +59,7 @@ impl Default for Settings {
             language: default_language(),
             kill_switch: default_true(),
             transport: TransportPref::Auto,
+            mode: Mode::Proxy,
             socks_port: default_socks_port(),
             start_minimized: false,
         }
@@ -64,6 +78,16 @@ mod tests {
         assert_eq!(s.transport, TransportPref::Auto);
         assert_eq!(s.socks_port, 1080);
         assert!(!s.start_minimized);
+    }
+
+    #[test]
+    fn settings_default_mode_is_proxy() {
+        assert_eq!(Settings::default().mode, Mode::Proxy);
+    }
+
+    #[test]
+    fn mode_serializes_lowercase() {
+        assert_eq!(serde_json::to_string(&Mode::Vpn).unwrap(), "\"vpn\"");
     }
 
     #[test]
