@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/leshiy-core", "crates/leshiy", "crates/leshiy-tls", "crates/leshiy-reality", "crates/leshiy-quic", "crates/leshiy-client"]
+members = ["crates/leshiy-core", "crates/leshiy", "crates/leshiy-tls", "crates/leshiy-reality", "crates/leshiy-quic", "crates/leshiy-client", "crates/leshiy-tun"]
 exclude = ["apps/desktop/src-tauri"]
 
 [workspace.package]
@@ -49,3 +49,8 @@ terminal_size = "0.4"
 rustls-pemfile = "2"
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
+# VPN / full-tunnel (Phase 2)
+tun-rs = { version = "2.8", features = ["async_tokio"] }
+ipstack = "1"
+net-route = "0.4"
+netdev = "0.44"
