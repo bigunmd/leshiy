@@ -207,3 +207,27 @@ impl Drop for WindowsTeardown {
 fn to_io<E: std::fmt::Display>(e: E) -> std::io::Error {
     std::io::Error::other(e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // This whole module is `#[cfg(target_os = "windows")]`, so the smoke only compiles for
+    // the Windows target (cross-checked with `--tests`). It is `#[ignore]`d because it needs
+    // Administrator + `wintun.dll` on real Windows; it cannot run on the Linux build box.
+    #[tokio::test]
+    #[ignore = "requires Admin + wintun.dll on real Windows; run elevated: cargo test -p leshiy-tun -- --ignored windows_tun_up"]
+    async fn windows_tun_up() {
+        let plan = RoutePlan::full_tunnel(
+            "203.0.113.7".parse().unwrap(),
+            "192.168.1.1".parse().unwrap(), // a plausible LAN gateway for the smoke
+            "10.71.0.2".parse().unwrap(),
+        )
+        .unwrap();
+        let sess = WindowsOps
+            .start("leshiy0", 1400, &plan, &["1.1.1.1".parse().unwrap()])
+            .await
+            .expect("Wintun adapter should come up (wintun.dll present, elevated)");
+        drop(sess); // should restore DNS + smart-resolution + IPv6 cleanly
+    }
+}
