@@ -36,6 +36,7 @@ export default function App() {
         profiles={profiles.profiles} activeId={profiles.activeId}
         onImport={profiles.importProfile} onSelect={profiles.select} onRemove={profiles.remove} onRename={profiles.rename} />
       <SettingsSheet open={sheet === "settings"} onOpenChange={close} settings={settings} onChange={update}
+        helperInstalled={false} onRemoveHelper={() => {}}
         onLanguageChange={(lng) => { setLanguage(lng); void update({ language: lng }); }} />
       <LanguageMenu open={sheet === "language"} onOpenChange={close}
         onSelect={(lng) => { setLanguage(lng); void update({ language: lng }); }} />
