@@ -13,5 +13,5 @@ pub mod netstack;
 pub mod route_plan;
 pub mod sys;
 
+pub use engine::{TunConfig, TunEngine};
 pub use route_plan::RoutePlan;
-// Engine re-exports are added when the engine lands (Task 2.4).
