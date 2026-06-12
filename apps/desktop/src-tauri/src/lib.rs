@@ -108,7 +108,7 @@ async fn connect(state: State<'_, AppState>) -> Result<(), String> {
         let client = {
             let mut guard = state.helper.lock().unwrap();
             if guard.is_none() {
-                *guard = Some(HelperClient::connect(default_socket_path()));
+                *guard = Some(HelperClient::connect_path(default_socket_path()));
             }
             guard.as_ref().unwrap().clone()
         };

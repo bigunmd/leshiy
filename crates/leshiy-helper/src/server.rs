@@ -1,61 +1,100 @@
-//! Authenticated control server. Mirrors `leshiy-reality/src/control.rs`: a Unix socket
-//! carrying newline-delimited JSON, with a per-connection `SO_PEERCRED` uid gate. The
-//! server is generic over a `VpnRunner` so tests drive a fake without privilege.
-use crate::auth::{authorize, peer_uid};
+//! Authenticated control server. The newline-JSON framing + dispatch are generic over the
+//! stream type (`handle_stream`/`subscribe_loop`/`write_line`), so the same logic serves a
+//! Unix domain socket (Linux+macOS) and a Windows named pipe. Listening + per-connection
+//! authorization live in `crate::transport`.
 use crate::proto::{Event, Request, Response, Status};
 use crate::runner::VpnRunner;
-use std::path::Path;
+use crate::transport::Endpoint;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-/// Maximum bytes accepted per request line (same cap rationale as `control.rs`): a
-/// peer streaming bytes with no newline hits the cap and yields a parse error, not OOM.
+/// Maximum bytes accepted per request line (same cap rationale as `control.rs`): a peer
+/// streaming bytes with no newline hits the cap and yields a parse error, not OOM.
 const MAX_LINE: u64 = 64 * 1024;
 
-/// Serve the control socket at `path`, authorizing only connections from `allow_uid`.
-/// Runs until the listener errors. Mirrors `control.rs`'s bind/unlink/permissions setup.
+/// Who is permitted to drive the helper. Unix uses `uid`; Windows uses `sid`. The field for
+/// the other OS is simply ignored, so the struct is constructible on every platform.
+#[derive(Debug, Clone, Default)]
+pub struct Auth {
+    /// Unix: the peer uid allowed to connect (`SO_PEERCRED`/`getpeereid`).
+    pub uid: u32,
+    /// Windows: the user SID allowed to connect (named-pipe DACL).
+    pub sid: Option<String>,
+}
+
+/// Whether the server keeps serving (a persistent daemon, e.g. Linux systemd) or exits after
+/// one session completes (the on-demand GUI model on macOS/Windows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServeMode {
+    Persistent,
+    Ephemeral,
+}
+
+/// Serve the control channel at `endpoint`, authorizing the caller per OS, until the listener
+/// errors (`Persistent`) or one VPN session completes (`Ephemeral`).
 pub async fn serve_control(
-    path: &Path,
+    endpoint: &Endpoint,
     runner: Arc<dyn VpnRunner>,
-    allow_uid: u32,
+    allow: Auth,
+    mode: ServeMode,
 ) -> std::io::Result<()> {
-    let _ = std::fs::remove_file(path); // unlink stale
-    let listener = UnixListener::bind(path)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        // 0o660: owner (root) + group (e.g. `leshiy`) read/write; world none.
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
+        let Endpoint::Socket(path) = endpoint;
+        let listener = crate::transport::unix::bind(path, allow.uid)?;
+        let mut ever_connected = false;
+        loop {
+            let Some(conn) = crate::transport::unix::accept(&listener, allow.uid).await? else {
+                continue; // unauthorized peer: dropped silently
+            };
+            match mode {
+                ServeMode::Persistent => {
+                    let runner = runner.clone();
+                    tokio::spawn(async move {
+                        let _ = handle_stream(conn, runner).await;
+                    });
+                }
+                ServeMode::Ephemeral => {
+                    handle_stream(conn, runner.clone()).await?;
+                    if session_ended(runner.as_ref(), &mut ever_connected) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
     }
-    loop {
-        let (conn, _) = listener.accept().await?;
-        let runner = runner.clone();
-        tokio::spawn(async move {
-            let _ = handle(conn, runner, allow_uid).await;
-        });
+    #[cfg(windows)]
+    {
+        crate::transport::windows::serve(endpoint, runner, allow, mode).await
     }
 }
 
-async fn handle(
-    conn: UnixStream,
-    runner: Arc<dyn VpnRunner>,
-    allow_uid: u32,
-) -> std::io::Result<()> {
-    // Silent rejection: if the peer is not authorized, drop the connection with no reply.
-    match peer_uid(&conn) {
-        Ok(uid) if authorize(uid, allow_uid) => {}
-        _ => return Ok(()),
+/// Ephemeral exit decision: once we've seen the session go active, exit when it returns to
+/// `Disconnected` (the caller sent `Stop`, or the engine exited). Updates `ever_connected`.
+/// Used by both the Unix accept loop and the Windows named-pipe loop.
+pub(crate) fn session_ended(runner: &dyn VpnRunner, ever_connected: &mut bool) -> bool {
+    use crate::State;
+    match runner.state() {
+        State::Connecting | State::Connected | State::Reconnecting => {
+            *ever_connected = true;
+            false
+        }
+        State::Disconnected | State::Error => *ever_connected,
     }
+}
 
-    let mut r = BufReader::new(conn.take(MAX_LINE));
+/// Handle one request line on an already-authorized stream. Mirrors the one-line-per-
+/// connection model; `Subscribe` keeps the stream and streams events until it closes.
+pub async fn handle_stream<S>(stream: S, runner: Arc<dyn VpnRunner>) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut r = BufReader::new(stream.take(MAX_LINE));
     let mut line = String::new();
     if r.read_line(&mut line).await? == 0 {
         return Ok(());
     }
-    // Recover the raw stream (mirrors control.rs: Take<UnixStream> → UnixStream).
     let mut stream = r.into_inner().into_inner();
-
     let req: Request = match serde_json::from_str(line.trim()) {
         Ok(req) => req,
         Err(e) => {
@@ -68,7 +107,17 @@ async fn handle(
             .await;
         }
     };
+    dispatch(&mut stream, req, runner).await
+}
 
+async fn dispatch<S>(
+    stream: &mut S,
+    req: Request,
+    runner: Arc<dyn VpnRunner>,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     match req {
         Request::StartVpn(params) => {
             let resp = match runner.start(&params).await {
@@ -77,38 +126,35 @@ async fn handle(
                     message: e.to_string(),
                 },
             };
-            write_line(&mut stream, &resp).await
+            write_line(stream, &resp).await
         }
         Request::Stop => {
             runner.stop().await;
-            write_line(&mut stream, &Response::Ok).await
+            write_line(stream, &Response::Ok).await
         }
         Request::GetStatus => {
             let status = Status {
                 state: runner.state(),
                 rates: *runner.subscribe_stats().borrow(),
             };
-            write_line(&mut stream, &Response::Status { status }).await
+            write_line(stream, &Response::Status { status }).await
         }
         Request::Subscribe => subscribe_loop(stream, runner).await,
     }
 }
 
-/// Stream `Event` frames as state/stats change, starting with one snapshot frame. Ends
-/// when the runner's channels close or the write fails (caller disconnected).
-async fn subscribe_loop(mut stream: UnixStream, runner: Arc<dyn VpnRunner>) -> std::io::Result<()> {
+async fn subscribe_loop<S>(stream: &mut S, runner: Arc<dyn VpnRunner>) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut state_rx = runner.subscribe_state();
     let mut stats_rx = runner.subscribe_stats();
-
-    // Initial snapshot so a fresh subscriber immediately sees the current state. Copy the
-    // values out first so the `watch::Ref` guards (RwLockReadGuard, !Send) are dropped
-    // before the await — otherwise the handler future is not Send and cannot be spawned.
+    // Copy values out of their watch::Ref guards before awaiting (the guards are !Send).
     let snapshot = Event {
         state: Some(*state_rx.borrow_and_update()),
         rates: Some(*stats_rx.borrow_and_update()),
     };
-    write_line(&mut stream, &Response::Event(snapshot)).await?;
-
+    write_line(stream, &Response::Event(snapshot)).await?;
     loop {
         let evt = tokio::select! {
             changed = state_rx.changed() => match changed {
@@ -120,28 +166,29 @@ async fn subscribe_loop(mut stream: UnixStream, runner: Arc<dyn VpnRunner>) -> s
                 Err(_) => break,
             },
         };
-        if write_line(&mut stream, &Response::Event(evt))
-            .await
-            .is_err()
-        {
+        if write_line(stream, &Response::Event(evt)).await.is_err() {
             break; // caller hung up
         }
     }
     Ok(())
 }
 
-async fn write_line(stream: &mut UnixStream, resp: &Response) -> std::io::Result<()> {
+async fn write_line<S>(stream: &mut S, resp: &Response) -> std::io::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     let mut out = serde_json::to_string(resp)
         .unwrap_or_else(|_| "{\"resp\":\"err\",\"message\":\"serialize\"}".to_string());
     out.push('\n');
     stream.write_all(out.as_bytes()).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::proto::{Request, Response, StartParams};
     use crate::runner::test_support::FakeRunner;
+    use crate::transport::Endpoint;
     use leshiy_client::State;
     use leshiy_client::settings::TransportPref;
     use std::sync::Arc;
@@ -176,7 +223,16 @@ mod tests {
         let r2 = runner.clone();
         let path = sock.clone();
         tokio::spawn(async move {
-            let _ = serve_control(&path, r2, allow_uid).await;
+            let _ = serve_control(
+                &Endpoint::Socket(path),
+                r2,
+                Auth {
+                    uid: allow_uid,
+                    sid: None,
+                },
+                ServeMode::Persistent,
+            )
+            .await;
         });
         for _ in 0..50 {
             if sock.exists() {
@@ -204,13 +260,14 @@ mod tests {
         let (sock, runner) = spawn(me()).await;
 
         let resp = line(&sock, &Request::StartVpn(params())).await;
-        let r: Response = serde_json::from_str(resp.trim()).unwrap();
-        assert_eq!(r, Response::Ok);
+        assert_eq!(
+            serde_json::from_str::<Response>(resp.trim()).unwrap(),
+            Response::Ok
+        );
         assert_eq!(runner.started.lock().unwrap().len(), 1);
 
         let resp = line(&sock, &Request::GetStatus).await;
-        let r: Response = serde_json::from_str(resp.trim()).unwrap();
-        match r {
+        match serde_json::from_str::<Response>(resp.trim()).unwrap() {
             Response::Status { status } => assert_eq!(status.state, State::Connected),
             other => panic!("expected Status, got {other:?}"),
         }
@@ -224,8 +281,6 @@ mod tests {
 
     #[tokio::test]
     async fn unauthorized_uid_gets_no_reply() {
-        // Tell the server to allow a uid that is NOT ours; our connection must be closed
-        // with zero bytes (silent rejection — no oracle).
         let (sock, _runner) = spawn(me().wrapping_add(1)).await;
         let mut s = tokio::net::UnixStream::connect(&sock).await.unwrap();
         let mut payload = serde_json::to_string(&Request::GetStatus).unwrap();
@@ -233,17 +288,9 @@ mod tests {
         let _ = s.write_all(payload.as_bytes()).await;
         let mut r = BufReader::new(s);
         let mut out = String::new();
-        // Silent rejection: the peer receives NO Response line. The server rejects on
-        // peercred before reading, so closing with our unread request still buffered makes
-        // Linux signal an RST (ConnectionReset) rather than a clean FIN (0 bytes). Both mean
-        // "no oracle" — assert no Response bytes arrived, accepting either signal.
         match r.read_line(&mut out).await {
             Ok(n) => assert_eq!(n, 0, "rejected peer must get an empty (closed) response"),
-            Err(e) => assert_eq!(
-                e.kind(),
-                std::io::ErrorKind::ConnectionReset,
-                "only a reset is acceptable; got {e:?}"
-            ),
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::ConnectionReset),
         }
         assert!(
             out.is_empty(),
@@ -260,13 +307,13 @@ mod tests {
         s.write_all(payload.as_bytes()).await.unwrap();
         let mut r = BufReader::new(s);
 
-        // First frame: the initial snapshot (Disconnected).
         let mut first = String::new();
         r.read_line(&mut first).await.unwrap();
-        let f: Response = serde_json::from_str(first.trim()).unwrap();
-        assert!(matches!(f, Response::Event(_)));
+        assert!(matches!(
+            serde_json::from_str::<Response>(first.trim()).unwrap(),
+            Response::Event(_)
+        ));
 
-        // Drive a state change; expect a pushed Event carrying Connected.
         let _ = runner.state_tx.send(State::Connected);
         let mut next = String::new();
         tokio::time::timeout(std::time::Duration::from_secs(2), r.read_line(&mut next))

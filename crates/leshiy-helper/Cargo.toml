@@ -9,23 +9,26 @@ name = "leshiy-helper"
 path = "src/bin/leshiy-helper.rs"
 
 [dependencies]
-# Cross-platform: protocol types + HelperClient (proto/client/error/install all build
-# everywhere; State/Rates/TransportPref come from leshiy-client).
+# Cross-platform: the engine (leshiy-tun has Win/macOS backends), dispatch, and client all
+# run on every target. Only the peer-uid auth (Unix) and pipe SD (Windows) are per-OS.
 leshiy-client = { path = "../leshiy-client" }
+leshiy-tun = { path = "../leshiy-tun" }
+leshiy-reality = { path = "../leshiy-reality" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+async-trait = { workspace = true }
 # Binary-only:
 anyhow = { workspace = true }
 clap = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-# Unix-only: the daemon side (control server, EngineRunner, peer-uid auth) needs Unix
-# domain sockets + SO_PEERCRED/getpeereid. The auth/server/runner modules are cfg(unix).
+# Unix peer-uid auth on the control socket (SO_PEERCRED on Linux, getpeereid on macOS).
 [target.'cfg(unix)'.dependencies]
-leshiy-tun = { path = "../leshiy-tun" }
-leshiy-reality = { path = "../leshiy-reality" }
-async-trait = { workspace = true }
 nix = { workspace = true }
+
+# Windows named-pipe security descriptor (ADR-0029). The crate's only `unsafe`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Memory", "Win32_System_Pipes", "Win32_Storage_FileSystem"] }

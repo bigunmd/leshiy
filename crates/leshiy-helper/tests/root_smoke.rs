@@ -1,9 +1,12 @@
 //! Privileged end-to-end smoke: HelperClient → serve_control(EngineRunner) → real TUN.
 //! Ignored by default (needs CAP_NET_ADMIN + a reachable leshiy server). Run with:
 //!   LESHIY_TEST_URI='leshiy://…' sudo -E cargo test -p leshiy-helper --test root_smoke -- --ignored
+#![cfg(unix)]
 use leshiy_client::State;
 use leshiy_client::settings::TransportPref;
-use leshiy_helper::{EngineRunner, HelperClient, StartParams, serve_control};
+use leshiy_helper::{
+    Auth, Endpoint, EngineRunner, HelperClient, ServeMode, StartParams, serve_control,
+};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,7 +24,13 @@ async fn helper_brings_up_real_tun() {
         let sock = sock.clone();
         let runner = runner.clone();
         tokio::spawn(async move {
-            let _ = serve_control(&sock, runner, me).await;
+            let _ = serve_control(
+                &Endpoint::Socket(sock),
+                runner,
+                Auth { uid: me, sid: None },
+                ServeMode::Persistent,
+            )
+            .await;
         });
     }
     for _ in 0..50 {
@@ -31,7 +40,7 @@ async fn helper_brings_up_real_tun() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    let client = HelperClient::connect(&sock);
+    let client = HelperClient::connect_path(&sock);
     client
         .start_vpn(StartParams {
             uri,
