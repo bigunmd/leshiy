@@ -22,7 +22,7 @@
 param(
   [string]$Subject = 'CN=Leshiy, O=Leshiy, C=US',
   [string]$FriendlyName = 'Leshiy Code Signing (self-signed)',
-  [string]$OutDir = "$PSScriptRoot",
+  [string]$OutDir,
   [int]$Years = 3,
   [string]$PfxPassword,
   [switch]$TrustLocally,
@@ -30,6 +30,21 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Resolve the output directory in the BODY (not as a param default): $PSScriptRoot is empty
+# in a param default in some hosts and over a \\wsl.localhost UNC path, which caused
+# "Cannot bind argument to parameter 'Path' because it is an empty string." Prefer
+# $PSCommandPath (always the full script path under -File), then fall back.
+if ([string]::IsNullOrWhiteSpace($OutDir)) {
+  if (-not [string]::IsNullOrWhiteSpace($PSCommandPath)) {
+    $OutDir = Split-Path -Parent $PSCommandPath
+  } elseif (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+    $OutDir = $PSScriptRoot
+  } else {
+    $OutDir = (Get-Location).Path
+  }
+}
+Write-Host "Output directory: $OutDir"
 
 if ([string]::IsNullOrEmpty($PfxPassword)) {
   $sec = Read-Host -AsSecureString 'Choose a PFX export password'
