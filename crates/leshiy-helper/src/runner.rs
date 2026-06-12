@@ -4,13 +4,38 @@
 use crate::error::HelperError;
 use crate::proto::StartParams;
 use leshiy_client::settings::TransportPref;
-use leshiy_client::{Rates, RealTransport, State, Transport, Tunnel};
+use leshiy_client::{ByteCounters, Rates, RealTransport, State, Throughput, Transport, Tunnel};
 use leshiy_reality::config::RealityUri;
 use leshiy_tun::{TunConfig, TunEngine};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+
+/// Zeroed rates — the resting value published before connecting and after disconnect.
+fn zero_rates() -> Rates {
+    Rates {
+        up_bps: 0,
+        down_bps: 0,
+        total_up: 0,
+        total_down: 0,
+    }
+}
+
+/// Sample the engine's byte counters once per second and publish per-second rates for the GUI.
+/// Runs until aborted (the engine task aborts it on exit). Kept separate so the timing loop is
+/// easy to reason about; the rate math itself lives in (and is tested by) `Throughput`.
+async fn sample_throughput(counters: Arc<ByteCounters>, stats_tx: watch::Sender<Rates>) {
+    let mut tput = Throughput::new();
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.tick().await; // the first tick completes immediately — skip it so the first delta is real
+    loop {
+        tick.tick().await;
+        let (up, down) = counters.totals();
+        stats_tx.send_replace(tput.sample(up, down, Duration::from_secs(1)));
+    }
+}
 
 /// Abstracts a running (or idle) VPN session. `start` is expected to return promptly
 /// once the tunnel is dialed and the engine task is spawned; ongoing state/stats are
@@ -42,12 +67,7 @@ impl Default for EngineRunner {
 impl EngineRunner {
     pub fn new() -> Self {
         let (state_tx, _) = watch::channel(State::Disconnected);
-        let (stats_tx, _) = watch::channel(Rates {
-            up_bps: 0,
-            down_bps: 0,
-            total_up: 0,
-            total_down: 0,
-        });
+        let (stats_tx, _) = watch::channel(zero_rates());
         EngineRunner {
             state_tx,
             stats_tx,
@@ -109,11 +129,18 @@ impl VpnRunner for EngineRunner {
         };
 
         let state_tx = self.state_tx.clone();
+        let stats_tx = self.stats_tx.clone();
+        let counters = Arc::new(ByteCounters::new());
         state_tx.send_replace(State::Connected);
         let handle = tokio::spawn(async move {
-            if let Err(e) = TunEngine::run(tunnel, cfg).await {
+            // Publish live throughput while the engine runs; abort the sampler on exit.
+            let sampler = tokio::spawn(sample_throughput(counters.clone(), stats_tx.clone()));
+            if let Err(e) = TunEngine::run(tunnel, cfg, counters).await {
                 tracing::warn!("tun engine exited: {e}");
             }
+            sampler.abort();
+            // Reset the rates so the GUI doesn't display a frozen speed after disconnect.
+            stats_tx.send_replace(zero_rates());
             state_tx.send_replace(State::Disconnected);
         });
         *self.task.lock().unwrap() = Some(handle);
@@ -154,12 +181,7 @@ pub mod test_support {
     impl FakeRunner {
         pub fn new() -> Self {
             let (state_tx, _) = watch::channel(State::Disconnected);
-            let (stats_tx, _) = watch::channel(Rates {
-                up_bps: 0,
-                down_bps: 0,
-                total_up: 0,
-                total_down: 0,
-            });
+            let (stats_tx, _) = watch::channel(zero_rates());
             FakeRunner {
                 state_tx,
                 stats_tx,

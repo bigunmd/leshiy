@@ -47,7 +47,9 @@ pub async fn run(
         ..TunConfig::default()
     };
     tracing::info!(%server_ip, %orig_gateway, tun = %cfg.tun_name, "starting full-tunnel VPN");
-    TunEngine::run(tunnel, cfg)
+    // The CLI doesn't display throughput; pass a throwaway counter.
+    let counters = Arc::new(leshiy_client::ByteCounters::new());
+    TunEngine::run(tunnel, cfg, counters)
         .await
         .map_err(|e| anyhow!("tun engine: {e}"))
 }
