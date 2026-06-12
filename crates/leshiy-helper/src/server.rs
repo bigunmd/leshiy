@@ -59,8 +59,9 @@ pub async fn serve_control(
         let Endpoint::Socket(path) = endpoint;
         let listener = crate::transport::unix::bind(path, allow.uid)?;
         let exit = Arc::new(tokio::sync::Notify::new());
-        let mut state_rx = runner.subscribe_state();
-        let mut ever_connected = false;
+        if matches!(mode, ServeMode::Ephemeral) {
+            spawn_exit_watchdog(runner.clone(), exit.clone());
+        }
         loop {
             tokio::select! {
                 accepted = crate::transport::unix::accept(&listener, allow.uid) => {
@@ -68,15 +69,7 @@ pub async fn serve_control(
                         spawn_conn(conn, runner.clone(), mode, exit.clone());
                     }
                 }
-                _ = exit.notified(), if matches!(mode, ServeMode::Ephemeral) => return Ok(()),
-                changed = state_rx.changed() => {
-                    if changed.is_err() {
-                        return Ok(()); // runner dropped
-                    }
-                    if ephemeral_should_exit(&mut ever_connected, *state_rx.borrow(), mode) {
-                        return Ok(());
-                    }
-                }
+                _ = exit.notified() => return Ok(()),
             }
         }
     }
@@ -84,6 +77,28 @@ pub async fn serve_control(
     {
         crate::transport::windows::serve(endpoint, runner, allow, mode).await
     }
+}
+
+/// Ephemeral exit watchdog: notify `exit` once the session ends — i.e. the state returns to
+/// `Disconnected`/`Error` after having been active (the GUI sent `Stop`, or the engine exited).
+/// Runs as its own task with `borrow_and_update`, so it processes EVERY state change and can't
+/// miss a `Connected -> Disconnected` transition the way polling inside the accept loop can.
+pub(crate) fn spawn_exit_watchdog(runner: Arc<dyn VpnRunner>, exit: Arc<tokio::sync::Notify>) {
+    use crate::State;
+    let mut sw = runner.subscribe_state();
+    tokio::spawn(async move {
+        let mut ever_connected = false;
+        while sw.changed().await.is_ok() {
+            match *sw.borrow_and_update() {
+                State::Connecting | State::Connected | State::Reconnecting => ever_connected = true,
+                State::Disconnected | State::Error if ever_connected => {
+                    exit.notify_one();
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
 }
 
 /// Spawn a per-connection handler. If it carried the controlling `Subscribe` stream and that
@@ -107,27 +122,6 @@ pub(crate) fn spawn_conn<S>(
             }
         }
     });
-}
-
-/// Ephemeral exit decision on a state change: once the session has been active, exit when it
-/// returns to `Disconnected`/`Error` (the caller sent `Stop`, or the engine exited). Updates
-/// `ever_connected`. (Persistent never exits this way.) Used by both the Unix accept loop and
-/// the Windows named-pipe loop.
-pub(crate) fn ephemeral_should_exit(
-    ever_connected: &mut bool,
-    state: crate::State,
-    mode: ServeMode,
-) -> bool {
-    use crate::State;
-    match state {
-        State::Connecting | State::Connected | State::Reconnecting => {
-            *ever_connected = true;
-            false
-        }
-        State::Disconnected | State::Error => {
-            *ever_connected && matches!(mode, ServeMode::Ephemeral)
-        }
-    }
 }
 
 /// Handle one request line on an already-authorized stream, returning what it carried.
@@ -451,6 +445,52 @@ mod tests {
         assert!(
             stopped.is_ok(),
             "ephemeral helper must stop the engine when the subscriber drops"
+        );
+    }
+
+    /// On a normal disconnect (`Stop`), the ephemeral helper must RETURN from `serve_control`
+    /// (the process would then exit) — via the watchdog catching `Connected -> Disconnected`,
+    /// not the old racy accept-loop poll.
+    #[tokio::test]
+    async fn ephemeral_serve_returns_after_stop() {
+        let dir = std::env::temp_dir().join(format!("leshiy-helper-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join(format!("e-{}.sock", uuid_like()));
+        let runner = Arc::new(FakeRunner::new());
+        let r2 = runner.clone();
+        let path = sock.clone();
+        let serve = tokio::spawn(async move {
+            serve_control(
+                &Endpoint::Socket(path),
+                r2,
+                Auth {
+                    uid: me(),
+                    sid: None,
+                },
+                ServeMode::Ephemeral,
+            )
+            .await
+        });
+        for _ in 0..50 {
+            if sock.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let r = line(&sock, &Request::StartVpn(params())).await;
+        assert_eq!(
+            serde_json::from_str::<Response>(r.trim()).unwrap(),
+            Response::Ok
+        );
+        let r = line(&sock, &Request::Stop).await;
+        assert_eq!(
+            serde_json::from_str::<Response>(r.trim()).unwrap(),
+            Response::Ok
+        );
+        let done = tokio::time::timeout(std::time::Duration::from_secs(3), serve).await;
+        assert!(
+            done.is_ok(),
+            "ephemeral serve_control must return after Stop"
         );
     }
 }

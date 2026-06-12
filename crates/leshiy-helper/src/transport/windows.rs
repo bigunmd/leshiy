@@ -7,7 +7,7 @@
 //! Authorization is OS-enforced by the DACL and additionally checked per-connection by
 //! comparing the client's token SID to `allow.sid` (mirroring the Unix `peer_uid` gate).
 use crate::runner::VpnRunner;
-use crate::server::{Auth, ServeMode, ephemeral_should_exit, spawn_conn};
+use crate::server::{Auth, ServeMode, spawn_conn, spawn_exit_watchdog};
 use crate::transport::Endpoint;
 use std::os::windows::io::AsRawHandle;
 use std::sync::Arc;
@@ -163,12 +163,14 @@ pub async fn serve(
     })?;
 
     let exit = Arc::new(tokio::sync::Notify::new());
-    let mut state_rx = runner.subscribe_state();
-    let mut ever_connected = false;
+    if matches!(mode, ServeMode::Ephemeral) {
+        spawn_exit_watchdog(runner.clone(), exit.clone());
+    }
     let mut first = true;
     loop {
         // One pending pipe instance; spawn the handler on connect so a held-open Subscribe
-        // doesn't block concurrent Stop. exit/state-change arms let an ephemeral helper exit.
+        // doesn't block concurrent Stop. The exit arm lets an ephemeral helper exit when the
+        // session ends (watchdog) or the GUI's control stream drops (spawn_conn).
         let server = create_server(name, first, &sid)?;
         first = false;
         tokio::select! {
@@ -181,15 +183,7 @@ pub async fn serve(
                     drop(server); // no reply (no oracle)
                 }
             }
-            _ = exit.notified(), if matches!(mode, ServeMode::Ephemeral) => return Ok(()),
-            changed = state_rx.changed() => {
-                if changed.is_err() {
-                    return Ok(());
-                }
-                if ephemeral_should_exit(&mut ever_connected, *state_rx.borrow(), mode) {
-                    return Ok(());
-                }
-            }
+            _ = exit.notified() => return Ok(()),
         }
     }
 }

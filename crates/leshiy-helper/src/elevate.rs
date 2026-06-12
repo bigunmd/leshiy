@@ -147,10 +147,11 @@ mod windows {
             sid
         );
         // -Verb RunAs triggers UAC; no -Wait so the helper keeps running in the background.
+        // -WindowStyle Hidden suppresses the helper's console window (it's a background daemon).
         // The binary path is PowerShell single-quoted (ps_squote: `'` -> `''`) so a path with
         // an apostrophe can't break out. `args` is constants + the SID (no quotes).
         let ps = format!(
-            "Start-Process -FilePath {} -ArgumentList '{}' -Verb RunAs",
+            "Start-Process -FilePath {} -ArgumentList '{}' -Verb RunAs -WindowStyle Hidden",
             ps_squote(&bin.display().to_string()),
             args
         );
