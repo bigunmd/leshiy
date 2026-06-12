@@ -1,6 +1,7 @@
 //! Control-socket authorization. `authorize` is the pure, security-critical decision;
-//! `peer_uid` extracts the connecting peer's uid via `SO_PEERCRED` (Linux). On any
-//! mismatch the server closes the connection silently (no oracle to the peer).
+//! `peer_uid` extracts the connecting peer's uid from the kernel: `SO_PEERCRED` on Linux,
+//! `getpeereid` on macOS/BSD. On any mismatch the server closes the connection silently
+//! (no oracle to the peer). Unix-only (the module is gated `cfg(unix)` in `lib.rs`).
 use std::os::fd::AsFd;
 use tokio::net::UnixStream;
 
@@ -10,12 +11,23 @@ pub fn authorize(peer_uid: u32, allowed_uid: u32) -> bool {
     peer_uid == allowed_uid
 }
 
-/// Read the connecting peer's uid from a Unix stream via `SO_PEERCRED`.
+/// Read the connecting peer's uid from a Unix stream. Linux uses `SO_PEERCRED`; macOS/BSD
+/// use `getpeereid` (nix gates `getpeereid` to `cfg(bsd)` and `PeerCredentials` to Linux,
+/// so the two paths are mutually exclusive).
 pub fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
-    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
-    let creds = getsockopt(&stream.as_fd(), PeerCredentials)
-        .map_err(|e| std::io::Error::other(format!("SO_PEERCRED: {e}")))?;
-    Ok(creds.uid())
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+        let creds = getsockopt(&stream.as_fd(), PeerCredentials)
+            .map_err(|e| std::io::Error::other(format!("SO_PEERCRED: {e}")))?;
+        Ok(creds.uid())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let (uid, _gid) = nix::unistd::getpeereid(stream.as_fd())
+            .map_err(|e| std::io::Error::other(format!("getpeereid: {e}")))?;
+        Ok(uid.as_raw())
+    }
 }
 
 #[cfg(test)]
