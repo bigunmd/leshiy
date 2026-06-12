@@ -71,7 +71,9 @@ pub async fn serve_control(
 
 /// Ephemeral exit decision: once we've seen the session go active, exit when it returns to
 /// `Disconnected` (the caller sent `Stop`, or the engine exited). Updates `ever_connected`.
-/// Used by both the Unix accept loop and the Windows named-pipe loop.
+/// Used by the Unix accept loop now, and the Windows named-pipe loop once Phase B re-enables
+/// it (the Windows `serve` currently fails closed, so it's Unix-only in the interim).
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn session_ended(runner: &dyn VpnRunner, ever_connected: &mut bool) -> bool {
     use crate::State;
     match runner.state() {

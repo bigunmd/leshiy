@@ -1,50 +1,34 @@
 //! Windows named-pipe transport.
 //!
-//! **Phase A (this file):** safe named-pipe plumbing using the OS default security
-//! descriptor. This works when the GUI and helper run at the **same** integrity level.
-//! **Phase B (ADR-0029):** replace `ServerOptions::create` with a pipe created from an
-//! explicit `SECURITY_ATTRIBUTES` (DACL scoped to the launching user's SID + a medium
-//! mandatory integrity label) so an unprivileged medium-IL GUI can open the pipe served by
-//! the UAC-elevated high-IL helper. That is the crate's only `unsafe`.
+//! **Security (fail-closed).** A named pipe created with the OS default security descriptor
+//! is openable by any process in the session — there is no peer authorization, unlike the
+//! Unix `peer_uid` gate. So the server side is **not yet enabled**: `serve` refuses to start
+//! until Phase B (ADR-0029) creates the pipe from an explicit `SECURITY_ATTRIBUTES` (DACL
+//! scoped to `allow.sid` + a mandatory-integrity label) AND verifies the connecting client's
+//! token SID. The client side (`connect`) is safe to ship.
 use crate::runner::VpnRunner;
-use crate::server::{Auth, ServeMode, handle_stream, session_ended};
+use crate::server::{Auth, ServeMode};
 use crate::transport::Endpoint;
 use std::sync::Arc;
-use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, ServerOptions};
+use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 
-/// Serve the control channel over a named pipe. Phase A uses default pipe security; Phase B
-/// will scope it to `allow.sid` with a medium IL label.
+/// Serve the control channel over a named pipe.
+///
+/// **Currently fails closed.** Authorizing the caller on Windows requires an explicit pipe
+/// security descriptor scoped to `allow.sid` plus a client-token SID check (Phase B /
+/// ADR-0029). Until that lands, we refuse to start rather than accept unauthenticated
+/// connections (a default-security pipe would be an auth bypass).
 pub async fn serve(
-    endpoint: &Endpoint,
-    runner: Arc<dyn VpnRunner>,
+    _endpoint: &Endpoint,
+    _runner: Arc<dyn VpnRunner>,
     _allow: Auth,
-    mode: ServeMode,
+    _mode: ServeMode,
 ) -> std::io::Result<()> {
-    let Endpoint::Pipe(name) = endpoint;
-    let mut ever_connected = false;
-    let mut first = true;
-    loop {
-        // Phase B replaces this with a pipe built from a user-SID security descriptor.
-        let server = ServerOptions::new()
-            .first_pipe_instance(first)
-            .create(name)?;
-        first = false;
-        server.connect().await?;
-        match mode {
-            ServeMode::Persistent => {
-                let runner = runner.clone();
-                tokio::spawn(async move {
-                    let _ = handle_stream(server, runner).await;
-                });
-            }
-            ServeMode::Ephemeral => {
-                handle_stream(server, runner.clone()).await?;
-                if session_ended(runner.as_ref(), &mut ever_connected) {
-                    return Ok(());
-                }
-            }
-        }
-    }
+    Err(std::io::Error::other(
+        "windows VPN helper not yet enabled: the named-pipe security descriptor + client-SID \
+         authorization (ADR-0029) are not implemented, and we refuse to serve an \
+         unauthenticated pipe",
+    ))
 }
 
 /// Connect a client to the named pipe, retrying briefly while the server is busy creating
