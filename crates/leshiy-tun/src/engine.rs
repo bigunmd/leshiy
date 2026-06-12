@@ -63,7 +63,9 @@ impl TunEngine {
             .start(&cfg.tun_name, cfg.mtu, &plan, &cfg.dns)
             .await?;
         let mut ip_stack = netstack::build(device, cfg.mtu)?;
+        tracing::info!(tun = %cfg.tun_name, mtu = cfg.mtu, server_ip = %cfg.server_ip, "tun engine running; reading packets from the device");
         let result = accept_loop(&mut ip_stack, tunnel).await;
+        tracing::info!(?result, "tun engine accept loop exited");
         drop(guard); // restore DNS + IPv6
         result
     }
@@ -77,24 +79,32 @@ async fn accept_loop(
         match ip_stack.accept().await.map_err(to_io)? {
             IpStackStream::Tcp(tcp) => {
                 let dst = tcp.peer_addr();
+                tracing::info!(%dst, "tcp flow opened (read a packet from the device)");
                 let t = tunnel.clone();
                 tokio::spawn(async move {
                     if let Err(e) = pump_tcp(t, dst, tcp).await {
-                        tracing::debug!(%dst, "tcp flow ended: {e}");
+                        tracing::info!(%dst, "tcp flow ended: {e}");
                     }
                 });
             }
             IpStackStream::Udp(udp) => {
                 let dst = udp.peer_addr();
+                tracing::info!(%dst, "udp flow opened (read a packet from the device)");
                 let t = tunnel.clone();
                 tokio::spawn(async move {
                     if let Err(e) = pump_udp(t, dst, udp).await {
-                        tracing::debug!(%dst, "udp flow ended: {e}");
+                        tracing::info!(%dst, "udp flow ended: {e}");
                     }
                 });
             }
-            // ICMP and unparseable packets are dropped in this phase.
-            IpStackStream::UnknownTransport(_) | IpStackStream::UnknownNetwork(_) => {}
+            // ICMP and unparseable packets are dropped in this phase — but log so we can tell
+            // packets ARE arriving from the device (vs. nothing being read at all).
+            IpStackStream::UnknownTransport(_) => {
+                tracing::debug!("read a non-TCP/UDP packet (dropped)")
+            }
+            IpStackStream::UnknownNetwork(_) => {
+                tracing::debug!("read an unparseable packet (dropped)")
+            }
         }
     }
 }
