@@ -1,5 +1,6 @@
 //! User-facing settings. Serialized to JSON by the Tauri shell (Plan 3); defaults
 //! match the approved spec (English, kill-switch ON, auto transport, SOCKS 1080).
+use crate::split_tunnel::SplitTunnel;
 use serde::{Deserialize, Serialize};
 
 /// Which transport the dialer should prefer.
@@ -45,6 +46,9 @@ pub struct Settings {
     pub socks_port: u16,
     #[serde(default)]
     pub start_minimized: bool,
+    /// Global split-tunnel ruleset. Empty (the default) means plain full tunnel.
+    #[serde(default)]
+    pub split_tunnel: SplitTunnel,
 }
 
 fn default_language() -> String {
@@ -74,6 +78,7 @@ impl Default for Settings {
             vpn_dns: default_vpn_dns(),
             socks_port: default_socks_port(),
             start_minimized: false,
+            split_tunnel: SplitTunnel::default(),
         }
     }
 }
@@ -141,5 +146,20 @@ mod tests {
     fn transport_serializes_lowercase() {
         let json = serde_json::to_string(&TransportPref::Quic).unwrap();
         assert_eq!(json, "\"quic\"");
+    }
+
+    #[test]
+    fn settings_default_split_tunnel_is_empty_exclude() {
+        use crate::split_tunnel::SplitMode;
+        let s = Settings::default();
+        assert!(s.split_tunnel.is_empty());
+        assert_eq!(s.split_tunnel.mode, SplitMode::Exclude);
+    }
+
+    #[test]
+    fn old_settings_file_without_split_tunnel_defaults() {
+        // A pre-split-tunnel settings.json deserializes with an empty ruleset.
+        let s: Settings = serde_json::from_str(r#"{"language":"en","mode":"vpn"}"#).unwrap();
+        assert!(s.split_tunnel.is_empty());
     }
 }
