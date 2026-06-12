@@ -16,8 +16,17 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// How often domain rules are re-resolved while a session is up.
-pub(crate) const REFRESH: Duration = Duration::from_secs(300);
+/// How often domain rules are re-resolved while a session is up. Larger than a manual-only
+/// session would need, because subscription lists can hold thousands of domains.
+pub(crate) const REFRESH: Duration = Duration::from_secs(1800);
+
+/// Cap on the number of domains resolved per direction — guards against a pathological
+/// subscription list. Excess is dropped (with a warning), never silently.
+pub(crate) const MAX_DOMAINS: usize = 50_000;
+
+/// How many `getaddrinfo` lookups run concurrently (bounds the blocking-pool pressure while
+/// still resolving thousands of domains in seconds rather than minutes).
+const RESOLVE_CONCURRENCY: usize = 64;
 
 /// The CIDRs added / removed between two resolution snapshots.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -77,28 +86,67 @@ pub async fn apply_resolution(
     state.current = resolved;
 }
 
-/// Resolve `domains` to host CIDRs (`/32`) via the system resolver. IPv6 results are filtered
-/// out this phase (IPv6 is not tunnelled). Unresolvable domains are skipped (logged).
+/// Cap a domain list to [`MAX_DOMAINS`], returning the kept slice and whether it was truncated.
+fn capped(domains: &[String]) -> (&[String], bool) {
+    if domains.len() > MAX_DOMAINS {
+        (&domains[..MAX_DOMAINS], true)
+    } else {
+        (domains, false)
+    }
+}
+
+/// Resolve `domains` to host CIDRs (`/32`) via the system resolver, with bounded concurrency so
+/// large subscription lists resolve in seconds. IPv6 results are filtered out this phase (IPv6
+/// is not tunnelled). Unresolvable domains are skipped (logged); the list is capped to
+/// [`MAX_DOMAINS`] (warned, never silent).
 pub async fn resolve_domains(domains: &[String]) -> BTreeSet<Cidr> {
-    let mut out = BTreeSet::new();
+    let total = domains.len();
+    let (domains, truncated) = capped(domains);
+    if truncated {
+        tracing::warn!(
+            total,
+            "split-tunnel: domain list exceeds {MAX_DOMAINS}; resolving only the first {MAX_DOMAINS}"
+        );
+    }
+    let sem = Arc::new(tokio::sync::Semaphore::new(RESOLVE_CONCURRENCY));
+    let mut tasks = tokio::task::JoinSet::new();
     for d in domains {
-        // `lookup_host` needs a port; 0 is fine since we only use the addresses.
-        match tokio::net::lookup_host((d.as_str(), 0)).await {
-            Ok(addrs) => {
-                for a in addrs {
-                    if let IpAddr::V4(v4) = a.ip() {
-                        out.insert(Cidr {
-                            addr: v4.into(),
-                            prefix: 32,
-                        });
-                    }
-                    // IPv6 is out of scope this phase (kill-switched / untunnelled).
-                }
-            }
-            Err(e) => tracing::warn!(domain = %d, "split-tunnel: resolve failed: {e}"),
+        let d = d.clone();
+        let sem = sem.clone();
+        tasks.spawn(async move {
+            // Permit is held for the lookup, bounding concurrent getaddrinfo calls.
+            let _permit = sem.acquire().await;
+            resolve_one(&d).await
+        });
+    }
+    let mut out = BTreeSet::new();
+    while let Some(res) = tasks.join_next().await {
+        if let Ok(cidrs) = res {
+            out.extend(cidrs);
         }
     }
     out
+}
+
+/// Resolve a single domain to its IPv4 host CIDRs (`/32`). Empty on failure (logged).
+async fn resolve_one(domain: &str) -> Vec<Cidr> {
+    // `lookup_host` needs a port; 0 is fine since we only use the addresses.
+    match tokio::net::lookup_host((domain, 0)).await {
+        Ok(addrs) => addrs
+            .filter_map(|a| match a.ip() {
+                IpAddr::V4(v4) => Some(Cidr {
+                    addr: v4.into(),
+                    prefix: 32,
+                }),
+                // IPv6 is out of scope this phase (kill-switched / untunnelled).
+                IpAddr::V6(_) => None,
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(domain = %domain, "split-tunnel: resolve failed: {e}");
+            Vec::new()
+        }
+    }
 }
 
 /// Periodically resolve the plan's **include** and **exclude** domains and apply the route
@@ -154,6 +202,21 @@ mod tests {
         let s: BTreeSet<Cidr> = [host("1.1.1.1")].into();
         let d = diff(&s, &s);
         assert!(d.added.is_empty() && d.removed.is_empty());
+    }
+
+    #[test]
+    fn capped_truncates_past_the_limit() {
+        let small: Vec<String> = (0..10).map(|i| format!("d{i}.example")).collect();
+        let (kept, trunc) = capped(&small);
+        assert_eq!(kept.len(), 10);
+        assert!(!trunc);
+
+        let big: Vec<String> = (0..MAX_DOMAINS + 5)
+            .map(|i| format!("d{i}.example"))
+            .collect();
+        let (kept, trunc) = capped(&big);
+        assert_eq!(kept.len(), MAX_DOMAINS);
+        assert!(trunc);
     }
 
     /// Records the controller calls so the apply loop can be tested without real routing.

@@ -71,6 +71,9 @@ pub(crate) fn target_of(dst: SocketAddr) -> String {
 /// Idle timeout for a UDP association (no teardown signal on UDP).
 const UDP_IDLE: Duration = Duration::from_secs(60);
 
+/// Above this many installed routes, warn about routing-table bloat / slow per-OS install.
+const ROUTE_WARN_THRESHOLD: usize = 5000;
+
 /// Aborts the wrapped task on drop. Ties the detached domain-resolver task's lifetime to the
 /// engine future, so it stops the instant the session ends or is aborted (rather than
 /// continuing to mutate routes after disconnect).
@@ -120,6 +123,16 @@ impl TunEngine {
             cfg.tun_addr,
         )
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
+        // Large rule sets bloat the routing table — and on macOS/Windows each route is a
+        // separate `route`/`netsh` subprocess, so a big list installs slowly. Warn so it's
+        // diagnosable (the engine still proceeds).
+        let route_count = plan.via_tun.len() + plan.bypass.len();
+        if route_count > ROUTE_WARN_THRESHOLD {
+            tracing::warn!(
+                route_count,
+                "split-tunnel: large rule set; route installation may be slow (esp. macOS/Windows)"
+            );
+        }
         let TunSession {
             device,
             guard,
