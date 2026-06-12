@@ -8,3 +8,6 @@
 
 # Optional local Windows-signing overlay (per-machine cert thumbprint) — not for git
 tauri.windows.conf.json
+
+# Bundled helper sidecar (built in CI per target triple)
+/binaries/

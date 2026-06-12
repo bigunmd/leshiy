@@ -35,6 +35,16 @@ jobs:
       - name: Install JS deps
         working-directory: apps/desktop
         run: pnpm install --frozen-lockfile
+      - name: Build leshiy-helper sidecar
+        shell: bash
+        run: |
+          # The GUI launches this elevated on demand (macOS/Windows). Tauri bundles it via
+          # bundle.externalBin, expecting binaries/leshiy-helper-<target-triple>[.exe].
+          cargo build -p leshiy-helper --release
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          ext=""; [[ "$triple" == *windows* ]] && ext=".exe"
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp "target/release/leshiy-helper$ext" "apps/desktop/src-tauri/binaries/leshiy-helper-$triple$ext"
       - name: Import Windows code-signing certificate
         if: matrix.platform == 'windows-latest' && env.WINDOWS_CERTIFICATE != ''
         shell: pwsh

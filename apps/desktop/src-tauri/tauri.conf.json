@@ -25,6 +25,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": ["binaries/leshiy-helper"],
     "category": "Utility",
     "shortDescription": "Censorship-circumvention client",
     "longDescription": "Leshiy is a fast, secure censorship-circumvention client. Import a config, connect with one tap, and route your traffic through a local SOCKS5 proxy over the Leshiy protocol (REALITY/QUIC with auto-fallback).",
