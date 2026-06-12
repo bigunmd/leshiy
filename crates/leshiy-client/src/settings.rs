@@ -1,6 +1,7 @@
 //! User-facing settings. Serialized to JSON by the Tauri shell (Plan 3); defaults
 //! match the approved spec (English, kill-switch ON, auto transport, SOCKS 1080).
 use crate::split_tunnel::SplitTunnel;
+use crate::subscription::Subscription;
 use serde::{Deserialize, Serialize};
 
 /// Which transport the dialer should prefer.
@@ -46,9 +47,12 @@ pub struct Settings {
     pub socks_port: u16,
     #[serde(default)]
     pub start_minimized: bool,
-    /// Global split-tunnel ruleset. Empty (the default) means plain full tunnel.
+    /// Global split-tunnel ruleset (manual rules). Empty (the default) means plain full tunnel.
     #[serde(default)]
     pub split_tunnel: SplitTunnel,
+    /// Configured community rule subscriptions (each with its own Include/Exclude direction).
+    #[serde(default)]
+    pub rule_subscriptions: Vec<Subscription>,
 }
 
 fn default_language() -> String {
@@ -79,6 +83,7 @@ impl Default for Settings {
             socks_port: default_socks_port(),
             start_minimized: false,
             split_tunnel: SplitTunnel::default(),
+            rule_subscriptions: Vec::new(),
         }
     }
 }

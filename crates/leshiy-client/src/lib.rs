@@ -18,6 +18,7 @@ pub mod settings;
 pub mod split_tunnel;
 pub mod stats;
 pub mod stream;
+pub mod subscription;
 pub mod supervisor;
 pub mod sysproxy;
 pub mod transport;
@@ -32,6 +33,9 @@ pub use settings::{Mode, Settings, TransportPref};
 pub use split_tunnel::{RuleSet, SplitCidr, SplitMode, SplitParseError, SplitPlan, SplitTunnel};
 pub use stats::{ByteCounters, Rates, Throughput};
 pub use stream::{DatagramFlow, ProxyStream};
+pub use subscription::{
+    SubFormat, Subscription, SubscriptionCache, SubscriptionCacheEntry, parse_subscription,
+};
 pub use supervisor::{Action, Input, Machine, State, backoff_delay};
 pub use sysproxy::{NoopProxy, SystemProxy, system_proxy};
 pub use transport::{Transport, Tunnel};

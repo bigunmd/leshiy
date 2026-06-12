@@ -201,6 +201,34 @@ impl SplitTunnel {
         })
     }
 
+    /// Import a v2ray/sing-box geosite domain-list: `domain:example.com` / `full:host.example`
+    /// → a domain rule; `regexp:`/`keyword:`/`include:` directives are ignored (logged via the
+    /// caller). A bare line with a dot is also accepted as a domain. No CIDRs are produced.
+    pub fn parse_domain_list(mode: SplitMode, text: &str) -> Result<Self, SplitParseError> {
+        let mut domains = Vec::new();
+        for raw in text.lines() {
+            let line = strip_comment(raw).trim();
+            if line.is_empty() {
+                continue;
+            }
+            let tok = line.split_whitespace().next().unwrap_or(line);
+            let host = match tok.split_once(':') {
+                Some(("domain", h)) | Some(("full", h)) => h,
+                Some(("regexp", _)) | Some(("keyword", _)) | Some(("include", _)) => continue,
+                Some(_) => continue, // unknown directive — skip
+                None => tok,         // bare domain
+            };
+            if looks_like_domain(host) {
+                domains.push(host.to_string());
+            }
+        }
+        Ok(SplitTunnel {
+            mode,
+            cidrs: Vec::new(),
+            domains,
+        })
+    }
+
     /// Import a hosts-file list: `<sink-ip> <hostname...>`. The sink IP column (usually
     /// `0.0.0.0`/`127.0.0.1`) is discarded; each hostname that looks like a domain becomes a
     /// domain rule. Lines without a domain-shaped hostname are skipped (no CIDRs are added).
@@ -331,6 +359,25 @@ example.com
         let st =
             SplitTunnel::parse_lines(SplitMode::Include, "10.0.0.0/8\n172.16.0.0/12\n").unwrap();
         assert_eq!(st.cidrs.len(), 2);
+    }
+
+    #[test]
+    fn parse_domain_list_strips_prefixes_and_ignores_unsupported() {
+        let text = "\
+# v2ray geosite
+domain:google.com
+full:www.youtube.com
+regexp:.*\\.ad\\.com
+keyword:tracker
+include:geolocation-cn
+bare.example.org
+";
+        let st = SplitTunnel::parse_domain_list(SplitMode::Include, text).unwrap();
+        assert_eq!(
+            st.domains,
+            vec!["google.com", "www.youtube.com", "bare.example.org"]
+        );
+        assert!(st.cidrs.is_empty());
     }
 
     #[test]

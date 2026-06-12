@@ -2,6 +2,7 @@
 //! the privileged `leshiy-helper` daemon (VPN mode).
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use leshiy_client::adapter::RealTransport;
 use leshiy_client::{
@@ -21,6 +22,10 @@ struct AppState {
     settings_path: PathBuf,
     /// Lazily-connected privileged-helper client; `None` until VPN mode connects.
     helper: Mutex<Option<HelperClient>>,
+    /// Cached rules fetched from rule subscriptions (separate from settings so a settings write
+    /// never drops fetched data).
+    sub_cache: Mutex<leshiy_client::SubscriptionCache>,
+    sub_cache_path: PathBuf,
     /// App handle for emitting webview events from commands (set in `setup`).
     app_handle: OnceLock<tauri::AppHandle>,
     /// Owns the tokio runtime the supervisor's tasks run on; kept alive for the app's lifetime.
@@ -39,6 +44,11 @@ impl AppState {
         let bytes = serde_json::to_vec_pretty(&*self.settings.lock().unwrap())
             .map_err(|e| e.to_string())?;
         std::fs::write(&self.settings_path, bytes).map_err(|e| e.to_string())
+    }
+    fn save_sub_cache(&self) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(&*self.sub_cache.lock().unwrap())
+            .map_err(|e| e.to_string())?;
+        std::fs::write(&self.sub_cache_path, bytes).map_err(|e| e.to_string())
     }
 }
 
@@ -95,11 +105,24 @@ fn vpn_active(handle: &tauri::AppHandle) -> bool {
     mode_uses_helper(handle.state::<AppState>().settings.lock().unwrap().mode)
 }
 
-/// Build the VPN `StartParams` from the active profile URI + the user's settings. The manual
-/// split-tunnel rules become the base of a two-directional `SplitPlan`; rule subscriptions are
-/// merged in (Phase F). Extracted from `connect` so it's unit-testable.
-fn build_start_params(uri: String, settings: &Settings) -> StartParams {
-    let split = leshiy_client::SplitPlan::from_manual(&settings.split_tunnel);
+/// Build the VPN `StartParams` from the active profile URI + the user's settings + the
+/// subscription cache. The manual split-tunnel rules form the base of a two-directional
+/// `SplitPlan`; each enabled subscription's cached rules merge into its own direction.
+/// Extracted from `connect` so it's unit-testable.
+fn build_start_params(
+    uri: String,
+    settings: &Settings,
+    cache: &leshiy_client::SubscriptionCache,
+) -> StartParams {
+    let mut split = leshiy_client::SplitPlan::from_manual(&settings.split_tunnel);
+    for sub in &settings.rule_subscriptions {
+        if !sub.enabled {
+            continue;
+        }
+        if let Some(entry) = cache.get(&sub.id) {
+            split.merge(sub.mode, &entry.rules);
+        }
+    }
     StartParams {
         uri,
         transport: settings.transport,
@@ -134,7 +157,8 @@ async fn connect(state: State<'_, AppState>) -> Result<(), String> {
 
         let client = HelperClient::connect(endpoint);
         *state.helper.lock().unwrap() = Some(client.clone());
-        let params = build_start_params(uri, &settings);
+        let cache = state.sub_cache.lock().unwrap().clone();
+        let params = build_start_params(uri, &settings, &cache);
         client.start_vpn(params).await.map_err(|e| e.to_string())?;
 
         // Relay the helper's state/stats onto the SAME webview events the proxy path uses,
@@ -312,6 +336,122 @@ fn validate_split_rules(
     parse_split_text(mode, &format, &text)
 }
 
+// ---- Rule subscriptions: fetch + cache ----
+
+/// Refuse to ingest absurdly large lists (some RKN domain dumps are tens of MB).
+const MAX_FETCH_BYTES: usize = 32 * 1024 * 1024;
+const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+/// Background re-fetch cadence for enabled subscriptions.
+const SUB_REFRESH: Duration = Duration::from_secs(24 * 3600);
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn header_str(resp: &reqwest::Response, name: reqwest::header::HeaderName) -> Option<String> {
+    resp.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+}
+
+/// Fetch one subscription with a conditional GET (ETag / Last-Modified). `Ok(None)` means the
+/// server replied 304 Not Modified — keep the existing cache entry.
+async fn fetch_one(
+    client: &reqwest::Client,
+    sub: &leshiy_client::Subscription,
+    prev: Option<&leshiy_client::SubscriptionCacheEntry>,
+) -> Result<Option<leshiy_client::SubscriptionCacheEntry>, String> {
+    let mut req = client.get(&sub.url);
+    if let Some(p) = prev {
+        if let Some(etag) = &p.etag {
+            req = req.header(reqwest::header::IF_NONE_MATCH, etag);
+        }
+        if let Some(lm) = &p.last_modified {
+            req = req.header(reqwest::header::IF_MODIFIED_SINCE, lm);
+        }
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(None);
+    }
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+    if let Some(len) = resp.content_length() {
+        if len as usize > MAX_FETCH_BYTES {
+            return Err(format!("list too large ({len} bytes)"));
+        }
+    }
+    let etag = header_str(&resp, reqwest::header::ETAG);
+    let last_modified = header_str(&resp, reqwest::header::LAST_MODIFIED);
+    let body = resp.text().await.map_err(|e| e.to_string())?;
+    if body.len() > MAX_FETCH_BYTES {
+        return Err("list too large".into());
+    }
+    let rules = leshiy_client::parse_subscription(sub.format, &body).map_err(|e| e.to_string())?;
+    Ok(Some(leshiy_client::SubscriptionCacheEntry {
+        rules,
+        etag,
+        last_modified,
+        fetched_at: now_secs(),
+    }))
+}
+
+/// Re-fetch enabled subscriptions (all, or only `only_id`) and persist the cache. Per-source
+/// errors are logged and skipped (the old cache entry is kept) so one dead URL can't fail the lot.
+async fn refresh_subs(state: &AppState, only_id: Option<&str>) -> Result<(), String> {
+    let (subs, mut cache) = {
+        let s = state.settings.lock().unwrap();
+        let c = state.sub_cache.lock().unwrap().clone();
+        (s.rule_subscriptions.clone(), c)
+    };
+    let client = reqwest::Client::builder()
+        .timeout(FETCH_TIMEOUT)
+        .build()
+        .map_err(|e| e.to_string())?;
+    for sub in subs.iter().filter(|s| s.enabled) {
+        if let Some(id) = only_id {
+            if id != sub.id {
+                continue;
+            }
+        }
+        let prev = cache.get(&sub.id).cloned();
+        match fetch_one(&client, sub, prev.as_ref()).await {
+            Ok(Some(entry)) => cache.insert(sub.id.clone(), entry),
+            Ok(None) => {}
+            Err(e) => eprintln!("subscription {} fetch failed: {e}", sub.id),
+        }
+    }
+    *state.sub_cache.lock().unwrap() = cache;
+    state.save_sub_cache()
+}
+
+#[tauri::command]
+fn subscription_cache(state: State<AppState>) -> leshiy_client::SubscriptionCache {
+    state.sub_cache.lock().unwrap().clone()
+}
+
+#[tauri::command]
+async fn refresh_subscriptions(
+    state: State<'_, AppState>,
+) -> Result<leshiy_client::SubscriptionCache, String> {
+    refresh_subs(&state, None).await?;
+    Ok(state.sub_cache.lock().unwrap().clone())
+}
+
+#[tauri::command]
+async fn refresh_subscription(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<leshiy_client::SubscriptionCache, String> {
+    refresh_subs(&state, Some(&id)).await?;
+    Ok(state.sub_cache.lock().unwrap().clone())
+}
+
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder};
     use tauri::tray::TrayIconBuilder;
@@ -362,12 +502,17 @@ pub fn run() {
     std::fs::create_dir_all(&cfg_dir).ok();
     let profiles_path = cfg_dir.join("profiles.json");
     let settings_path = cfg_dir.join("settings.json");
+    let sub_cache_path = cfg_dir.join("subscriptions_cache.json");
 
     let settings: Settings = std::fs::read(&settings_path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
     let profiles = ProfileStore::load(&profiles_path).unwrap_or_default();
+    let sub_cache: leshiy_client::SubscriptionCache = std::fs::read(&sub_cache_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -394,6 +539,8 @@ pub fn run() {
         profiles_path,
         settings_path,
         helper: Mutex::new(None),
+        sub_cache: Mutex::new(sub_cache),
+        sub_cache_path,
         app_handle: OnceLock::new(),
         _runtime: runtime,
     };
@@ -413,6 +560,9 @@ pub fn run() {
             get_settings,
             set_settings,
             validate_split_rules,
+            subscription_cache,
+            refresh_subscriptions,
+            refresh_subscription,
             helper_installed,
             install_helper,
             remove_helper,
@@ -444,6 +594,15 @@ pub fn run() {
                             if !vpn_active(&handle) { let _ = handle.emit("tunnel:stats", s); }
                         }
                     }
+                }
+            });
+            // Refresh rule subscriptions on launch and once a day. Conditional GETs (ETag /
+            // Last-Modified) keep repeated refreshes cheap (304 Not Modified).
+            let sub_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let _ = refresh_subs(sub_handle.state::<AppState>().inner(), None).await;
+                    tokio::time::sleep(SUB_REFRESH).await;
                 }
             });
             build_tray(app)?;
@@ -492,12 +651,51 @@ mod tests {
             split_tunnel: SplitTunnel::parse_lines(SplitMode::Include, "10.0.0.0/8\n").unwrap(),
             ..Settings::default()
         };
-        let params = super::build_start_params("leshiy://x".into(), &s);
+        let cache = leshiy_client::SubscriptionCache::default();
+        let params = super::build_start_params("leshiy://x".into(), &s, &cache);
         // Manual Include rules map to the include direction of the two-directional plan.
         assert_eq!(params.split_tunnel, SplitPlan::from_manual(&s.split_tunnel));
         assert_eq!(params.split_tunnel.base_mode, SplitMode::Include);
         assert_eq!(params.split_tunnel.include.cidrs.len(), 1);
         assert_eq!(params.mtu, 1390);
         assert_eq!(params.dns, s.vpn_dns);
+    }
+
+    #[test]
+    fn build_start_params_merges_enabled_subscriptions() {
+        use leshiy_client::{
+            RuleSet, Settings, SplitCidr, SplitMode, SubFormat, Subscription, SubscriptionCache,
+            SubscriptionCacheEntry,
+        };
+        let sub = Subscription {
+            id: "refilter".into(),
+            name: "Re:filter".into(),
+            url: "https://x/ipsum.lst".into(),
+            format: SubFormat::Lines,
+            mode: SplitMode::Include,
+            enabled: true,
+        };
+        let s = Settings {
+            rule_subscriptions: vec![sub],
+            ..Settings::default()
+        };
+        let mut cache = SubscriptionCache::default();
+        cache.insert(
+            "refilter".into(),
+            SubscriptionCacheEntry {
+                rules: RuleSet {
+                    cidrs: vec![SplitCidr {
+                        addr: "1.2.3.0".parse().unwrap(),
+                        prefix: 24,
+                    }],
+                    domains: vec!["blocked.example".into()],
+                },
+                ..Default::default()
+            },
+        );
+        let params = super::build_start_params("leshiy://x".into(), &s, &cache);
+        // The Include subscription's rules landed in the include direction.
+        assert_eq!(params.split_tunnel.include.cidrs.len(), 1);
+        assert_eq!(params.split_tunnel.include.domains, vec!["blocked.example"]);
     }
 }
