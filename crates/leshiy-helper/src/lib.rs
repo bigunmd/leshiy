@@ -16,6 +16,7 @@
 #[cfg(unix)]
 pub mod auth;
 pub mod client;
+pub mod elevate;
 pub mod error;
 mod install;
 pub mod proto;

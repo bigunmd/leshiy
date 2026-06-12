@@ -9,7 +9,7 @@ use leshiy_client::{
     SupervisorHandle,
 };
 // Free functions for the install probe (NOT HelperClient methods); HelperClient drives VPN mode.
-use leshiy_helper::{default_socket_path, is_installed, HelperClient, StartParams};
+use leshiy_helper::{is_installed, HelperClient, StartParams};
 use tauri::{Emitter, Manager, State};
 
 /// Application state managed by Tauri.
@@ -101,17 +101,21 @@ async fn connect(state: State<'_, AppState>) -> Result<(), String> {
     };
 
     if mode_uses_helper(settings.mode) {
-        // The caller (App.tsx) has already ensured the helper is installed (lazy install
-        // dialog) before invoking `connect` in VPN mode. `HelperClient` is `Clone` (holds
-        // only a PathBuf), so we connect-or-reuse, then clone the cheap handle OUT of the
-        // guard before any `.await` — never hold the std Mutex across an await point.
-        let client = {
-            let mut guard = state.helper.lock().unwrap();
-            if guard.is_none() {
-                *guard = Some(HelperClient::connect_path(default_socket_path()));
-            }
-            guard.as_ref().unwrap().clone()
-        };
+        let endpoint = leshiy_helper::default_endpoint();
+
+        // On-demand model on macOS/Windows: if no helper is answering, launch an elevated
+        // ephemeral one (UAC / osascript admin) and wait for the endpoint. Linux uses the
+        // installed daemon (systemd/setcap) — no spawn here.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let bin = helper_sidecar_path()?;
+            leshiy_helper::elevate::ensure_running(&bin)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+
+        let client = HelperClient::connect(endpoint);
+        *state.helper.lock().unwrap() = Some(client.clone());
         let params = StartParams {
             uri, // active profile URI
             transport: settings.transport,
@@ -220,6 +224,21 @@ fn run_helper_subcommand(sub: &str) -> Result<(), String> {
         Ok(s) => Err(format!("leshiy-helper {sub} exited with {s}")),
         Err(e) => Err(format!("failed to elevate leshiy-helper {sub}: {e}")),
     }
+}
+
+/// Locate the bundled `leshiy-helper` sidecar next to the app executable (macOS/Windows
+/// on-demand model). Tauri places `externalBin` next to the main binary at runtime.
+#[cfg(not(target_os = "linux"))]
+fn helper_sidecar_path() -> Result<std::path::PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "cannot resolve the app directory".to_string())?;
+    #[cfg(target_os = "windows")]
+    let name = "leshiy-helper.exe";
+    #[cfg(not(target_os = "windows"))]
+    let name = "leshiy-helper";
+    Ok(dir.join(name))
 }
 
 /// Remove the privileged VPN helper (stops it if running, then uninstalls). Like install,
