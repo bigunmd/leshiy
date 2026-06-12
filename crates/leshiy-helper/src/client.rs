@@ -4,16 +4,25 @@
 //! One-shot calls (`start_vpn`/`stop`/`get_status`) open a fresh connection and read one
 //! reply line (matching the server's one-line-per-connection model). `subscribe` holds a
 //! connection open in a background task and forwards `Event`s over an mpsc channel.
+//!
+//! The API is cross-platform so the desktop app and `leshiy vpn` build everywhere; the
+//! Unix-socket transport (`request`/`subscribe`) is Unix-only and on non-Unix targets the
+//! calls return an "unsupported platform" error (Windows helper IPC is a follow-up).
 use crate::error::HelperError;
 use crate::proto::{Event, Request, Response, StartParams, Status};
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::sync::mpsc;
+#[cfg(unix)]
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
+};
 
 /// A handle to a running `leshiy-helper`'s control socket.
 #[derive(Clone)]
 pub struct HelperClient {
+    // Read only by the Unix transport; the non-Unix stubs ignore it.
+    #[cfg_attr(not(unix), allow(dead_code))]
     socket_path: PathBuf,
 }
 
@@ -61,6 +70,7 @@ impl HelperClient {
     /// Subscribe to state/stats events. Returns a receiver that yields `Event`s until the
     /// helper closes the stream or the caller drops the receiver. The first event is a
     /// snapshot of the current state/stats.
+    #[cfg(unix)]
     pub async fn subscribe(&self) -> Result<mpsc::Receiver<Event>, HelperError> {
         let mut stream = UnixStream::connect(&self.socket_path).await?;
         let mut payload = serde_json::to_string(&Request::Subscribe)
@@ -91,7 +101,14 @@ impl HelperClient {
         Ok(rx)
     }
 
+    /// Non-Unix stub: the helper transport (Unix domain sockets) is unavailable.
+    #[cfg(not(unix))]
+    pub async fn subscribe(&self) -> Result<mpsc::Receiver<Event>, HelperError> {
+        Err(unsupported_platform())
+    }
+
     /// Send one request, read one reply line, parse it.
+    #[cfg(unix)]
     async fn request(&self, req: &Request) -> Result<Response, HelperError> {
         let mut stream = UnixStream::connect(&self.socket_path).await?;
         let mut payload =
@@ -114,9 +131,20 @@ impl HelperClient {
         }
         serde_json::from_str(line.trim()).map_err(|e| HelperError::BadRequest(e.to_string()))
     }
+
+    /// Non-Unix stub: the helper transport (Unix domain sockets) is unavailable.
+    #[cfg(not(unix))]
+    async fn request(&self, _req: &Request) -> Result<Response, HelperError> {
+        Err(unsupported_platform())
+    }
 }
 
-#[cfg(test)]
+#[cfg(not(unix))]
+fn unsupported_platform() -> HelperError {
+    HelperError::Engine("the leshiy VPN helper is only available on Unix platforms".into())
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::runner::test_support::FakeRunner;
