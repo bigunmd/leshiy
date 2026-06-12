@@ -80,12 +80,15 @@ impl VpnRunner for EngineRunner {
             .await
             .map_err(|e| HelperError::Engine(format!("discover default gateway: {e}")))?;
 
+        tracing::info!(server = %parsed.server_addr, %server_ip, %orig_gateway, "dialing server");
         let tunnel: Arc<dyn Tunnel> = Arc::from(
             RealTransport
                 .dial(&params.uri, Self::pref(params.transport))
                 .await
-                .map_err(|_| HelperError::Engine("dial failed".into()))?,
+                // Surface the real dial error (don't swallow it) so failures are diagnosable.
+                .map_err(|e| HelperError::Engine(format!("dial failed: {e}")))?,
         );
+        tracing::info!("tunnel dialed; bringing up the TUN engine");
 
         let cfg = TunConfig {
             tun_name: params.tun_name.clone(),
