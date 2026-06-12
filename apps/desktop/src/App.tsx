@@ -23,15 +23,23 @@ export default function App() {
   const [installing, setInstalling] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
   const [helperInstalled, setHelperInstalled] = useState(false);
+  const [platform, setPlatform] = useState("");
   const close = (o: boolean) => { if (!o) setSheet(null); };
 
   useEffect(() => { void api.helperInstalled().then(setHelperInstalled).catch(() => setHelperInstalled(false)); }, []);
+  useEffect(() => { void api.platform().then(setPlatform).catch(() => setPlatform("")); }, []);
+
+  // macOS/Windows use the on-demand model: connect() itself triggers the OS elevation prompt,
+  // so there's no install dialog and no persistent helper to remove. Linux uses an installed
+  // daemon, gated by the install dialog.
+  const onDemand = platform !== "" && platform !== "linux";
 
   const startConnect = () => { void api.connect(); };
 
   const onToggle = () => {
     if (isActiveState(state)) { void api.disconnect(); return; }
-    if (needsHelper(settings.mode) && !helperInstalled) { setInstallError(null); setInstallOpen(true); return; }
+    // Linux only: if the daemon isn't installed yet, show the install dialog first.
+    if (needsHelper(settings.mode) && !onDemand && !helperInstalled) { setInstallError(null); setInstallOpen(true); return; }
     startConnect();
   };
 
@@ -71,7 +79,7 @@ export default function App() {
         profiles={profiles.profiles} activeId={profiles.activeId}
         onImport={profiles.importProfile} onSelect={profiles.select} onRemove={profiles.remove} onRename={profiles.rename} />
       <SettingsSheet open={sheet === "settings"} onOpenChange={close} settings={settings} onChange={update}
-        helperInstalled={helperInstalled} onRemoveHelper={onRemoveHelper}
+        helperInstalled={helperInstalled && !onDemand} onRemoveHelper={onRemoveHelper}
         onLanguageChange={(lng) => { setLanguage(lng); void update({ language: lng }); }} />
       <LanguageMenu open={sheet === "language"} onOpenChange={close}
         onSelect={(lng) => { setLanguage(lng); void update({ language: lng }); }} />

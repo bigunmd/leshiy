@@ -16,6 +16,7 @@ export const api = {
   helperInstalled: () => invoke<boolean>("helper_installed"),
   installHelper: () => invoke<void>("install_helper"),
   removeHelper: () => invoke<void>("remove_helper"),
+  platform: () => invoke<string>("platform"),
 };
 export const onState = (cb: (s: TunnelState) => void): Promise<UnlistenFn> =>
   listen<TunnelState>("tunnel:state", (e) => cb(e.payload));

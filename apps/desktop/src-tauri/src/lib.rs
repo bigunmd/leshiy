@@ -172,6 +172,13 @@ fn helper_installed() -> bool {
     is_installed()
 }
 
+/// Host OS, so the GUI adapts the VPN flow: Linux uses an installed daemon (+ install dialog);
+/// macOS/Windows use on-demand elevation during connect (no install step, no remove row).
+#[tauri::command]
+fn platform() -> String {
+    std::env::consts::OS.to_string()
+}
+
 /// Install the privileged VPN helper. Runs OS elevation to invoke the helper's own
 /// `install` subcommand — it does NOT call any install method on `HelperClient`. Idempotent.
 /// The actual elevation is integration/manual-tested (it pops a system auth prompt).
@@ -369,7 +376,8 @@ pub fn run() {
             set_settings,
             helper_installed,
             install_helper,
-            remove_helper
+            remove_helper,
+            platform
         ])
         .setup(|app| {
             let handle = app.handle().clone();
