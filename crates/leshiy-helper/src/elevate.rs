@@ -11,12 +11,12 @@ use std::path::Path;
 /// Ensure a helper is answering the default endpoint: if one already is, return; otherwise
 /// elevate + launch an ephemeral helper and poll the endpoint (up to ~5s) until it's ready.
 pub async fn ensure_running(bin: &Path) -> std::io::Result<()> {
-    if crate::is_installed() {
+    if helper_responds().await {
         return Ok(());
     }
     spawn_ephemeral_helper(bin)?;
     for _ in 0..100 {
-        if crate::is_installed() {
+        if helper_responds().await {
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -24,6 +24,17 @@ pub async fn ensure_running(bin: &Path) -> std::io::Result<()> {
     Err(std::io::Error::other(
         "the VPN helper did not start in time (elevation declined or failed)",
     ))
+}
+
+/// True only if a **live** helper answers the default endpoint. This is a real connect +
+/// request — robust against a stale Unix socket *file* left behind by a previous ephemeral
+/// helper (which a file-existence check would wrongly report as "running"). On Windows the
+/// pipe vanishes with the process, so this also works there.
+async fn helper_responds() -> bool {
+    crate::HelperClient::connect(crate::default_endpoint())
+        .get_status()
+        .await
+        .is_ok()
 }
 
 /// Launch `leshiy-helper run --ephemeral` elevated and backgrounded, so the GUI can connect to
