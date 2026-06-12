@@ -9,9 +9,9 @@ const COLOR: Record<TunnelState, string> = {
   Disconnected: "text-dim", Connecting: "text-wisp-bright", Connected: "text-wisp-bright", Reconnecting: "text-wisp-bright", Error: "text-warn",
 };
 
-interface Props { state: TunnelState; rates: Rates; mode: Mode; vpnDns: string; }
+interface Props { state: TunnelState; rates: Rates; mode: Mode; vpnDns: string; vpnMtu: number; }
 
-export function StatusReadout({ state, rates, mode, vpnDns }: Props) {
+export function StatusReadout({ state, rates, mode, vpnDns, vpnMtu }: Props) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const live = state === "Connected";
@@ -58,7 +58,7 @@ export function StatusReadout({ state, rates, mode, vpnDns }: Props) {
               <dt className="text-dim/70">{t("vpnStatus.ip")}</dt><dd className="text-right text-foreground">10.71.0.2</dd>
               <dt className="text-dim/70">{t("vpnStatus.dns")}</dt><dd className="text-right text-foreground">{vpnDns}</dd>
               <dt className="text-dim/70">{t("vpnStatus.route")}</dt><dd className="text-right text-foreground">{t("vpnStatus.fullTunnel")}</dd>
-              <dt className="text-dim/70">{t("vpnStatus.mtu")}</dt><dd className="text-right text-foreground">1400</dd>
+              <dt className="text-dim/70">{t("vpnStatus.mtu")}</dt><dd className="text-right text-foreground">{vpnMtu}</dd>
             </dl>
           )}
           <div className="font-mono text-[10px] uppercase tracking-widest text-dim/70">{t("total")} <ArrowDown className="inline h-2 w-2" /> {formatBytes(rates.total_down)} · <ArrowUp className="inline h-2 w-2" /> {formatBytes(rates.total_up)}</div>

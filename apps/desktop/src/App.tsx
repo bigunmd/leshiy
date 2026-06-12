@@ -71,7 +71,7 @@ export default function App() {
     <>
       <Atmosphere />
       <ConnectScreen
-        state={state} rates={rates} active={profiles.active} mode={settings.mode} vpnDns={settings.vpn_dns}
+        state={state} rates={rates} active={profiles.active} mode={settings.mode} vpnDns={settings.vpn_dns} vpnMtu={settings.vpn_mtu}
         onToggle={onToggle} onModeChange={onModeChange}
         onOpenConfigs={() => setSheet("config")} onOpenSettings={() => setSheet("settings")} onOpenLanguage={() => setSheet("language")}
       />

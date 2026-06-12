@@ -8,7 +8,7 @@ import { ConfigChip } from "./ConfigChip";
 import { TopBar } from "./TopBar";
 
 interface Props {
-  state: TunnelState; rates: Rates; active: Profile | null; mode: Mode; vpnDns: string;
+  state: TunnelState; rates: Rates; active: Profile | null; mode: Mode; vpnDns: string; vpnMtu: number;
   onToggle: () => void; onModeChange: (m: Mode) => void;
   onOpenConfigs: () => void; onOpenSettings: () => void; onOpenLanguage: () => void;
 }
@@ -21,7 +21,7 @@ export function ConnectScreen(p: Props) {
       <motion.div {...reveal(0.05)}><TopBar mode={p.mode} onModeChange={p.onModeChange} onLanguage={p.onOpenLanguage} onSettings={p.onOpenSettings} /></motion.div>
       <main className="flex flex-1 flex-col items-center justify-center gap-[26px]">
         <motion.div {...reveal(0.18)}><ConnectButton state={p.state} onToggle={p.onToggle} disabled={!p.active} /></motion.div>
-        <motion.div {...reveal(0.3)}><StatusReadout state={p.state} rates={p.rates} mode={p.mode} vpnDns={p.vpnDns} /></motion.div>
+        <motion.div {...reveal(0.3)}><StatusReadout state={p.state} rates={p.rates} mode={p.mode} vpnDns={p.vpnDns} vpnMtu={p.vpnMtu} /></motion.div>
         {idle && (
           <motion.div {...reveal(0.36)} className="font-mono text-[10px] uppercase tracking-widest text-dim/70">{t(idleHintKey(p.mode))}</motion.div>
         )}
