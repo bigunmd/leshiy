@@ -110,6 +110,42 @@ pub(crate) fn win_route_add_via_iface_args(dest_cidr: &str, iface: &str) -> Vec<
     ]
 }
 
+/// `netsh interface ipv4 delete route <dest_cidr> <iface> <gateway>` — remove a bypass route
+/// (split-tunnel teardown / dynamic domain-route removal). Mirrors the gateway add builder.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn win_route_del_via_gateway_args(
+    dest_cidr: &str,
+    gateway: &str,
+    orig_iface: &str,
+) -> Vec<String> {
+    vec![
+        "interface".into(),
+        "ipv4".into(),
+        "delete".into(),
+        "route".into(),
+        dest_cidr.to_string(),
+        orig_iface.to_string(),
+        gateway.to_string(),
+    ]
+}
+
+/// `netsh interface ipv4 delete route <dest_cidr> <iface>` — remove an include (via-tun)
+/// route. Mirrors the iface add builder. Used by the Phase B Include-mode route controller
+/// (and the host unit test); `allow(dead_code)` so the Windows-target build before Phase B
+/// doesn't warn.
+#[cfg(any(target_os = "windows", test))]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn win_route_del_via_iface_args(dest_cidr: &str, iface: &str) -> Vec<String> {
+    vec![
+        "interface".into(),
+        "ipv4".into(),
+        "delete".into(),
+        "route".into(),
+        dest_cidr.to_string(),
+        iface.to_string(),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // macOS `networksetup` / BSD `route` argument builders (pure; host-testable).
 // `mac_`-prefixed to coexist with the `win_*` builders in this shared module.
@@ -152,6 +188,18 @@ pub(crate) fn mac_route_add_via_iface_args(dest: &str, prefix: u8, iface: &str) 
         format!("{dest}/{prefix}"),
         "-interface".into(),
         iface.to_string(),
+    ]
+}
+
+/// `route -n delete -net <dest>/<prefix>` — remove a route by destination (BSD `route`
+/// matches on the destination net). Used for split-tunnel teardown / dynamic removal.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn mac_route_del_args(dest: &str, prefix: u8) -> Vec<String> {
+    vec![
+        "-n".into(),
+        "delete".into(),
+        "-net".into(),
+        format!("{dest}/{prefix}"),
     ]
 }
 
@@ -249,5 +297,44 @@ mod tests {
             args,
             vec!["-n", "add", "-net", "0.0.0.0/1", "-interface", "utun7"]
         );
+    }
+
+    #[test]
+    fn win_route_del_via_gateway_args_builds() {
+        let args = win_route_del_via_gateway_args("198.51.100.0/24", "192.168.1.1", "Ethernet");
+        assert_eq!(
+            args,
+            vec![
+                "interface",
+                "ipv4",
+                "delete",
+                "route",
+                "198.51.100.0/24",
+                "Ethernet",
+                "192.168.1.1"
+            ]
+        );
+    }
+
+    #[test]
+    fn win_route_del_via_iface_args_builds() {
+        let args = win_route_del_via_iface_args("10.0.0.0/8", "leshiy0");
+        assert_eq!(
+            args,
+            vec![
+                "interface",
+                "ipv4",
+                "delete",
+                "route",
+                "10.0.0.0/8",
+                "leshiy0"
+            ]
+        );
+    }
+
+    #[test]
+    fn mac_route_del_args_builds() {
+        let args = mac_route_del_args("198.51.100.0", 24);
+        assert_eq!(args, vec!["-n", "delete", "-net", "198.51.100.0/24"]);
     }
 }

@@ -10,10 +10,11 @@
 //! the `#[ignore]`d `macos_tun_up` smoke (Task 3.4).
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 use super::cmd;
-use super::{PrivilegedOps, TunSession};
-use crate::route_plan::RoutePlan;
+use super::{NullController, PrivilegedOps, TunSession};
+use crate::route_plan::{Cidr, RoutePlan};
 use net_route::{Handle, Route};
 use std::net::IpAddr;
+use std::sync::Arc;
 use tun::AbstractDevice; // brings `tun_name()` into scope for the utun device
 
 const NETWORKSETUP: &str = "/usr/sbin/networksetup";
@@ -29,6 +30,8 @@ impl PrivilegedOps for MacOsOps {
         mtu: u16,
         plan: &RoutePlan,
         dns: &[IpAddr],
+        force_dns: bool,
+        ipv6_killswitch: bool,
     ) -> std::io::Result<TunSession> {
         // MVP carries IPv4 through the tunnel; IPv6 is disabled below (fail-closed).
         let IpAddr::V4(tun4) = plan.tun_addr else {
@@ -67,40 +70,68 @@ impl PrivilegedOps for MacOsOps {
             let _ = cmd::run(ROUTE, &argv); // best-effort: an identical host route already existing is fine
         }
         for c in &plan.via_tun {
+            // IPv4-only this phase; skip an Include IPv6 CIDR rather than erroring.
+            let IpAddr::V4(_) = c.addr else {
+                continue;
+            };
             // Route by interface name (no ifindex FFI). Use BSD `route` for reliability.
             let args = cmd::mac_route_add_via_iface_args(&c.addr.to_string(), c.prefix, &iface);
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
             cmd::run(ROUTE, &argv)?;
         }
 
-        // 3. DNS: set the configured resolver(s) on every active network service, backing
-        //    up the prior servers so teardown can restore them.
+        // 2b. Split-tunnel bypass routes (Exclude): each CIDR escapes via the original
+        //     gateway (structurally like the server exception). Recorded for teardown — BSD
+        //     gateway routes persist after the utun drops, so they're deleted explicitly.
+        let mut bypass: Vec<Cidr> = Vec::new();
+        for b in &plan.bypass {
+            let IpAddr::V4(_) = b.dest.addr else {
+                continue;
+            };
+            let args = cmd::mac_route_add_via_gateway_args(
+                &b.dest.addr.to_string(),
+                b.dest.prefix,
+                &b.gateway.to_string(),
+            );
+            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+            let _ = cmd::run(ROUTE, &argv); // best-effort
+            bypass.push(b.dest.clone());
+        }
+
+        // 3. DNS: set the configured resolver(s) on every active network service, backing up
+        //    the prior servers so teardown can restore them. Skipped in Include mode.
         let services = list_network_services()?;
         let mut dns_backup: Vec<(String, Vec<String>)> = Vec::new();
-        for svc in &services {
-            let prior = current_dns(svc).unwrap_or_default();
-            dns_backup.push((svc.clone(), prior));
-            let args = cmd::mac_dns_set_args(svc, dns);
-            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-            let _ = cmd::run(NETWORKSETUP, &argv);
+        if force_dns {
+            for svc in &services {
+                let prior = current_dns(svc).unwrap_or_default();
+                dns_backup.push((svc.clone(), prior));
+                let args = cmd::mac_dns_set_args(svc, dns);
+                let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+                let _ = cmd::run(NETWORKSETUP, &argv);
+            }
         }
 
         // 4. IPv6 leak mitigation (fail-closed): turn IPv6 off on each service; restore to
-        //    automatic on drop. Full IPv6 tunnelling is out of scope for this phase.
+        //    automatic on drop. Skipped in Include mode. Full IPv6 tunnelling is out of scope.
         let mut v6_services: Vec<String> = Vec::new();
-        for svc in &services {
-            if cmd::run(NETWORKSETUP, &["-setv6off", svc]).is_ok() {
-                v6_services.push(svc.clone());
+        if ipv6_killswitch {
+            for svc in &services {
+                if cmd::run(NETWORKSETUP, &["-setv6off", svc]).is_ok() {
+                    v6_services.push(svc.clone());
+                }
             }
         }
 
         let guard = MacOsTeardown {
             dns_backup,
             v6_services,
+            bypass,
         };
         Ok(TunSession {
             device,
             guard: Box::new(guard),
+            controller: Arc::new(NullController),
         })
     }
 }
@@ -132,16 +163,23 @@ fn current_dns(service: &str) -> std::io::Result<Vec<String>> {
     }
 }
 
-/// Restores DNS + IPv6 on drop. The override/exception routes auto-clear when the utun
-/// device is dropped (the interface disappears), so they need no explicit teardown.
+/// Restores DNS + IPv6 on drop and removes any split-tunnel `bypass` routes. The
+/// override/exception/via-tun routes auto-clear when the utun device is dropped; the `bypass`
+/// gateway routes do not, so they're deleted explicitly here.
 struct MacOsTeardown {
     dns_backup: Vec<(String, Vec<String>)>,
     v6_services: Vec<String>,
+    bypass: Vec<Cidr>,
 }
 
 impl Drop for MacOsTeardown {
     fn drop(&mut self) {
         // Best-effort; teardown must never panic.
+        for c in &self.bypass {
+            let args = cmd::mac_route_del_args(&c.addr.to_string(), c.prefix);
+            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+            let _ = cmd::run(ROUTE, &argv);
+        }
         for (svc, prior) in &self.dns_backup {
             let prior_ips: Vec<IpAddr> = prior.iter().filter_map(|s| s.parse().ok()).collect();
             let args = cmd::mac_dns_set_args(svc, &prior_ips); // empty prior -> "empty" (clears)
@@ -178,7 +216,14 @@ mod tests {
         )
         .unwrap();
         let sess = MacOsOps
-            .start("utun9", 1400, &plan, &["1.1.1.1".parse().unwrap()])
+            .start(
+                "utun9",
+                1400,
+                &plan,
+                &["1.1.1.1".parse().unwrap()],
+                true,
+                true,
+            )
             .await
             .expect("utun should come up");
         drop(sess); // should restore DNS + IPv6 cleanly

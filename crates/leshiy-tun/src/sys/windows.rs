@@ -3,10 +3,11 @@
 //! disable, IPv6 leak mitigation, all restored on teardown. Compile-checked on Linux via
 //! cross-target `cargo check`; runtime-verified only on real Windows (Task 3.8 smoke).
 use super::cmd;
-use super::{PrivilegedOps, TunSession};
+use super::{NullController, PrivilegedOps, TunSession};
 use crate::route_plan::RoutePlan;
 use net_route::{Handle, Route};
 use std::net::IpAddr;
+use std::sync::Arc;
 use tun::AbstractDevice; // brings `tun_name()` into scope for the Wintun adapter
 
 const NETSH: &str = "netsh";
@@ -22,6 +23,8 @@ impl PrivilegedOps for WindowsOps {
         mtu: u16,
         plan: &RoutePlan,
         dns: &[IpAddr],
+        force_dns: bool,
+        ipv6_killswitch: bool,
     ) -> std::io::Result<TunSession> {
         // MVP carries IPv4 through the tunnel.
         let IpAddr::V4(tun4) = plan.tun_addr else {
@@ -52,68 +55,99 @@ impl PrivilegedOps for WindowsOps {
         //    default-override halves via the tun interface. Prefer net-route; fall back
         //    to netsh by interface name.
         let handle = Handle::new()?;
+        // The active physical interface name, used for the host-exception fallback, the
+        // split-tunnel bypass routes, and the IPv6 restore. Resolved once.
+        let orig_iface = original_iface_name();
         let exc = &plan.server_exception;
         let exc_route = Route::new(exc.dest.addr, exc.dest.prefix).with_gateway(exc.gateway);
         if handle.add(&exc_route).await.is_err() {
-            let orig_iface = original_iface_name().unwrap_or_default();
             let args = cmd::win_route_add_via_gateway_args(
                 &format!("{}/{}", exc.dest.addr, exc.dest.prefix),
                 &exc.gateway.to_string(),
-                &orig_iface,
+                &orig_iface.clone().unwrap_or_default(),
             );
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
             let _ = cmd::run(NETSH, &argv); // best-effort
         }
         for c in &plan.via_tun {
+            let IpAddr::V4(_) = c.addr else {
+                continue; // IPv4-only this phase; skip an Include IPv6 CIDR.
+            };
             let args =
                 cmd::win_route_add_via_iface_args(&format!("{}/{}", c.addr, c.prefix), &iface);
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
             cmd::run(NETSH, &argv)?;
         }
 
-        // 3. DNS on the tun interface (static), so queries ride the tunnel.
-        if let Some(first) = dns.first() {
-            let args = cmd::win_dns_set_static_args(&iface, &first.to_string());
+        // 2b. Split-tunnel bypass routes (Exclude): each CIDR escapes via the original gateway
+        //     out the original interface. Recorded (with gateway) for teardown — netsh routes
+        //     persist after the Wintun adapter drops, so they're deleted explicitly.
+        let orig_iface_str = orig_iface.clone().unwrap_or_default();
+        let mut bypass: Vec<(String, String)> = Vec::new();
+        for b in &plan.bypass {
+            let IpAddr::V4(_) = b.dest.addr else {
+                continue;
+            };
+            let dest = format!("{}/{}", b.dest.addr, b.dest.prefix);
+            let gw = b.gateway.to_string();
+            let args = cmd::win_route_add_via_gateway_args(&dest, &gw, &orig_iface_str);
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-            let _ = cmd::run(NETSH, &argv);
+            let _ = cmd::run(NETSH, &argv); // best-effort
+            bypass.push((dest, gw));
         }
 
-        // 4. DNS-leak hardening: disable smart multi-homed name resolution so Windows
-        //    can't fan a query out the physical NIC. Back up the prior registry value.
-        let smart_backup = read_smart_resolution_policy();
-        let _ = cmd::run(
-            REG,
-            &[
-                "add",
-                r"HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient",
-                "/v",
-                "DisableSmartNameResolution",
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "1",
-                "/f",
-            ],
-        );
-
-        // 5. IPv6 leak mitigation (fail-closed): disable IPv6 binding on the original
-        //    interface; restore on drop. (Full IPv6 tunnelling is out of scope.)
-        let orig_iface = original_iface_name();
-        if let Some(name) = &orig_iface {
+        // 3. DNS on the tun interface (static), so queries ride the tunnel. Plus DNS-leak
+        //    hardening (disable smart multi-homed resolution). Both skipped in Include mode.
+        let mut smart_backup = None;
+        if force_dns {
+            if let Some(first) = dns.first() {
+                let args = cmd::win_dns_set_static_args(&iface, &first.to_string());
+                let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+                let _ = cmd::run(NETSH, &argv);
+            }
+            // Disable smart multi-homed name resolution so Windows can't fan a query out the
+            // physical NIC. Back up the prior registry value.
+            smart_backup = read_smart_resolution_policy();
             let _ = cmd::run(
-                NETSH,
-                &["interface", "ipv6", "set", "interface", name, "disabled"],
+                REG,
+                &[
+                    "add",
+                    r"HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient",
+                    "/v",
+                    "DisableSmartNameResolution",
+                    "/t",
+                    "REG_DWORD",
+                    "/d",
+                    "1",
+                    "/f",
+                ],
             );
+        }
+
+        // 4. IPv6 leak mitigation (fail-closed): disable IPv6 binding on the original
+        //    interface; restore on drop. Skipped in Include mode. (Full IPv6 is out of scope.)
+        let mut v6_disabled_iface = None;
+        if ipv6_killswitch {
+            if let Some(name) = &orig_iface {
+                let _ = cmd::run(
+                    NETSH,
+                    &["interface", "ipv6", "set", "interface", name, "disabled"],
+                );
+                v6_disabled_iface = Some(name.clone());
+            }
         }
 
         let guard = WindowsTeardown {
             tun_iface: iface,
-            orig_iface,
+            orig_iface: orig_iface_str,
+            v6_disabled_iface,
             smart_backup,
+            bypass,
         };
         Ok(TunSession {
             device,
             guard: Box::new(guard),
+            controller: Arc::new(NullController),
         })
     }
 }
@@ -147,17 +181,30 @@ fn read_smart_resolution_policy() -> Option<String> {
     out.split_whitespace().last().map(str::to_string)
 }
 
-/// Restores DNS, the smart-resolution policy, and IPv6 on drop. Override/exception routes
-/// auto-clear when the Wintun adapter is dropped.
+/// Restores DNS, the smart-resolution policy, and IPv6 on drop, and removes any split-tunnel
+/// `bypass` routes. Override/exception/via-tun routes auto-clear when the Wintun adapter is
+/// dropped; the `bypass` gateway routes do not, so they're deleted explicitly here.
 struct WindowsTeardown {
     tun_iface: String,
-    orig_iface: Option<String>,
+    /// Physical interface name (empty if it couldn't be resolved) — needed to delete bypass
+    /// routes that were added out this interface.
+    orig_iface: String,
+    /// `Some(name)` only if we actually disabled IPv6 on that interface (Exclude mode).
+    v6_disabled_iface: Option<String>,
     smart_backup: Option<String>,
+    /// (dest_cidr, gateway) pairs for the bypass routes installed this session.
+    bypass: Vec<(String, String)>,
 }
 
 impl Drop for WindowsTeardown {
     fn drop(&mut self) {
         // Best-effort; teardown must never panic.
+        for (dest, gw) in &self.bypass {
+            let args = cmd::win_route_del_via_gateway_args(dest, gw, &self.orig_iface);
+            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+            let _ = cmd::run(NETSH, &argv);
+        }
+
         let args = cmd::win_dns_reset_dhcp_args(&self.tun_iface);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         let _ = cmd::run(NETSH, &argv);
@@ -195,7 +242,7 @@ impl Drop for WindowsTeardown {
             }
         }
 
-        if let Some(name) = &self.orig_iface {
+        if let Some(name) = &self.v6_disabled_iface {
             let _ = cmd::run(
                 NETSH,
                 &["interface", "ipv6", "set", "interface", name, "enabled"],
@@ -225,7 +272,14 @@ mod tests {
         )
         .unwrap();
         let sess = WindowsOps
-            .start("leshiy0", 1400, &plan, &["1.1.1.1".parse().unwrap()])
+            .start(
+                "leshiy0",
+                1400,
+                &plan,
+                &["1.1.1.1".parse().unwrap()],
+                true,
+                true,
+            )
             .await
             .expect("Wintun adapter should come up (wintun.dll present, elevated)");
         drop(sess); // should restore DNS + smart-resolution + IPv6 cleanly

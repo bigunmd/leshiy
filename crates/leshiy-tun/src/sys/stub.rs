@@ -14,6 +14,8 @@ impl PrivilegedOps for StubOps {
         _mtu: u16,
         _plan: &RoutePlan,
         _dns: &[IpAddr],
+        _force_dns: bool,
+        _ipv6_killswitch: bool,
     ) -> std::io::Result<TunSession> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,

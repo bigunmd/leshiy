@@ -26,6 +26,8 @@ pub struct TunConfig {
     pub orig_gateway: IpAddr,
     /// DNS resolver(s) forced while the tunnel is up (queries ride the tunnel).
     pub dns: Vec<IpAddr>,
+    /// Global split-tunnel ruleset. Empty (the default) = plain full tunnel.
+    pub split: leshiy_client::SplitTunnel,
 }
 
 impl Default for TunConfig {
@@ -37,7 +39,22 @@ impl Default for TunConfig {
             server_ip: "0.0.0.0".parse().unwrap(),
             orig_gateway: "0.0.0.0".parse().unwrap(),
             dns: vec!["1.1.1.1".parse().unwrap()],
+            split: leshiy_client::SplitTunnel::default(),
         }
+    }
+}
+
+impl TunConfig {
+    /// Force the system DNS through the tunnel? Only in Exclude mode (full-tunnel-ish); in
+    /// Include mode most traffic is direct, so the resolver is left untouched.
+    pub fn force_dns(&self) -> bool {
+        matches!(self.split.mode, leshiy_client::SplitMode::Exclude)
+    }
+
+    /// Apply the IPv6 fail-closed kill-switch? Same rationale as [`force_dns`](Self::force_dns):
+    /// in Include mode the un-tunneled majority (incl. IPv6) must stay reachable.
+    pub fn ipv6_killswitch(&self) -> bool {
+        matches!(self.split.mode, leshiy_client::SplitMode::Exclude)
     }
 }
 
@@ -66,10 +83,29 @@ impl TunEngine {
         cfg: TunConfig,
         counters: Arc<ByteCounters>,
     ) -> std::io::Result<()> {
-        let plan = RoutePlan::full_tunnel(cfg.server_ip, cfg.orig_gateway, cfg.tun_addr)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
-        let TunSession { device, guard } = PlatformOps
-            .start(&cfg.tun_name, cfg.mtu, &plan, &cfg.dns)
+        let static_cidrs: Vec<crate::route_plan::Cidr> =
+            cfg.split.cidrs.iter().copied().map(Into::into).collect();
+        let plan = RoutePlan::with_split(
+            cfg.split.mode,
+            &static_cidrs,
+            cfg.server_ip,
+            cfg.orig_gateway,
+            cfg.tun_addr,
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
+        let TunSession {
+            device,
+            guard,
+            controller: _, // used by the domain-resolver task in Phase B
+        } = PlatformOps
+            .start(
+                &cfg.tun_name,
+                cfg.mtu,
+                &plan,
+                &cfg.dns,
+                cfg.force_dns(),
+                cfg.ipv6_killswitch(),
+            )
             .await?;
         let mut ip_stack = netstack::build(device, cfg.mtu)?;
         tracing::info!(tun = %cfg.tun_name, mtu = cfg.mtu, server_ip = %cfg.server_ip, "tun engine running; reading packets from the device");
@@ -213,6 +249,34 @@ mod tests {
     #[test]
     fn default_mtu_is_1400() {
         assert_eq!(TunConfig::default().mtu, 1400);
+    }
+
+    #[test]
+    fn default_split_is_empty_exclude() {
+        let c = TunConfig::default();
+        assert!(c.split.is_empty());
+        assert_eq!(c.split.mode, leshiy_client::SplitMode::Exclude);
+    }
+
+    #[test]
+    fn exclude_mode_keeps_dns_and_ipv6_killswitch() {
+        let c = TunConfig::default(); // default mode is Exclude
+        assert!(c.force_dns());
+        assert!(c.ipv6_killswitch());
+    }
+
+    #[test]
+    fn include_mode_disables_dns_and_ipv6_killswitch() {
+        use leshiy_client::{SplitMode, SplitTunnel};
+        let c = TunConfig {
+            split: SplitTunnel {
+                mode: SplitMode::Include,
+                ..Default::default()
+            },
+            ..TunConfig::default()
+        };
+        assert!(!c.force_dns());
+        assert!(!c.ipv6_killswitch());
     }
 
     use async_trait::async_trait;
