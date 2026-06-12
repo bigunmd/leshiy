@@ -83,7 +83,7 @@ export default function App() {
         helperInstalled={helperInstalled && !onDemand} onRemoveHelper={onRemoveHelper}
         onOpenSplit={() => setSheet("split")}
         onLanguageChange={(lng) => { setLanguage(lng); void update({ language: lng }); }} />
-      <SplitTunnelSheet open={sheet === "split"} onOpenChange={close} value={settings.split_tunnel} onChange={update} />
+      <SplitTunnelSheet open={sheet === "split"} onOpenChange={close} value={settings.split_tunnel} subscriptions={settings.rule_subscriptions} onChange={update} />
       <LanguageMenu open={sheet === "language"} onOpenChange={close}
         onSelect={(lng) => { setLanguage(lng); void update({ language: lng }); }} />
       <InstallHelperDialog open={installOpen} onOpenChange={setInstallOpen}

@@ -6,6 +6,11 @@ export type Mode = "proxy" | "vpn";
 export type SplitMode = "exclude" | "include";
 export interface SplitCidr { addr: string; prefix: number; }
 export interface SplitTunnel { mode: SplitMode; cidrs: SplitCidr[]; domains: string[]; }
+export type SubFormat = "lines" | "hosts" | "domainlist";
+export interface Subscription { id: string; name: string; url: string; format: SubFormat; mode: SplitMode; enabled: boolean; }
+export interface SubRuleSet { cidrs: SplitCidr[]; domains: string[]; }
+export interface SubscriptionCacheEntry { rules: SubRuleSet; etag: string | null; last_modified: string | null; fetched_at: number; }
+export interface SubscriptionCache { entries: Record<string, SubscriptionCacheEntry>; }
 export interface Settings {
   language: string;
   kill_switch: boolean;
@@ -16,4 +21,5 @@ export interface Settings {
   socks_port: number;
   start_minimized: boolean;
   split_tunnel: SplitTunnel;
+  rule_subscriptions: Subscription[];
 }
