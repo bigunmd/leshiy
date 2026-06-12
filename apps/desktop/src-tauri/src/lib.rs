@@ -88,6 +88,13 @@ fn mode_uses_helper(mode: leshiy_client::Mode) -> bool {
     matches!(mode, leshiy_client::Mode::Vpn)
 }
 
+/// True while VPN mode is active — used to silence the always-on proxy-supervisor stats relay
+/// so it doesn't race the VPN helper forwarder on the `tunnel:stats`/`tunnel:state` events
+/// (the supervisor idles in VPN mode and would otherwise emit zeros, flickering the GUI).
+fn vpn_active(handle: &tauri::AppHandle) -> bool {
+    mode_uses_helper(handle.state::<AppState>().settings.lock().unwrap().mode)
+}
+
 /// Build the VPN `StartParams` from the active profile URI + the user's settings (including
 /// the global split-tunnel ruleset). Extracted from `connect` so it's unit-testable.
 fn build_start_params(uri: String, settings: &Settings) -> StartParams {
@@ -426,12 +433,13 @@ pub fn run() {
                         r = state_rx.changed() => {
                             if r.is_err() { break; }
                             let s = *state_rx.borrow();
-                            let _ = handle.emit("tunnel:state", s);
+                            // Quiet in VPN mode: the helper forwarder owns these events there.
+                            if !vpn_active(&handle) { let _ = handle.emit("tunnel:state", s); }
                         }
                         r = stats_rx.changed() => {
                             if r.is_err() { break; }
                             let s = *stats_rx.borrow();
-                            let _ = handle.emit("tunnel:stats", s);
+                            if !vpn_active(&handle) { let _ = handle.emit("tunnel:stats", s); }
                         }
                     }
                 }
@@ -462,12 +470,14 @@ mod tests {
     #[test]
     fn parse_split_text_handles_lines_and_hosts_and_errors() {
         use leshiy_client::SplitMode;
-        let lines = super::parse_split_text(SplitMode::Exclude, "lines", "10.0.0.0/8\nexample.com\n")
-            .unwrap();
+        let lines =
+            super::parse_split_text(SplitMode::Exclude, "lines", "10.0.0.0/8\nexample.com\n")
+                .unwrap();
         assert_eq!(lines.cidrs.len(), 1);
         assert_eq!(lines.domains, vec!["example.com"]);
         let hosts =
-            super::parse_split_text(SplitMode::Exclude, "hosts", "0.0.0.0 ads.example.com\n").unwrap();
+            super::parse_split_text(SplitMode::Exclude, "hosts", "0.0.0.0 ads.example.com\n")
+                .unwrap();
         assert_eq!(hosts.domains, vec!["ads.example.com"]);
         assert!(super::parse_split_text(SplitMode::Exclude, "lines", "10.0.0.0/40").is_err());
     }
