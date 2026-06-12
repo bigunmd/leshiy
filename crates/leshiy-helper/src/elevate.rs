@@ -57,10 +57,14 @@ mod macos {
         let uid = current_uid()?;
         let sock = crate::default_socket_path();
         // Background the root helper inside the elevated shell; osascript returns after launch.
+        // Output is discarded (NOT a predictable /tmp path — that would invite a symlink
+        // attack on a root-written file). Each interpolated value is POSIX single-quoted
+        // (`sh_squote`) so a path containing `'` can't break out / inject; the whole shell
+        // command is then escaped for the AppleScript double-quoted string layer.
         let inner = format!(
-            "'{}' run --ephemeral --socket '{}' --allow-uid {} >/tmp/leshiy-helper.log 2>&1 &",
-            bin.display(),
-            sock.display(),
+            "{} run --ephemeral --socket {} --allow-uid {} >/dev/null 2>&1 &",
+            sh_squote(&bin.display().to_string()),
+            sh_squote(&sock.display().to_string()),
             uid
         );
         let script = format!(
@@ -84,6 +88,12 @@ mod macos {
             .parse()
             .map_err(|_| std::io::Error::other("could not parse current uid from `id -u`"))
     }
+
+    /// POSIX single-quote a string for safe embedding in a /bin/sh command (the `do shell
+    /// script` body): wrap in `'…'`, replacing each `'` with `'\''`.
+    fn sh_squote(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -100,9 +110,11 @@ mod windows {
             sid
         );
         // -Verb RunAs triggers UAC; no -Wait so the helper keeps running in the background.
+        // The binary path is PowerShell single-quoted (ps_squote: `'` -> `''`) so a path with
+        // an apostrophe can't break out. `args` is constants + the SID (no quotes).
         let ps = format!(
-            "Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs",
-            bin.display(),
+            "Start-Process -FilePath {} -ArgumentList '{}' -Verb RunAs",
+            ps_squote(&bin.display().to_string()),
             args
         );
         let status = Command::new("powershell")
@@ -128,5 +140,10 @@ mod windows {
             .map(|f| f.trim().trim_matches('"').to_string())
             .filter(|sid| sid.starts_with("S-"))
             .ok_or_else(|| std::io::Error::other("could not parse current SID from `whoami /user`"))
+    }
+
+    /// PowerShell single-quote a string: wrap in `'…'`, replacing each `'` with `''`.
+    fn ps_squote(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "''"))
     }
 }
