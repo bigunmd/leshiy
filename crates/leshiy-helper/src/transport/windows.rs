@@ -7,7 +7,7 @@
 //! Authorization is OS-enforced by the DACL and additionally checked per-connection by
 //! comparing the client's token SID to `allow.sid` (mirroring the Unix `peer_uid` gate).
 use crate::runner::VpnRunner;
-use crate::server::{Auth, ServeMode, handle_stream, session_ended};
+use crate::server::{Auth, ServeMode, ephemeral_should_exit, spawn_conn};
 use crate::transport::Endpoint;
 use std::os::windows::io::AsRawHandle;
 use std::sync::Arc;
@@ -162,30 +162,31 @@ pub async fn serve(
         std::io::Error::other("missing --allow-sid: refusing to serve an unauthenticated pipe")
     })?;
 
+    let exit = Arc::new(tokio::sync::Notify::new());
+    let mut state_rx = runner.subscribe_state();
     let mut ever_connected = false;
     let mut first = true;
     loop {
+        // One pending pipe instance; spawn the handler on connect so a held-open Subscribe
+        // doesn't block concurrent Stop. exit/state-change arms let an ephemeral helper exit.
         let server = create_server(name, first, &sid)?;
         first = false;
-        server.connect().await?;
-
-        // Defense-in-depth: drop the connection silently if the client SID isn't allowed.
-        let authorized = matches!(client_sid(&server), Ok(got) if got.eq_ignore_ascii_case(&sid));
-        if !authorized {
-            drop(server); // closes the pipe instance; no reply (no oracle)
-            continue;
-        }
-
-        match mode {
-            ServeMode::Persistent => {
-                let runner = runner.clone();
-                tokio::spawn(async move {
-                    let _ = handle_stream(server, runner).await;
-                });
+        tokio::select! {
+            res = server.connect() => {
+                res?;
+                // Defense-in-depth: silently drop a connection whose client SID isn't allowed.
+                if matches!(client_sid(&server), Ok(got) if got.eq_ignore_ascii_case(&sid)) {
+                    spawn_conn(server, runner.clone(), mode, exit.clone());
+                } else {
+                    drop(server); // no reply (no oracle)
+                }
             }
-            ServeMode::Ephemeral => {
-                handle_stream(server, runner.clone()).await?;
-                if session_ended(runner.as_ref(), &mut ever_connected) {
+            _ = exit.notified(), if matches!(mode, ServeMode::Ephemeral) => return Ok(()),
+            changed = state_rx.changed() => {
+                if changed.is_err() {
+                    return Ok(());
+                }
+                if ephemeral_should_exit(&mut ever_connected, *state_rx.borrow(), mode) {
                     return Ok(());
                 }
             }
