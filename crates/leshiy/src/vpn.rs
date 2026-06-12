@@ -26,6 +26,8 @@ pub async fn run(
             mtu,
             tun_name: tun_name.to_string(),
             dns: dns.to_string(),
+            // The CLI is full-tunnel for now; split-tunnel is configured via the desktop app.
+            split_tunnel: Default::default(),
         })
         .await
         .context("start VPN via helper")?;

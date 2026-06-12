@@ -88,6 +88,19 @@ fn mode_uses_helper(mode: leshiy_client::Mode) -> bool {
     matches!(mode, leshiy_client::Mode::Vpn)
 }
 
+/// Build the VPN `StartParams` from the active profile URI + the user's settings (including
+/// the global split-tunnel ruleset). Extracted from `connect` so it's unit-testable.
+fn build_start_params(uri: String, settings: &Settings) -> StartParams {
+    StartParams {
+        uri,
+        transport: settings.transport,
+        mtu: settings.vpn_mtu,
+        tun_name: "leshiy0".into(),
+        dns: settings.vpn_dns.clone(),
+        split_tunnel: settings.split_tunnel.clone(),
+    }
+}
+
 #[tauri::command]
 async fn connect(state: State<'_, AppState>) -> Result<(), String> {
     let (uri, settings) = {
@@ -112,13 +125,7 @@ async fn connect(state: State<'_, AppState>) -> Result<(), String> {
 
         let client = HelperClient::connect(endpoint);
         *state.helper.lock().unwrap() = Some(client.clone());
-        let params = StartParams {
-            uri, // active profile URI
-            transport: settings.transport,
-            mtu: settings.vpn_mtu,
-            tun_name: "leshiy0".into(),
-            dns: settings.vpn_dns.clone(),
-        };
+        let params = build_start_params(uri, &settings);
         client.start_vpn(params).await.map_err(|e| e.to_string())?;
 
         // Relay the helper's state/stats onto the SAME webview events the proxy path uses,
@@ -426,5 +433,19 @@ mod tests {
         // VPN routes to the helper, Proxy to the in-process SOCKS supervisor.
         assert!(super::mode_uses_helper(Mode::Vpn));
         assert!(!super::mode_uses_helper(Mode::Proxy));
+    }
+
+    #[test]
+    fn start_params_carries_split_tunnel_and_vpn_settings() {
+        use leshiy_client::{Settings, SplitMode, SplitTunnel};
+        let s = Settings {
+            vpn_mtu: 1390,
+            split_tunnel: SplitTunnel::parse_lines(SplitMode::Include, "10.0.0.0/8\n").unwrap(),
+            ..Settings::default()
+        };
+        let params = super::build_start_params("leshiy://x".into(), &s);
+        assert_eq!(params.split_tunnel, s.split_tunnel);
+        assert_eq!(params.mtu, 1390);
+        assert_eq!(params.dns, s.vpn_dns);
     }
 }

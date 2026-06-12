@@ -15,6 +15,7 @@ fn params() -> StartParams {
         mtu: 1400,
         tun_name: "leshiy0".into(),
         dns: "1.1.1.1".into(),
+        split_tunnel: Default::default(),
     }
 }
 

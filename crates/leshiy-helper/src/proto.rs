@@ -19,6 +19,9 @@ pub struct StartParams {
     pub tun_name: String,
     /// DNS resolver forced through the tunnel.
     pub dns: String,
+    /// Global split-tunnel ruleset. Omitted by older callers → empty (plain full tunnel).
+    #[serde(default)]
+    pub split_tunnel: leshiy_client::SplitTunnel,
 }
 
 /// A request from the caller to the helper. One JSON object per line.
@@ -79,7 +82,29 @@ mod tests {
             mtu: 1400,
             tun_name: "leshiy0".into(),
             dns: "1.1.1.1".into(),
+            split_tunnel: leshiy_client::SplitTunnel::default(),
         }
+    }
+
+    #[test]
+    fn start_params_without_split_tunnel_defaults() {
+        // An old caller's StartVpn (no split_tunnel field) deserializes to an empty ruleset.
+        let line = r#"{"cmd":"start-vpn","uri":"leshiy://abc@1.2.3.4:443?sni=x&sid=0102030400000000","transport":"tcp","mtu":1400,"tun_name":"leshiy0","dns":"1.1.1.1"}"#;
+        let req: Request = serde_json::from_str(line).unwrap();
+        let Request::StartVpn(p) = req else {
+            panic!("expected StartVpn");
+        };
+        assert!(p.split_tunnel.is_empty());
+    }
+
+    #[test]
+    fn start_params_round_trips_with_split() {
+        use leshiy_client::{SplitMode, SplitTunnel};
+        let mut p = sample_params();
+        p.split_tunnel =
+            SplitTunnel::parse_lines(SplitMode::Include, "10.0.0.0/8\nexample.com\n").unwrap();
+        let back: StartParams = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
     }
 
     #[test]

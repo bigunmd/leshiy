@@ -125,6 +125,7 @@ impl VpnRunner for EngineRunner {
                     .parse()
                     .map_err(|_| HelperError::Engine("invalid dns address".into()))?,
             ],
+            split: params.split_tunnel.clone(),
             ..TunConfig::default()
         };
 
@@ -231,6 +232,7 @@ mod tests {
             mtu: 1400,
             tun_name: "leshiy0".into(),
             dns: "1.1.1.1".into(),
+            split_tunnel: Default::default(),
         }
     }
 

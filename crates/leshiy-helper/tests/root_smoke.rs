@@ -48,6 +48,7 @@ async fn helper_brings_up_real_tun() {
             mtu: 1400,
             tun_name: "leshiy-smoke0".into(),
             dns: "1.1.1.1".into(),
+            split_tunnel: Default::default(),
         })
         .await
         .expect("start_vpn");
