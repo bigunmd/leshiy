@@ -3,11 +3,11 @@
 //! disable, IPv6 leak mitigation, all restored on teardown. Compile-checked on Linux via
 //! cross-target `cargo check`; runtime-verified only on real Windows (Task 3.8 smoke).
 use super::cmd;
-use super::{NullController, PrivilegedOps, TunSession};
-use crate::route_plan::RoutePlan;
+use super::{PrivilegedOps, RouteController, TunSession};
+use crate::route_plan::{Cidr, RoutePlan};
 use net_route::{Handle, Route};
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tun::AbstractDevice; // brings `tun_name()` into scope for the Wintun adapter
 
 const NETSH: &str = "netsh";
@@ -80,20 +80,22 @@ impl PrivilegedOps for WindowsOps {
         }
 
         // 2b. Split-tunnel bypass routes (Exclude): each CIDR escapes via the original gateway
-        //     out the original interface. Recorded (with gateway) for teardown — netsh routes
-        //     persist after the Wintun adapter drops, so they're deleted explicitly.
+        //     out the original interface. Tracked in `installed_bypass` (shared with the
+        //     controller + teardown) — netsh routes persist after the Wintun adapter drops, so
+        //     they're deleted explicitly. All bypass routes share the original gateway.
         let orig_iface_str = orig_iface.clone().unwrap_or_default();
-        let mut bypass: Vec<(String, String)> = Vec::new();
+        let gateway = plan.server_exception.gateway.to_string();
+        let installed_bypass: Arc<Mutex<Vec<Cidr>>> = Arc::new(Mutex::new(Vec::new()));
         for b in &plan.bypass {
             let IpAddr::V4(_) = b.dest.addr else {
                 continue;
             };
             let dest = format!("{}/{}", b.dest.addr, b.dest.prefix);
-            let gw = b.gateway.to_string();
-            let args = cmd::win_route_add_via_gateway_args(&dest, &gw, &orig_iface_str);
+            let args =
+                cmd::win_route_add_via_gateway_args(&dest, &b.gateway.to_string(), &orig_iface_str);
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
             let _ = cmd::run(NETSH, &argv); // best-effort
-            bypass.push((dest, gw));
+            installed_bypass.lock().unwrap().push(b.dest.clone());
         }
 
         // 3. DNS on the tun interface (static), so queries ride the tunnel. Plus DNS-leak
@@ -137,18 +139,74 @@ impl PrivilegedOps for WindowsOps {
             }
         }
 
+        let controller = Arc::new(WindowsController {
+            tun_iface: iface.clone(),
+            orig_iface: orig_iface_str.clone(),
+            gateway: gateway.clone(),
+            installed_bypass: installed_bypass.clone(),
+        });
         let guard = WindowsTeardown {
             tun_iface: iface,
             orig_iface: orig_iface_str,
+            gateway,
             v6_disabled_iface,
             smart_backup,
-            bypass,
+            installed_bypass,
         };
         Ok(TunSession {
             device,
             guard: Box::new(guard),
-            controller: Arc::new(NullController),
+            controller,
         })
+    }
+}
+
+/// Live runtime route control for the Windows session via `netsh`. Bypass (Exclude) additions
+/// are tracked in `installed_bypass` so teardown can remove them on abort; via_tun (Include)
+/// routes auto-clear on Wintun drop and aren't tracked.
+struct WindowsController {
+    tun_iface: String,
+    orig_iface: String,
+    gateway: String,
+    installed_bypass: Arc<Mutex<Vec<Cidr>>>,
+}
+
+#[async_trait::async_trait]
+impl RouteController for WindowsController {
+    async fn add_bypass(&self, c: &Cidr) -> std::io::Result<()> {
+        let IpAddr::V4(_) = c.addr else {
+            return Ok(());
+        };
+        let dest = format!("{}/{}", c.addr, c.prefix);
+        let args = cmd::win_route_add_via_gateway_args(&dest, &self.gateway, &self.orig_iface);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        cmd::run(NETSH, &argv)?;
+        self.installed_bypass.lock().unwrap().push(c.clone());
+        Ok(())
+    }
+    async fn remove_bypass(&self, c: &Cidr) -> std::io::Result<()> {
+        let dest = format!("{}/{}", c.addr, c.prefix);
+        let args = cmd::win_route_del_via_gateway_args(&dest, &self.gateway, &self.orig_iface);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let _ = cmd::run(NETSH, &argv);
+        self.installed_bypass.lock().unwrap().retain(|x| x != c);
+        Ok(())
+    }
+    async fn add_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
+        let IpAddr::V4(_) = c.addr else {
+            return Ok(());
+        };
+        let dest = format!("{}/{}", c.addr, c.prefix);
+        let args = cmd::win_route_add_via_iface_args(&dest, &self.tun_iface);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        cmd::run(NETSH, &argv)
+    }
+    async fn remove_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
+        let dest = format!("{}/{}", c.addr, c.prefix);
+        let args = cmd::win_route_del_via_iface_args(&dest, &self.tun_iface);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let _ = cmd::run(NETSH, &argv);
+        Ok(())
     }
 }
 
@@ -189,18 +247,21 @@ struct WindowsTeardown {
     /// Physical interface name (empty if it couldn't be resolved) — needed to delete bypass
     /// routes that were added out this interface.
     orig_iface: String,
+    /// Original gateway, shared by all bypass routes.
+    gateway: String,
     /// `Some(name)` only if we actually disabled IPv6 on that interface (Exclude mode).
     v6_disabled_iface: Option<String>,
     smart_backup: Option<String>,
-    /// (dest_cidr, gateway) pairs for the bypass routes installed this session.
-    bypass: Vec<(String, String)>,
+    /// All bypass routes still installed (static + resolver-added) — removed on teardown.
+    installed_bypass: Arc<Mutex<Vec<Cidr>>>,
 }
 
 impl Drop for WindowsTeardown {
     fn drop(&mut self) {
         // Best-effort; teardown must never panic.
-        for (dest, gw) in &self.bypass {
-            let args = cmd::win_route_del_via_gateway_args(dest, gw, &self.orig_iface);
+        for c in self.installed_bypass.lock().unwrap().iter() {
+            let dest = format!("{}/{}", c.addr, c.prefix);
+            let args = cmd::win_route_del_via_gateway_args(&dest, &self.gateway, &self.orig_iface);
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
             let _ = cmd::run(NETSH, &argv);
         }

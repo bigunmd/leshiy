@@ -130,11 +130,8 @@ pub(crate) fn win_route_del_via_gateway_args(
 }
 
 /// `netsh interface ipv4 delete route <dest_cidr> <iface>` — remove an include (via-tun)
-/// route. Mirrors the iface add builder. Used by the Phase B Include-mode route controller
-/// (and the host unit test); `allow(dead_code)` so the Windows-target build before Phase B
-/// doesn't warn.
+/// route. Mirrors the iface add builder; used by the Include-mode route controller.
 #[cfg(any(target_os = "windows", test))]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn win_route_del_via_iface_args(dest_cidr: &str, iface: &str) -> Vec<String> {
     vec![
         "interface".into(),

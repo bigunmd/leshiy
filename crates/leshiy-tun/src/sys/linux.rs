@@ -1,10 +1,10 @@
 //! Linux privileged ops: TUN device (rust-tun), routes (net-route), DNS (resolv.conf),
 //! and an IPv6 disable kill-switch — all restored on teardown.
-use super::{NullController, PrivilegedOps, TunSession};
+use super::{PrivilegedOps, RouteController, TunSession};
 use crate::route_plan::{Cidr, RoutePlan};
 use net_route::{Handle, Route};
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub struct LinuxOps;
 
@@ -68,9 +68,10 @@ impl PrivilegedOps for LinuxOps {
         }
 
         // 2b. Split-tunnel bypass routes (Exclude mode): each listed CIDR escapes the tunnel
-        //     via the original gateway. Recorded for teardown — these point at the gateway, so
-        //     (unlike via_tun) they don't auto-clear when the device drops.
-        let mut bypass = Vec::new();
+        //     via the original gateway. Tracked in `installed_bypass` (shared with the
+        //     controller + teardown) because — unlike via_tun routes — they point at the
+        //     gateway and don't auto-clear when the device drops.
+        let installed_bypass: Arc<Mutex<Vec<Cidr>>> = Arc::new(Mutex::new(Vec::new()));
         for b in &plan.bypass {
             let IpAddr::V4(_) = b.dest.addr else {
                 tracing::warn!(cidr = %b.dest, "skipping IPv6 split-tunnel bypass (IPv6 disabled this phase)");
@@ -79,7 +80,7 @@ impl PrivilegedOps for LinuxOps {
             let _ = handle
                 .add(&Route::new(b.dest.addr, b.dest.prefix).with_gateway(b.gateway))
                 .await; // best-effort
-            bypass.push(b.dest.clone());
+            installed_bypass.lock().unwrap().push(b.dest.clone());
         }
 
         // 3. DNS: force the configured resolver(s) so queries ride the tunnel. Skipped in
@@ -105,17 +106,77 @@ impl PrivilegedOps for LinuxOps {
             (None, None)
         };
 
+        let controller = Arc::new(LinuxController {
+            handle: Handle::new()?,
+            gateway: plan.server_exception.gateway,
+            ifindex,
+            installed_bypass: installed_bypass.clone(),
+        });
         let guard = LinuxTeardown {
             resolv_backup,
             ipv6_all_backup,
             ipv6_default_backup,
-            bypass,
+            installed_bypass,
         };
         Ok(TunSession {
             device,
             guard: Box::new(guard),
-            controller: Arc::new(NullController),
+            controller,
         })
+    }
+}
+
+/// Live runtime route control for the Linux session: `net_route` add/delete for the resolved
+/// domain routes. Bypass (Exclude) additions are tracked in `installed_bypass` so the teardown
+/// guard can remove them even on a hard abort; via_tun (Include) routes auto-clear on device
+/// drop and aren't tracked.
+struct LinuxController {
+    handle: Handle,
+    gateway: IpAddr,
+    ifindex: u32,
+    installed_bypass: Arc<Mutex<Vec<Cidr>>>,
+}
+
+#[async_trait::async_trait]
+impl RouteController for LinuxController {
+    async fn add_bypass(&self, c: &Cidr) -> std::io::Result<()> {
+        let IpAddr::V4(_) = c.addr else {
+            return Ok(()); // IPv4-only this phase
+        };
+        self.handle
+            .add(&Route::new(c.addr, c.prefix).with_gateway(self.gateway))
+            .await?;
+        self.installed_bypass.lock().unwrap().push(c.clone());
+        Ok(())
+    }
+    async fn remove_bypass(&self, c: &Cidr) -> std::io::Result<()> {
+        let IpAddr::V4(_) = c.addr else {
+            return Ok(());
+        };
+        let _ = self
+            .handle
+            .delete(&Route::new(c.addr, c.prefix).with_gateway(self.gateway))
+            .await;
+        self.installed_bypass.lock().unwrap().retain(|x| x != c);
+        Ok(())
+    }
+    async fn add_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
+        let IpAddr::V4(_) = c.addr else {
+            return Ok(());
+        };
+        self.handle
+            .add(&Route::new(c.addr, c.prefix).with_ifindex(self.ifindex))
+            .await
+    }
+    async fn remove_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
+        let IpAddr::V4(_) = c.addr else {
+            return Ok(());
+        };
+        let _ = self
+            .handle
+            .delete(&Route::new(c.addr, c.prefix).with_ifindex(self.ifindex))
+            .await;
+        Ok(())
     }
 }
 
@@ -126,14 +187,15 @@ struct LinuxTeardown {
     resolv_backup: Option<Vec<u8>>,
     ipv6_all_backup: Option<String>,
     ipv6_default_backup: Option<String>,
-    bypass: Vec<Cidr>,
+    /// All bypass routes still installed (static + resolver-added) — removed on teardown.
+    installed_bypass: Arc<Mutex<Vec<Cidr>>>,
 }
 
 impl Drop for LinuxTeardown {
     fn drop(&mut self) {
         // Best-effort; teardown must never panic. `Drop` is synchronous and `net_route`'s
         // delete is async, so remove bypass routes via iproute2 (sync).
-        for c in &self.bypass {
+        for c in self.installed_bypass.lock().unwrap().iter() {
             let _ = std::process::Command::new(IP)
                 .args(["route", "del", &c.to_string()])
                 .output();
@@ -199,5 +261,43 @@ mod tests {
             .expect("tun + split routes should come up");
         // `ip route` should now show 198.51.100.0/24 via 127.0.0.1 and 0/1+128/1 via leshiy9.
         drop(sess); // restores DNS/IPv6 and deletes the bypass route
+    }
+
+    // Exercises the live RouteController used for resolved domain rules: add a dynamic bypass
+    // route, then remove it. Needs a real default gateway so `net_route add ... via gw`
+    // succeeds. `#[ignore]`d; runtime-only.
+    #[tokio::test]
+    #[ignore = "requires root + CAP_NET_ADMIN + a real default gateway; run: sudo -E cargo test -p leshiy-tun -- --ignored linux_controller_bypass_add_remove"]
+    async fn linux_controller_bypass_add_remove() {
+        let gw = crate::discover::default_gateway_v4()
+            .await
+            .expect("a default gateway");
+        let plan = RoutePlan::full_tunnel(
+            "203.0.113.7".parse().unwrap(),
+            gw,
+            "10.71.0.2".parse().unwrap(),
+        )
+        .unwrap();
+        let sess = LinuxOps
+            .start(
+                "leshiy8",
+                1400,
+                &plan,
+                &["1.1.1.1".parse().unwrap()],
+                true,
+                true,
+            )
+            .await
+            .expect("tun up");
+        let c = Cidr {
+            addr: "198.51.100.0".parse().unwrap(),
+            prefix: 24,
+        };
+        sess.controller.add_bypass(&c).await.expect("add bypass");
+        sess.controller
+            .remove_bypass(&c)
+            .await
+            .expect("remove bypass");
+        drop(sess); // teardown restores DNS/IPv6 and removes any remaining bypass routes
     }
 }

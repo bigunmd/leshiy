@@ -69,6 +69,16 @@ pub(crate) fn target_of(dst: SocketAddr) -> String {
 /// Idle timeout for a UDP association (no teardown signal on UDP).
 const UDP_IDLE: Duration = Duration::from_secs(60);
 
+/// Aborts the wrapped task on drop. Ties the detached domain-resolver task's lifetime to the
+/// engine future, so it stops the instant the session ends or is aborted (rather than
+/// continuing to mutate routes after disconnect).
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub struct TunEngine;
 
 impl TunEngine {
@@ -96,7 +106,7 @@ impl TunEngine {
         let TunSession {
             device,
             guard,
-            controller: _, // used by the domain-resolver task in Phase B
+            controller,
         } = PlatformOps
             .start(
                 &cfg.tun_name,
@@ -109,9 +119,24 @@ impl TunEngine {
             .await?;
         let mut ip_stack = netstack::build(device, cfg.mtu)?;
         tracing::info!(tun = %cfg.tun_name, mtu = cfg.mtu, server_ip = %cfg.server_ip, "tun engine running; reading packets from the device");
+
+        // Domain rules (if any) are resolved + refreshed by a background task. `AbortOnDrop`
+        // (declared after `guard`, so dropped before it) stops the task before `guard`'s
+        // teardown removes the routes it installed — clean on both normal exit and abort.
+        let _resolver = (!cfg.split.domains.is_empty()).then(move || {
+            AbortOnDrop(tokio::spawn(crate::resolver::run_resolver(
+                controller,
+                cfg.split.mode,
+                cfg.split.domains.clone(),
+                crate::resolver::ResolverState::new(),
+                crate::resolver::REFRESH,
+            )))
+        });
+
         let result = accept_loop(&mut ip_stack, tunnel, counters).await;
         tracing::info!(?result, "tun engine accept loop exited");
-        drop(guard); // restore DNS + IPv6
+        drop(_resolver); // stop the resolver BEFORE teardown removes its routes
+        drop(guard); // restore DNS + IPv6, remove bypass routes
         result
     }
 }

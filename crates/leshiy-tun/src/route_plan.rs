@@ -15,7 +15,7 @@ pub enum RoutePlanError {
 }
 
 /// A CIDR route to send through the TUN.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Cidr {
     pub addr: IpAddr,
     pub prefix: u8,

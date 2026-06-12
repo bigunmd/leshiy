@@ -10,11 +10,11 @@
 //! the `#[ignore]`d `macos_tun_up` smoke (Task 3.4).
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 use super::cmd;
-use super::{NullController, PrivilegedOps, TunSession};
+use super::{PrivilegedOps, RouteController, TunSession};
 use crate::route_plan::{Cidr, RoutePlan};
 use net_route::{Handle, Route};
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tun::AbstractDevice; // brings `tun_name()` into scope for the utun device
 
 const NETWORKSETUP: &str = "/usr/sbin/networksetup";
@@ -81,9 +81,10 @@ impl PrivilegedOps for MacOsOps {
         }
 
         // 2b. Split-tunnel bypass routes (Exclude): each CIDR escapes via the original
-        //     gateway (structurally like the server exception). Recorded for teardown — BSD
-        //     gateway routes persist after the utun drops, so they're deleted explicitly.
-        let mut bypass: Vec<Cidr> = Vec::new();
+        //     gateway (structurally like the server exception). Tracked in `installed_bypass`
+        //     (shared with the controller + teardown) — BSD gateway routes persist after the
+        //     utun drops, so they're deleted explicitly.
+        let installed_bypass: Arc<Mutex<Vec<Cidr>>> = Arc::new(Mutex::new(Vec::new()));
         for b in &plan.bypass {
             let IpAddr::V4(_) = b.dest.addr else {
                 continue;
@@ -95,7 +96,7 @@ impl PrivilegedOps for MacOsOps {
             );
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
             let _ = cmd::run(ROUTE, &argv); // best-effort
-            bypass.push(b.dest.clone());
+            installed_bypass.lock().unwrap().push(b.dest.clone());
         }
 
         // 3. DNS: set the configured resolver(s) on every active network service, backing up
@@ -123,16 +124,66 @@ impl PrivilegedOps for MacOsOps {
             }
         }
 
+        let controller = Arc::new(MacOsController {
+            iface: iface.clone(),
+            gateway: plan.server_exception.gateway.to_string(),
+            installed_bypass: installed_bypass.clone(),
+        });
         let guard = MacOsTeardown {
             dns_backup,
             v6_services,
-            bypass,
+            installed_bypass,
         };
         Ok(TunSession {
             device,
             guard: Box::new(guard),
-            controller: Arc::new(NullController),
+            controller,
         })
+    }
+}
+
+/// Live runtime route control for the macOS session via BSD `route`. Bypass (Exclude)
+/// additions are tracked in `installed_bypass` so teardown can remove them on abort; via_tun
+/// (Include) routes auto-clear on utun drop and aren't tracked.
+struct MacOsController {
+    iface: String,
+    gateway: String,
+    installed_bypass: Arc<Mutex<Vec<Cidr>>>,
+}
+
+#[async_trait::async_trait]
+impl RouteController for MacOsController {
+    async fn add_bypass(&self, c: &Cidr) -> std::io::Result<()> {
+        let IpAddr::V4(_) = c.addr else {
+            return Ok(());
+        };
+        let args =
+            cmd::mac_route_add_via_gateway_args(&c.addr.to_string(), c.prefix, &self.gateway);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        cmd::run(ROUTE, &argv)?;
+        self.installed_bypass.lock().unwrap().push(c.clone());
+        Ok(())
+    }
+    async fn remove_bypass(&self, c: &Cidr) -> std::io::Result<()> {
+        let args = cmd::mac_route_del_args(&c.addr.to_string(), c.prefix);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let _ = cmd::run(ROUTE, &argv);
+        self.installed_bypass.lock().unwrap().retain(|x| x != c);
+        Ok(())
+    }
+    async fn add_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
+        let IpAddr::V4(_) = c.addr else {
+            return Ok(());
+        };
+        let args = cmd::mac_route_add_via_iface_args(&c.addr.to_string(), c.prefix, &self.iface);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        cmd::run(ROUTE, &argv)
+    }
+    async fn remove_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
+        let args = cmd::mac_route_del_args(&c.addr.to_string(), c.prefix);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let _ = cmd::run(ROUTE, &argv);
+        Ok(())
     }
 }
 
@@ -169,13 +220,14 @@ fn current_dns(service: &str) -> std::io::Result<Vec<String>> {
 struct MacOsTeardown {
     dns_backup: Vec<(String, Vec<String>)>,
     v6_services: Vec<String>,
-    bypass: Vec<Cidr>,
+    /// All bypass routes still installed (static + resolver-added) — removed on teardown.
+    installed_bypass: Arc<Mutex<Vec<Cidr>>>,
 }
 
 impl Drop for MacOsTeardown {
     fn drop(&mut self) {
         // Best-effort; teardown must never panic.
-        for c in &self.bypass {
+        for c in self.installed_bypass.lock().unwrap().iter() {
             let args = cmd::mac_route_del_args(&c.addr.to_string(), c.prefix);
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
             let _ = cmd::run(ROUTE, &argv);

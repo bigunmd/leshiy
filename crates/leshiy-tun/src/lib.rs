@@ -11,6 +11,7 @@
 pub mod discover;
 pub mod engine;
 pub mod netstack;
+pub mod resolver;
 pub mod route_plan;
 pub mod sys;
 
