@@ -18,7 +18,7 @@ pub async fn run(
         crate::cli::Transport::Tcp => TransportPref::Tcp,
     };
 
-    let client = HelperClient::connect(socket);
+    let client = HelperClient::connect_path(socket);
     client
         .start_vpn(StartParams {
             uri: uri.to_string(),

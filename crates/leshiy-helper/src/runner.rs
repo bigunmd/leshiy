@@ -131,8 +131,10 @@ impl VpnRunner for EngineRunner {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod test_support {
+/// Privilege-free `VpnRunner` fake used by unit tests AND the `duplex_dispatch` integration
+/// test (which can only see the crate's public API). `#[doc(hidden)]` — not a stable surface.
+#[doc(hidden)]
+pub mod test_support {
     use super::*;
 
     /// A privilege-free runner used by the runner + control-server tests.
@@ -156,6 +158,12 @@ pub(crate) mod test_support {
                 stats_tx,
                 started: Arc::new(Mutex::new(Vec::new())),
             }
+        }
+    }
+
+    impl Default for FakeRunner {
+        fn default() -> Self {
+            Self::new()
         }
     }
 
