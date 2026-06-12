@@ -29,10 +29,10 @@ export default function App() {
   useEffect(() => { void api.helperInstalled().then(setHelperInstalled).catch(() => setHelperInstalled(false)); }, []);
   useEffect(() => { void api.platform().then(setPlatform).catch(() => setPlatform("")); }, []);
 
-  // macOS/Windows use the on-demand model: connect() itself triggers the OS elevation prompt,
-  // so there's no install dialog and no persistent helper to remove. Linux uses an installed
-  // daemon, gated by the install dialog.
-  const onDemand = platform !== "" && platform !== "linux";
+  // All desktop platforms use the on-demand model: connect() itself triggers the OS elevation
+  // prompt (pkexec / osascript / UAC), so there's no install dialog and no persistent helper
+  // to remove. (`platform === ""` only before it loads.)
+  const onDemand = platform !== "";
 
   const startConnect = () => { void api.connect(); };
 

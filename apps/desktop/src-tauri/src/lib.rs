@@ -103,16 +103,12 @@ async fn connect(state: State<'_, AppState>) -> Result<(), String> {
     if mode_uses_helper(settings.mode) {
         let endpoint = leshiy_helper::default_endpoint();
 
-        // On-demand model on macOS/Windows: if no helper is answering, launch an elevated
-        // ephemeral one (UAC / osascript admin) and wait for the endpoint. Linux uses the
-        // installed daemon (systemd/setcap) — no spawn here.
-        #[cfg(not(target_os = "linux"))]
-        {
-            let bin = helper_sidecar_path()?;
-            leshiy_helper::elevate::ensure_running(&bin)
-                .await
-                .map_err(|e| e.to_string())?;
-        }
+        // On-demand model on all desktop platforms: if no helper is answering, launch an
+        // elevated ephemeral one (pkexec / osascript / UAC) and wait for the endpoint.
+        let bin = helper_sidecar_path()?;
+        leshiy_helper::elevate::ensure_running(&bin)
+            .await
+            .map_err(|e| e.to_string())?;
 
         let client = HelperClient::connect(endpoint);
         *state.helper.lock().unwrap() = Some(client.clone());
@@ -200,6 +196,10 @@ fn run_helper_subcommand(sub: &str) -> Result<(), String> {
     let status = std::process::Command::new("pkexec")
         .arg(&bin)
         .arg(sub)
+        // AppImage leaks LD_LIBRARY_PATH to its bundled libs; pkexec must use system libs
+        // (else libpolkit/glib fail with an undefined symbol). See elevate::linux.
+        .env_remove("LD_LIBRARY_PATH")
+        .env_remove("LD_PRELOAD")
         .status();
 
     #[cfg(target_os = "macos")]
@@ -233,9 +233,8 @@ fn run_helper_subcommand(sub: &str) -> Result<(), String> {
     }
 }
 
-/// Locate the bundled `leshiy-helper` sidecar next to the app executable (macOS/Windows
-/// on-demand model). Tauri places `externalBin` next to the main binary at runtime.
-#[cfg(not(target_os = "linux"))]
+/// Locate the bundled `leshiy-helper` sidecar next to the app executable (on-demand model).
+/// Tauri places `externalBin` next to the main binary at runtime.
 fn helper_sidecar_path() -> Result<std::path::PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let dir = exe
