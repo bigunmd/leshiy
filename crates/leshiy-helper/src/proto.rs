@@ -19,9 +19,10 @@ pub struct StartParams {
     pub tun_name: String,
     /// DNS resolver forced through the tunnel.
     pub dns: String,
-    /// Global split-tunnel ruleset. Omitted by older callers → empty (plain full tunnel).
+    /// Two-directional split-tunnel plan (manual rules + subscriptions, merged by the caller).
+    /// Omitted by older callers → empty (plain full tunnel).
     #[serde(default)]
-    pub split_tunnel: leshiy_client::SplitTunnel,
+    pub split_tunnel: leshiy_client::SplitPlan,
 }
 
 /// A request from the caller to the helper. One JSON object per line.
@@ -82,7 +83,7 @@ mod tests {
             mtu: 1400,
             tun_name: "leshiy0".into(),
             dns: "1.1.1.1".into(),
-            split_tunnel: leshiy_client::SplitTunnel::default(),
+            split_tunnel: leshiy_client::SplitPlan::default(),
         }
     }
 
@@ -101,8 +102,9 @@ mod tests {
     fn start_params_round_trips_with_split() {
         use leshiy_client::{SplitMode, SplitTunnel};
         let mut p = sample_params();
-        p.split_tunnel =
-            SplitTunnel::parse_lines(SplitMode::Include, "10.0.0.0/8\nexample.com\n").unwrap();
+        p.split_tunnel = leshiy_client::SplitPlan::from_manual(
+            &SplitTunnel::parse_lines(SplitMode::Include, "10.0.0.0/8\nexample.com\n").unwrap(),
+        );
         let back: StartParams = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back, p);
     }

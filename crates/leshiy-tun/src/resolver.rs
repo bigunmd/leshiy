@@ -101,19 +101,28 @@ pub async fn resolve_domains(domains: &[String]) -> BTreeSet<Cidr> {
     out
 }
 
-/// Periodically resolve `domains` and apply the route changes via `ctrl`, forever (the engine
-/// aborts this task when the session ends). The dynamic routes it installs are cleaned up by
-/// the session teardown guard, so abort is safe.
+/// Periodically resolve the plan's **include** and **exclude** domains and apply the route
+/// changes via `ctrl`, forever (the engine aborts this task when the session ends). Include
+/// domains become via-tun routes, exclude domains become bypass routes; each direction keeps
+/// its own diff baseline. The dynamic routes are cleaned up by the session teardown guard, so
+/// abort is safe.
 pub async fn run_resolver(
     ctrl: Arc<dyn RouteController>,
-    mode: SplitMode,
-    domains: Vec<String>,
-    mut state: ResolverState,
+    include_domains: Vec<String>,
+    exclude_domains: Vec<String>,
     interval: Duration,
 ) {
+    let mut inc_state = ResolverState::new();
+    let mut exc_state = ResolverState::new();
     loop {
-        let resolved = resolve_domains(&domains).await;
-        apply_resolution(&*ctrl, mode, &mut state, resolved).await;
+        if !include_domains.is_empty() {
+            let resolved = resolve_domains(&include_domains).await;
+            apply_resolution(&*ctrl, SplitMode::Include, &mut inc_state, resolved).await;
+        }
+        if !exclude_domains.is_empty() {
+            let resolved = resolve_domains(&exclude_domains).await;
+            apply_resolution(&*ctrl, SplitMode::Exclude, &mut exc_state, resolved).await;
+        }
         tokio::time::sleep(interval).await;
     }
 }

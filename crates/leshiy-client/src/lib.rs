@@ -29,7 +29,7 @@ pub use profile::{Profile, ProfileStore};
 pub use pump::pump;
 pub use runtime::{SupervisorConfig, SupervisorHandle, spawn_supervisor};
 pub use settings::{Mode, Settings, TransportPref};
-pub use split_tunnel::{SplitCidr, SplitMode, SplitParseError, SplitTunnel};
+pub use split_tunnel::{RuleSet, SplitCidr, SplitMode, SplitParseError, SplitPlan, SplitTunnel};
 pub use stats::{ByteCounters, Rates, Throughput};
 pub use stream::{DatagramFlow, ProxyStream};
 pub use supervisor::{Action, Input, Machine, State, backoff_delay};

@@ -82,22 +82,39 @@ impl RoutePlan {
         )
     }
 
-    /// Build a plan for a split-tunnel ruleset.
-    ///
-    /// - **Exclude**: the `0.0.0.0/1` + `128.0.0.0/1` override + the server exception (today's
-    ///   full tunnel), PLUS a `bypass` route per static CIDR via the original gateway. An
-    ///   empty `static_cidrs` reproduces `full_tunnel` exactly.
-    /// - **Include**: ONLY the listed CIDRs ride the TUN (`via_tun`); NO default override and
-    ///   no `bypass` (the unmodified default route already escapes the tunnel). The server
-    ///   exception is still emitted (a redundant /32-via-gateway route is harmless) so the
-    ///   struct shape is uniform for the backends.
-    ///
-    /// `server_ip` and `orig_gateway` must share an address family. IPv6 entries in
-    /// `static_cidrs` are retained in the plan; the per-OS backends filter them while IPv6
-    /// tunnelling is out of scope.
+    /// Single-direction convenience over [`from_split`](Self::from_split): Exclude puts
+    /// `static_cidrs` in the bypass set, Include puts them in the via-tun set.
     pub fn with_split(
         mode: leshiy_client::SplitMode,
         static_cidrs: &[Cidr],
+        server_ip: IpAddr,
+        orig_gateway: IpAddr,
+        tun_addr: IpAddr,
+    ) -> Result<RoutePlan, RoutePlanError> {
+        match mode {
+            leshiy_client::SplitMode::Exclude => {
+                Self::from_split(mode, &[], static_cidrs, server_ip, orig_gateway, tun_addr)
+            }
+            leshiy_client::SplitMode::Include => {
+                Self::from_split(mode, static_cidrs, &[], server_ip, orig_gateway, tun_addr)
+            }
+        }
+    }
+
+    /// Build a two-directional plan: `include_cidrs` ride the TUN, `exclude_cidrs` bypass via
+    /// the original gateway, and `base_mode` picks the default policy:
+    /// - **Exclude** (default): install the `0.0.0.0/1`+`128.0.0.0/1` override so the default
+    ///   route is tunneled; excludes carve more-specific bypass holes; includes can re-tunnel
+    ///   a more-specific net inside a broader exclude.
+    /// - **Include**: NO override — the default stays direct; only the includes ride the TUN.
+    ///
+    /// The server exception is always emitted. Overlaps are resolved by the kernel's
+    /// longest-prefix-match. `server_ip`/`orig_gateway` must share a family; IPv6 CIDRs are
+    /// retained for the per-OS backends to filter.
+    pub fn from_split(
+        base_mode: leshiy_client::SplitMode,
+        include_cidrs: &[Cidr],
+        exclude_cidrs: &[Cidr],
         server_ip: IpAddr,
         orig_gateway: IpAddr,
         tun_addr: IpAddr,
@@ -116,35 +133,34 @@ impl RoutePlan {
             },
             gateway: orig_gateway,
         };
-        match mode {
-            leshiy_client::SplitMode::Exclude => Ok(RoutePlan {
-                tun_addr,
-                via_tun: vec![
-                    Cidr {
-                        addr: "0.0.0.0".parse().unwrap(),
-                        prefix: 1,
-                    },
-                    Cidr {
-                        addr: "128.0.0.0".parse().unwrap(),
-                        prefix: 1,
-                    },
-                ],
-                server_exception,
-                bypass: static_cidrs
-                    .iter()
-                    .map(|c| ServerException {
-                        dest: c.clone(),
-                        gateway: orig_gateway,
-                    })
-                    .collect(),
-            }),
-            leshiy_client::SplitMode::Include => Ok(RoutePlan {
-                tun_addr,
-                via_tun: static_cidrs.to_vec(),
-                server_exception,
-                bypass: Vec::new(),
-            }),
-        }
+        let mut via_tun = if matches!(base_mode, leshiy_client::SplitMode::Exclude) {
+            vec![
+                Cidr {
+                    addr: "0.0.0.0".parse().unwrap(),
+                    prefix: 1,
+                },
+                Cidr {
+                    addr: "128.0.0.0".parse().unwrap(),
+                    prefix: 1,
+                },
+            ]
+        } else {
+            Vec::new()
+        };
+        via_tun.extend(include_cidrs.iter().cloned());
+        let bypass = exclude_cidrs
+            .iter()
+            .map(|c| ServerException {
+                dest: c.clone(),
+                gateway: orig_gateway,
+            })
+            .collect();
+        Ok(RoutePlan {
+            tun_addr,
+            via_tun,
+            server_exception,
+            bypass,
+        })
     }
 }
 
@@ -230,6 +246,53 @@ mod tests {
         .unwrap();
         assert_eq!(plan.bypass.len(), 1);
         assert_eq!(plan.bypass[0].dest.to_string(), "2001:db8::/32");
+    }
+
+    #[test]
+    fn from_split_mixes_include_and_exclude_with_exclude_base() {
+        let inc = [Cidr {
+            addr: "1.2.3.0".parse().unwrap(),
+            prefix: 24,
+        }];
+        let exc = [Cidr {
+            addr: "1.0.0.0".parse().unwrap(),
+            prefix: 8,
+        }];
+        let plan = RoutePlan::from_split(
+            SplitMode::Exclude,
+            &inc,
+            &exc,
+            "203.0.113.7".parse().unwrap(),
+            Ipv4Addr::new(192, 168, 1, 1).into(),
+            "10.71.0.2".parse().unwrap(),
+        )
+        .unwrap();
+        // Exclude base keeps the default override.
+        assert!(plan.via_tun.iter().any(|r| r.to_string() == "0.0.0.0/1"));
+        // The included /24 is ALSO via tun (more specific than the excluded /8 → wins).
+        assert!(plan.via_tun.iter().any(|r| r.to_string() == "1.2.3.0/24"));
+        // The excluded /8 bypasses via the gateway.
+        assert_eq!(plan.bypass.len(), 1);
+        assert_eq!(plan.bypass[0].dest.to_string(), "1.0.0.0/8");
+    }
+
+    #[test]
+    fn from_split_include_base_has_no_override() {
+        let inc = [Cidr {
+            addr: "1.2.3.0".parse().unwrap(),
+            prefix: 24,
+        }];
+        let plan = RoutePlan::from_split(
+            SplitMode::Include,
+            &inc,
+            &[],
+            "203.0.113.7".parse().unwrap(),
+            Ipv4Addr::new(192, 168, 1, 1).into(),
+            "10.71.0.2".parse().unwrap(),
+        )
+        .unwrap();
+        assert!(!plan.via_tun.iter().any(|r| r.to_string() == "0.0.0.0/1"));
+        assert_eq!(plan.via_tun.len(), 1);
     }
 
     #[test]

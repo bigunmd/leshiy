@@ -74,7 +74,9 @@ pub enum SplitParseError {
     Cidr(String),
 }
 
-/// A global split-tunnel ruleset. Empty == plain full tunnel.
+/// A global split-tunnel ruleset (the **manual** rules edited in the GUI). Empty == plain full
+/// tunnel. A single direction, given by `mode`. Subscriptions (each with their own direction)
+/// are combined with this into a [`SplitPlan`] at connect time.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SplitTunnel {
     #[serde(default)]
@@ -83,6 +85,88 @@ pub struct SplitTunnel {
     pub cidrs: Vec<SplitCidr>,
     #[serde(default)]
     pub domains: Vec<String>,
+}
+
+/// One direction's CIDRs + domains.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RuleSet {
+    #[serde(default)]
+    pub cidrs: Vec<SplitCidr>,
+    #[serde(default)]
+    pub domains: Vec<String>,
+}
+
+impl RuleSet {
+    pub fn is_empty(&self) -> bool {
+        self.cidrs.is_empty() && self.domains.is_empty()
+    }
+
+    /// Append another set, de-duplicating CIDRs and domains.
+    pub fn extend(&mut self, other: &RuleSet) {
+        for c in &other.cidrs {
+            if !self.cidrs.contains(c) {
+                self.cidrs.push(*c);
+            }
+        }
+        for d in &other.domains {
+            if !self.domains.contains(d) {
+                self.domains.push(d.clone());
+            }
+        }
+    }
+}
+
+/// The **two-directional** plan the engine actually applies: a base policy (`base_mode`) plus
+/// `include` rules (routed *into* the tunnel) and `exclude` rules (routed *out*, bypassing it),
+/// which coexist — the OS routing table resolves overlaps by longest-prefix-match. Domains
+/// resolve to host routes (`/32`), so a domain rule always wins over any CIDR.
+///
+/// - `base_mode == Exclude` (default): default route is tunneled; `exclude` bypasses.
+/// - `base_mode == Include`: default route stays direct; only `include` is tunneled.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SplitPlan {
+    #[serde(default)]
+    pub base_mode: SplitMode,
+    #[serde(default)]
+    pub include: RuleSet,
+    #[serde(default)]
+    pub exclude: RuleSet,
+}
+
+impl SplitPlan {
+    /// No rules → plain full tunnel (`base_mode` still selects the default policy).
+    pub fn is_empty(&self) -> bool {
+        self.include.is_empty() && self.exclude.is_empty()
+    }
+
+    /// Build from the manual ruleset: its `mode` is the base policy, and its rules go into the
+    /// **primary** direction — `exclude` when base is Exclude, `include` when base is Include.
+    pub fn from_manual(manual: &SplitTunnel) -> SplitPlan {
+        let set = RuleSet {
+            cidrs: manual.cidrs.clone(),
+            domains: manual.domains.clone(),
+        };
+        match manual.mode {
+            SplitMode::Exclude => SplitPlan {
+                base_mode: SplitMode::Exclude,
+                exclude: set,
+                include: RuleSet::default(),
+            },
+            SplitMode::Include => SplitPlan {
+                base_mode: SplitMode::Include,
+                include: set,
+                exclude: RuleSet::default(),
+            },
+        }
+    }
+
+    /// Merge a subscription's rules into the given direction (de-duplicated).
+    pub fn merge(&mut self, mode: SplitMode, rules: &RuleSet) {
+        match mode {
+            SplitMode::Include => self.include.extend(rules),
+            SplitMode::Exclude => self.exclude.extend(rules),
+        }
+    }
 }
 
 impl SplitTunnel {
@@ -247,5 +331,48 @@ example.com
         let st =
             SplitTunnel::parse_lines(SplitMode::Include, "10.0.0.0/8\n172.16.0.0/12\n").unwrap();
         assert_eq!(st.cidrs.len(), 2);
+    }
+
+    #[test]
+    fn split_plan_from_manual_maps_mode_to_primary_direction() {
+        let excl =
+            SplitTunnel::parse_lines(SplitMode::Exclude, "10.0.0.0/8\nbank.example\n").unwrap();
+        let pe = SplitPlan::from_manual(&excl);
+        assert_eq!(pe.base_mode, SplitMode::Exclude);
+        assert_eq!(pe.exclude.cidrs.len(), 1);
+        assert_eq!(pe.exclude.domains, vec!["bank.example"]);
+        assert!(pe.include.is_empty());
+
+        let incl = SplitTunnel::parse_lines(SplitMode::Include, "1.2.3.0/24\n").unwrap();
+        let pi = SplitPlan::from_manual(&incl);
+        assert_eq!(pi.base_mode, SplitMode::Include);
+        assert_eq!(pi.include.cidrs.len(), 1);
+        assert!(pi.exclude.is_empty());
+    }
+
+    #[test]
+    fn split_plan_default_is_empty_exclude() {
+        let p = SplitPlan::default();
+        assert!(p.is_empty());
+        assert_eq!(p.base_mode, SplitMode::Exclude);
+    }
+
+    #[test]
+    fn split_plan_merge_dedups_into_directions() {
+        let mut p = SplitPlan::default();
+        let host = |s: &str| SplitCidr {
+            addr: s.parse().unwrap(),
+            prefix: 32,
+        };
+        let rs = RuleSet {
+            cidrs: vec![host("1.1.1.1")],
+            domains: vec!["a.example".into()],
+        };
+        p.merge(SplitMode::Include, &rs);
+        p.merge(SplitMode::Include, &rs); // duplicate — must not double
+        assert_eq!(p.include.cidrs.len(), 1);
+        assert_eq!(p.include.domains.len(), 1);
+        p.merge(SplitMode::Exclude, &rs);
+        assert_eq!(p.exclude.cidrs.len(), 1);
     }
 }

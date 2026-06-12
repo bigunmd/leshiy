@@ -95,16 +95,18 @@ fn vpn_active(handle: &tauri::AppHandle) -> bool {
     mode_uses_helper(handle.state::<AppState>().settings.lock().unwrap().mode)
 }
 
-/// Build the VPN `StartParams` from the active profile URI + the user's settings (including
-/// the global split-tunnel ruleset). Extracted from `connect` so it's unit-testable.
+/// Build the VPN `StartParams` from the active profile URI + the user's settings. The manual
+/// split-tunnel rules become the base of a two-directional `SplitPlan`; rule subscriptions are
+/// merged in (Phase F). Extracted from `connect` so it's unit-testable.
 fn build_start_params(uri: String, settings: &Settings) -> StartParams {
+    let split = leshiy_client::SplitPlan::from_manual(&settings.split_tunnel);
     StartParams {
         uri,
         transport: settings.transport,
         mtu: settings.vpn_mtu,
         tun_name: "leshiy0".into(),
         dns: settings.vpn_dns.clone(),
-        split_tunnel: settings.split_tunnel.clone(),
+        split_tunnel: split,
     }
 }
 
@@ -484,14 +486,17 @@ mod tests {
 
     #[test]
     fn start_params_carries_split_tunnel_and_vpn_settings() {
-        use leshiy_client::{Settings, SplitMode, SplitTunnel};
+        use leshiy_client::{Settings, SplitMode, SplitPlan, SplitTunnel};
         let s = Settings {
             vpn_mtu: 1390,
             split_tunnel: SplitTunnel::parse_lines(SplitMode::Include, "10.0.0.0/8\n").unwrap(),
             ..Settings::default()
         };
         let params = super::build_start_params("leshiy://x".into(), &s);
-        assert_eq!(params.split_tunnel, s.split_tunnel);
+        // Manual Include rules map to the include direction of the two-directional plan.
+        assert_eq!(params.split_tunnel, SplitPlan::from_manual(&s.split_tunnel));
+        assert_eq!(params.split_tunnel.base_mode, SplitMode::Include);
+        assert_eq!(params.split_tunnel.include.cidrs.len(), 1);
         assert_eq!(params.mtu, 1390);
         assert_eq!(params.dns, s.vpn_dns);
     }

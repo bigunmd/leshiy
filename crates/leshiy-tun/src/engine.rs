@@ -26,8 +26,9 @@ pub struct TunConfig {
     pub orig_gateway: IpAddr,
     /// DNS resolver(s) forced while the tunnel is up (queries ride the tunnel).
     pub dns: Vec<IpAddr>,
-    /// Global split-tunnel ruleset. Empty (the default) = plain full tunnel.
-    pub split: leshiy_client::SplitTunnel,
+    /// Two-directional split-tunnel plan (manual rules + subscriptions, merged). Empty (the
+    /// default) = plain full tunnel.
+    pub split: leshiy_client::SplitPlan,
 }
 
 impl Default for TunConfig {
@@ -39,22 +40,23 @@ impl Default for TunConfig {
             server_ip: "0.0.0.0".parse().unwrap(),
             orig_gateway: "0.0.0.0".parse().unwrap(),
             dns: vec!["1.1.1.1".parse().unwrap()],
-            split: leshiy_client::SplitTunnel::default(),
+            split: leshiy_client::SplitPlan::default(),
         }
     }
 }
 
 impl TunConfig {
-    /// Force the system DNS through the tunnel? Only in Exclude mode (full-tunnel-ish); in
-    /// Include mode most traffic is direct, so the resolver is left untouched.
+    /// Force the system DNS through the tunnel? Only when the base policy is Exclude
+    /// (full-tunnel-ish); under an Include base most traffic is direct, so the resolver is left
+    /// untouched.
     pub fn force_dns(&self) -> bool {
-        matches!(self.split.mode, leshiy_client::SplitMode::Exclude)
+        matches!(self.split.base_mode, leshiy_client::SplitMode::Exclude)
     }
 
     /// Apply the IPv6 fail-closed kill-switch? Same rationale as [`force_dns`](Self::force_dns):
-    /// in Include mode the un-tunneled majority (incl. IPv6) must stay reachable.
+    /// under an Include base the un-tunneled majority (incl. IPv6) must stay reachable.
     pub fn ipv6_killswitch(&self) -> bool {
-        matches!(self.split.mode, leshiy_client::SplitMode::Exclude)
+        matches!(self.split.base_mode, leshiy_client::SplitMode::Exclude)
     }
 }
 
@@ -93,11 +95,26 @@ impl TunEngine {
         cfg: TunConfig,
         counters: Arc<ByteCounters>,
     ) -> std::io::Result<()> {
-        let static_cidrs: Vec<crate::route_plan::Cidr> =
-            cfg.split.cidrs.iter().copied().map(Into::into).collect();
-        let plan = RoutePlan::with_split(
-            cfg.split.mode,
-            &static_cidrs,
+        let include_cidrs: Vec<crate::route_plan::Cidr> = cfg
+            .split
+            .include
+            .cidrs
+            .iter()
+            .copied()
+            .map(Into::into)
+            .collect();
+        let exclude_cidrs: Vec<crate::route_plan::Cidr> = cfg
+            .split
+            .exclude
+            .cidrs
+            .iter()
+            .copied()
+            .map(Into::into)
+            .collect();
+        let plan = RoutePlan::from_split(
+            cfg.split.base_mode,
+            &include_cidrs,
+            &exclude_cidrs,
             cfg.server_ip,
             cfg.orig_gateway,
             cfg.tun_addr,
@@ -123,12 +140,13 @@ impl TunEngine {
         // Domain rules (if any) are resolved + refreshed by a background task. `AbortOnDrop`
         // (declared after `guard`, so dropped before it) stops the task before `guard`'s
         // teardown removes the routes it installed — clean on both normal exit and abort.
-        let _resolver = (!cfg.split.domains.is_empty()).then(move || {
+        let has_domains =
+            !cfg.split.include.domains.is_empty() || !cfg.split.exclude.domains.is_empty();
+        let _resolver = has_domains.then(move || {
             AbortOnDrop(tokio::spawn(crate::resolver::run_resolver(
                 controller,
-                cfg.split.mode,
-                cfg.split.domains.clone(),
-                crate::resolver::ResolverState::new(),
+                cfg.split.include.domains.clone(),
+                cfg.split.exclude.domains.clone(),
                 crate::resolver::REFRESH,
             )))
         });
@@ -280,7 +298,7 @@ mod tests {
     fn default_split_is_empty_exclude() {
         let c = TunConfig::default();
         assert!(c.split.is_empty());
-        assert_eq!(c.split.mode, leshiy_client::SplitMode::Exclude);
+        assert_eq!(c.split.base_mode, leshiy_client::SplitMode::Exclude);
     }
 
     #[test]
@@ -292,10 +310,10 @@ mod tests {
 
     #[test]
     fn include_mode_disables_dns_and_ipv6_killswitch() {
-        use leshiy_client::{SplitMode, SplitTunnel};
+        use leshiy_client::{SplitMode, SplitPlan};
         let c = TunConfig {
-            split: SplitTunnel {
-                mode: SplitMode::Include,
+            split: SplitPlan {
+                base_mode: SplitMode::Include,
                 ..Default::default()
             },
             ..TunConfig::default()
