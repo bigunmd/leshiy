@@ -79,7 +79,7 @@ async fn accept_loop(
         match ip_stack.accept().await.map_err(to_io)? {
             IpStackStream::Tcp(tcp) => {
                 let dst = tcp.peer_addr();
-                tracing::info!(%dst, "tcp flow opened (read a packet from the device)");
+                tracing::debug!(%dst, "tcp flow opened");
                 let t = tunnel.clone();
                 tokio::spawn(async move {
                     if let Err(e) = pump_tcp(t, dst, tcp).await {
@@ -89,7 +89,7 @@ async fn accept_loop(
             }
             IpStackStream::Udp(udp) => {
                 let dst = udp.peer_addr();
-                tracing::info!(%dst, "udp flow opened (read a packet from the device)");
+                tracing::debug!(%dst, "udp flow opened");
                 let t = tunnel.clone();
                 tokio::spawn(async move {
                     if let Err(e) = pump_udp(t, dst, udp).await {
