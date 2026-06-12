@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { Profile, Rates, Settings, TunnelState } from "./types";
+import type { Profile, Rates, Settings, SplitMode, SplitTunnel, TunnelState } from "./types";
 
 export const api = {
   listProfiles: () => invoke<Profile[]>("list_profiles"),
@@ -13,6 +13,8 @@ export const api = {
   disconnect: () => invoke<void>("disconnect"),
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (settings: Settings) => invoke<void>("set_settings", { settings }),
+  validateSplitRules: (mode: SplitMode, format: "lines" | "hosts", text: string) =>
+    invoke<SplitTunnel>("validate_split_rules", { mode, format, text }),
   helperInstalled: () => invoke<boolean>("helper_installed"),
   installHelper: () => invoke<void>("install_helper"),
   removeHelper: () => invoke<void>("remove_helper"),

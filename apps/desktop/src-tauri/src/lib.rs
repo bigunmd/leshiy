@@ -280,6 +280,29 @@ fn set_settings(state: State<AppState>, settings: Settings) -> Result<(), String
     state.save_settings()
 }
 
+/// Parse split-tunnel rule text in the given `format` ("lines" = native, "hosts" = hosts-file)
+/// and `mode`. Reuses the `leshiy-client` parser; the error string is shown in the editor.
+fn parse_split_text(
+    mode: leshiy_client::SplitMode,
+    format: &str,
+    text: &str,
+) -> Result<leshiy_client::SplitTunnel, String> {
+    let r = match format {
+        "hosts" => leshiy_client::SplitTunnel::parse_hosts(mode, text),
+        _ => leshiy_client::SplitTunnel::parse_lines(mode, text),
+    };
+    r.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn validate_split_rules(
+    mode: leshiy_client::SplitMode,
+    format: String,
+    text: String,
+) -> Result<leshiy_client::SplitTunnel, String> {
+    parse_split_text(mode, &format, &text)
+}
+
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder};
     use tauri::tray::TrayIconBuilder;
@@ -380,6 +403,7 @@ pub fn run() {
             disconnect,
             get_settings,
             set_settings,
+            validate_split_rules,
             helper_installed,
             install_helper,
             remove_helper,
@@ -433,6 +457,19 @@ mod tests {
         // VPN routes to the helper, Proxy to the in-process SOCKS supervisor.
         assert!(super::mode_uses_helper(Mode::Vpn));
         assert!(!super::mode_uses_helper(Mode::Proxy));
+    }
+
+    #[test]
+    fn parse_split_text_handles_lines_and_hosts_and_errors() {
+        use leshiy_client::SplitMode;
+        let lines = super::parse_split_text(SplitMode::Exclude, "lines", "10.0.0.0/8\nexample.com\n")
+            .unwrap();
+        assert_eq!(lines.cidrs.len(), 1);
+        assert_eq!(lines.domains, vec!["example.com"]);
+        let hosts =
+            super::parse_split_text(SplitMode::Exclude, "hosts", "0.0.0.0 ads.example.com\n").unwrap();
+        assert_eq!(hosts.domains, vec!["ads.example.com"]);
+        assert!(super::parse_split_text(SplitMode::Exclude, "lines", "10.0.0.0/40").is_err());
     }
 
     #[test]

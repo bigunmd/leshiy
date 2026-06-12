@@ -6,13 +6,14 @@ import { Atmosphere } from "@/components/Atmosphere";
 import { ConnectScreen } from "@/components/ConnectScreen";
 import { ConfigSheet } from "@/components/ConfigSheet";
 import { SettingsSheet } from "@/components/SettingsSheet";
+import { SplitTunnelSheet } from "@/components/SplitTunnelSheet";
 import { LanguageMenu } from "@/components/LanguageMenu";
 import { InstallHelperDialog } from "@/components/InstallHelperDialog";
 import { useTunnel } from "@/state/useTunnel";
 import { useProfiles } from "@/state/useProfiles";
 import { useSettings } from "@/state/useSettings";
 
-type SheetId = null | "config" | "settings" | "language";
+type SheetId = null | "config" | "settings" | "language" | "split";
 
 export default function App() {
   const { state, rates } = useTunnel();
@@ -80,7 +81,9 @@ export default function App() {
         onImport={profiles.importProfile} onSelect={profiles.select} onRemove={profiles.remove} onRename={profiles.rename} />
       <SettingsSheet open={sheet === "settings"} onOpenChange={close} settings={settings} onChange={update}
         helperInstalled={helperInstalled && !onDemand} onRemoveHelper={onRemoveHelper}
+        onOpenSplit={() => setSheet("split")}
         onLanguageChange={(lng) => { setLanguage(lng); void update({ language: lng }); }} />
+      <SplitTunnelSheet open={sheet === "split"} onOpenChange={close} value={settings.split_tunnel} onChange={update} />
       <LanguageMenu open={sheet === "language"} onOpenChange={close}
         onSelect={(lng) => { setLanguage(lng); void update({ language: lng }); }} />
       <InstallHelperDialog open={installOpen} onOpenChange={setInstallOpen}

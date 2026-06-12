@@ -12,7 +12,7 @@ import type { Settings, TransportPref } from "@/lib/types";
 interface Props {
   open: boolean; onOpenChange: (o: boolean) => void;
   settings: Settings; onChange: (patch: Partial<Settings>) => void; onLanguageChange: (lng: string) => void;
-  helperInstalled: boolean; onRemoveHelper: () => void;
+  helperInstalled: boolean; onRemoveHelper: () => void; onOpenSplit: () => void;
 }
 export function SettingsSheet(p: Props) {
   const { t, i18n } = useTranslation();
@@ -58,6 +58,12 @@ export function SettingsSheet(p: Props) {
                 <Label className="text-[13px]">{t("settings.vpnDns")}</Label>
                 <Input className="font-mono w-32 bg-bg1 text-right" value={p.settings.vpn_dns}
                   onChange={(e) => p.onChange({ vpn_dns: e.target.value })} />
+              </div>
+              <div className={row}>
+                <Label className="text-[13px]">{t("settings.splitTunnel")}</Label>
+                <Button size="sm" variant="ghost" className="font-mono text-[10px] uppercase tracking-widest text-wisp" onClick={p.onOpenSplit}>
+                  {p.settings.split_tunnel.cidrs.length + p.settings.split_tunnel.domains.length || t("splitTunnel.none")}
+                </Button>
               </div>
               {p.helperInstalled && (
                 <div className={row}>
