@@ -69,34 +69,43 @@ impl PrivilegedOps for MacOsOps {
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
             let _ = cmd::run(ROUTE, &argv); // best-effort: an identical host route already existing is fine
         }
+        // via_tun + bypass go through the net_route `Handle` (PF_ROUTE socket) — thousands of
+        // fast in-process messages, NOT a `route` subprocess per CIDR (a subscription can carry
+        // thousands; spawning `route` each stalls connect for minutes). via_tun routes through
+        // the utun by its index (from the device); if unavailable, fall back to `route` by name.
+        // Best-effort: a bad/duplicate route in a list must not fail the session.
+        let tun_idx = device.tun_index().ok().map(|i| i as u32);
         for c in &plan.via_tun {
             // IPv4-only this phase; skip an Include IPv6 CIDR rather than erroring.
             let IpAddr::V4(_) = c.addr else {
                 continue;
             };
-            // Route by interface name (no ifindex FFI). Use BSD `route` for reliability.
-            // Best-effort: a bad route in a large subscription list must not fail the session.
-            let args = cmd::mac_route_add_via_iface_args(&c.addr.to_string(), c.prefix, &iface);
-            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-            let _ = cmd::run(ROUTE, &argv);
+            match tun_idx {
+                Some(idx) => {
+                    let _ = handle
+                        .add(&Route::new(c.addr, c.prefix).with_ifindex(idx))
+                        .await;
+                }
+                None => {
+                    let args =
+                        cmd::mac_route_add_via_iface_args(&c.addr.to_string(), c.prefix, &iface);
+                    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+                    let _ = cmd::run(ROUTE, &argv);
+                }
+            }
         }
 
-        // 2b. Split-tunnel bypass routes (Exclude): each CIDR escapes via the original
-        //     gateway (structurally like the server exception). Tracked in `installed_bypass`
-        //     (shared with the controller + teardown) — BSD gateway routes persist after the
-        //     utun drops, so they're deleted explicitly.
+        // 2b. Split-tunnel bypass routes (Exclude): each CIDR escapes via the original gateway.
+        //     Tracked in `installed_bypass` (shared with the controller + teardown) — gateway
+        //     routes persist after the utun drops, so they're deleted explicitly.
         let installed_bypass: Arc<Mutex<Vec<Cidr>>> = Arc::new(Mutex::new(Vec::new()));
         for b in &plan.bypass {
             let IpAddr::V4(_) = b.dest.addr else {
                 continue;
             };
-            let args = cmd::mac_route_add_via_gateway_args(
-                &b.dest.addr.to_string(),
-                b.dest.prefix,
-                &b.gateway.to_string(),
-            );
-            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-            let _ = cmd::run(ROUTE, &argv); // best-effort
+            let _ = handle
+                .add(&Route::new(b.dest.addr, b.dest.prefix).with_gateway(b.gateway))
+                .await; // best-effort, fast (PF_ROUTE socket)
             installed_bypass.lock().unwrap().push(b.dest.clone());
         }
 

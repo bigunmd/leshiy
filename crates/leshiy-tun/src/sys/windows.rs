@@ -72,9 +72,9 @@ impl PrivilegedOps for WindowsOps {
         // via_tun + bypass go through the net_route `Handle` (IP Helper API) — thousands of
         // fast in-process calls, NOT thousands of `netsh` subprocesses (a subscription can carry
         // thousands of CIDRs; spawning netsh per route stalls connect for minutes). via_tun
-        // needs the Wintun adapter's ifindex; if it can't be resolved, fall back to netsh by
-        // name. Best-effort: a bad/duplicate route in a list must not fail the session.
-        let tun_idx = interface_index(&iface);
+        // needs the Wintun adapter's ifindex (from the device); if unavailable, fall back to
+        // netsh by name. Best-effort: a bad/duplicate route in a list must not fail the session.
+        let tun_idx = device.tun_index().ok().map(|i| i as u32);
         for c in &plan.via_tun {
             let IpAddr::V4(_) = c.addr else {
                 continue; // IPv4-only this phase; skip an Include IPv6 CIDR.
@@ -232,23 +232,6 @@ fn original_iface_name() -> Option<String> {
         .filter(|l| l.contains("connected"))
         .filter_map(|l| l.split_whitespace().nth(4).map(str::to_string))
         .find(|n| !n.eq_ignore_ascii_case("Loopback"))
-}
-
-/// The interface index (`Idx` column) of `name` from `netsh interface ipv4 show interfaces`,
-/// used to add via-TUN routes through the net_route IP Helper API (no `netsh` per route).
-/// Returns `None` if it can't be parsed (callers fall back to netsh-by-name). The tun name is a
-/// single token (e.g. "leshiy0"), so a column match is unambiguous.
-fn interface_index(name: &str) -> Option<u32> {
-    let out = cmd::run_capture(NETSH, &["interface", "ipv4", "show", "interfaces"]).ok()?;
-    out.lines().find_map(|l| {
-        let cols: Vec<&str> = l.split_whitespace().collect();
-        // Idx  Met  MTU  State  Name
-        if cols.len() >= 5 && cols[4] == name {
-            cols[0].parse::<u32>().ok()
-        } else {
-            None
-        }
-    })
 }
 
 /// Read the current `DisableSmartNameResolution` policy value (as a string), or `None`
