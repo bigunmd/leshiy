@@ -46,47 +46,36 @@ impl PrivilegedOps for LinuxOps {
         });
         let device = tun::create_as_async(&cfg).map_err(to_io)?;
 
-        // 2. Routes: install the server-host exception FIRST (so the encrypted packets to
-        //    the server escape the tunnel), then the default-override halves via the TUN.
-        let handle = Handle::new()?;
+        // 2. Routes — applied in ONE `ip -batch` process: the server-host exception (so
+        //    encrypted packets to the server escape the tunnel), the via-TUN routes (default
+        //    override and/or include CIDRs, routed through the device), and the bypass routes
+        //    (excluded CIDRs via the original gateway). A subscription can carry thousands of
+        //    CIDRs; installing them one per netlink round-trip stalls connect, so we batch.
+        //    `-force` keeps going past a bad/duplicate line instead of failing the session.
+        //    IPv4-only this phase; IPv6 entries are skipped (logged).
         let ifindex = ifindex_of(tun_name)?;
-        let exception = Route::new(
-            plan.server_exception.dest.addr,
-            plan.server_exception.dest.prefix,
-        )
-        .with_gateway(plan.server_exception.gateway);
-        let _ = handle.add(&exception).await; // best-effort: an existing identical host route is fine
+        let installed_bypass: Arc<Mutex<Vec<Cidr>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut batch = String::new();
+        let exc = &plan.server_exception;
+        if exc.dest.addr.is_ipv4() {
+            batch.push_str(&format!("route add {} via {}\n", exc.dest, exc.gateway));
+        }
         for c in &plan.via_tun {
-            // IPv4-only this phase (the tun is IPv4). An Include IPv6 CIDR is skipped, not errored.
-            let IpAddr::V4(_) = c.addr else {
+            if c.addr.is_ipv4() {
+                batch.push_str(&format!("route add {} dev {}\n", c, tun_name));
+            } else {
                 tracing::warn!(cidr = %c, "skipping IPv6 via_tun route (IPv6 disabled this phase)");
-                continue;
-            };
-            // Best-effort: one bad/duplicate route in a large subscription list must not tear
-            // down the whole session (the default-override /1 routes are fresh and won't fail).
-            if let Err(e) = handle
-                .add(&Route::new(c.addr, c.prefix).with_ifindex(ifindex))
-                .await
-            {
-                tracing::warn!(cidr = %c, "via_tun route add failed (continuing): {e}");
             }
         }
-
-        // 2b. Split-tunnel bypass routes (Exclude mode): each listed CIDR escapes the tunnel
-        //     via the original gateway. Tracked in `installed_bypass` (shared with the
-        //     controller + teardown) because — unlike via_tun routes — they point at the
-        //     gateway and don't auto-clear when the device drops.
-        let installed_bypass: Arc<Mutex<Vec<Cidr>>> = Arc::new(Mutex::new(Vec::new()));
         for b in &plan.bypass {
-            let IpAddr::V4(_) = b.dest.addr else {
+            if b.dest.addr.is_ipv4() {
+                batch.push_str(&format!("route add {} via {}\n", b.dest, b.gateway));
+                installed_bypass.lock().unwrap().push(b.dest.clone());
+            } else {
                 tracing::warn!(cidr = %b.dest, "skipping IPv6 split-tunnel bypass (IPv6 disabled this phase)");
-                continue;
-            };
-            let _ = handle
-                .add(&Route::new(b.dest.addr, b.dest.prefix).with_gateway(b.gateway))
-                .await; // best-effort
-            installed_bypass.lock().unwrap().push(b.dest.clone());
+            }
         }
+        ip_batch(&batch).await?;
 
         // 3. DNS: force the configured resolver(s) so queries ride the tunnel. Skipped in
         //    Include mode (most traffic is direct; the system resolver is left untouched).
@@ -198,12 +187,29 @@ struct LinuxTeardown {
 
 impl Drop for LinuxTeardown {
     fn drop(&mut self) {
-        // Best-effort; teardown must never panic. `Drop` is synchronous and `net_route`'s
-        // delete is async, so remove bypass routes via iproute2 (sync).
-        for c in self.installed_bypass.lock().unwrap().iter() {
-            let _ = std::process::Command::new(IP)
-                .args(["route", "del", &c.to_string()])
-                .output();
+        // Best-effort; teardown must never panic. `Drop` is synchronous, so batch the deletes
+        // through one `ip -batch` process (sync) rather than thousands of `ip route del` spawns.
+        let batch: String = self
+            .installed_bypass
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| format!("route del {c}\n"))
+            .collect();
+        if !batch.is_empty() {
+            use std::io::Write;
+            if let Ok(mut child) = std::process::Command::new(IP)
+                .args(["-force", "-batch", "-"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(batch.as_bytes());
+                }
+                let _ = child.wait();
+            }
         }
         if let Some(b) = &self.resolv_backup {
             let _ = std::fs::write(RESOLV, b);
@@ -215,6 +221,29 @@ impl Drop for LinuxTeardown {
             let _ = std::fs::write(IPV6_DEFAULT, v.trim());
         }
     }
+}
+
+/// Apply many route changes in a SINGLE `ip -batch` process (commands one per line on stdin,
+/// e.g. `route add 1.2.3.0/24 dev leshiy0`). `-force` keeps going past per-line errors so a
+/// bad/duplicate entry in a large list can't fail the batch. One process for thousands of
+/// routes — vs. a netlink round-trip each — is what keeps connect fast with big subscriptions.
+async fn ip_batch(script: &str) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    if script.is_empty() {
+        return Ok(());
+    }
+    let mut child = tokio::process::Command::new(IP)
+        .args(["-force", "-batch", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(script.as_bytes()).await?;
+        // `stdin` is dropped at the end of this block → `ip` sees EOF and runs the batch.
+    }
+    child.wait().await?;
+    Ok(())
 }
 
 fn to_io<E: std::fmt::Display>(e: E) -> std::io::Error {

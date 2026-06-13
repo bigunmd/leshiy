@@ -69,21 +69,36 @@ impl PrivilegedOps for WindowsOps {
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
             let _ = cmd::run(NETSH, &argv); // best-effort
         }
+        // via_tun + bypass go through the net_route `Handle` (IP Helper API) — thousands of
+        // fast in-process calls, NOT thousands of `netsh` subprocesses (a subscription can carry
+        // thousands of CIDRs; spawning netsh per route stalls connect for minutes). via_tun
+        // needs the Wintun adapter's ifindex; if it can't be resolved, fall back to netsh by
+        // name. Best-effort: a bad/duplicate route in a list must not fail the session.
+        let tun_idx = interface_index(&iface);
         for c in &plan.via_tun {
             let IpAddr::V4(_) = c.addr else {
                 continue; // IPv4-only this phase; skip an Include IPv6 CIDR.
             };
-            // Best-effort: a bad route in a large subscription list must not fail the session.
-            let args =
-                cmd::win_route_add_via_iface_args(&format!("{}/{}", c.addr, c.prefix), &iface);
-            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-            let _ = cmd::run(NETSH, &argv);
+            match tun_idx {
+                Some(idx) => {
+                    let _ = handle
+                        .add(&Route::new(c.addr, c.prefix).with_ifindex(idx))
+                        .await;
+                }
+                None => {
+                    let args = cmd::win_route_add_via_iface_args(
+                        &format!("{}/{}", c.addr, c.prefix),
+                        &iface,
+                    );
+                    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+                    let _ = cmd::run(NETSH, &argv);
+                }
+            }
         }
 
-        // 2b. Split-tunnel bypass routes (Exclude): each CIDR escapes via the original gateway
-        //     out the original interface. Tracked in `installed_bypass` (shared with the
-        //     controller + teardown) — netsh routes persist after the Wintun adapter drops, so
-        //     they're deleted explicitly. All bypass routes share the original gateway.
+        // 2b. Split-tunnel bypass routes (Exclude): each CIDR escapes via the original gateway.
+        //     Tracked in `installed_bypass` (shared with the controller + teardown) — they point
+        //     at the gateway, so (unlike via_tun) they don't auto-clear when the adapter drops.
         let orig_iface_str = orig_iface.clone().unwrap_or_default();
         let gateway = plan.server_exception.gateway.to_string();
         let installed_bypass: Arc<Mutex<Vec<Cidr>>> = Arc::new(Mutex::new(Vec::new()));
@@ -91,11 +106,9 @@ impl PrivilegedOps for WindowsOps {
             let IpAddr::V4(_) = b.dest.addr else {
                 continue;
             };
-            let dest = format!("{}/{}", b.dest.addr, b.dest.prefix);
-            let args =
-                cmd::win_route_add_via_gateway_args(&dest, &b.gateway.to_string(), &orig_iface_str);
-            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-            let _ = cmd::run(NETSH, &argv); // best-effort
+            let _ = handle
+                .add(&Route::new(b.dest.addr, b.dest.prefix).with_gateway(b.gateway))
+                .await; // best-effort, fast (IP Helper API)
             installed_bypass.lock().unwrap().push(b.dest.clone());
         }
 
@@ -130,14 +143,12 @@ impl PrivilegedOps for WindowsOps {
         // 4. IPv6 leak mitigation (fail-closed): disable IPv6 binding on the original
         //    interface; restore on drop. Skipped in Include mode. (Full IPv6 is out of scope.)
         let mut v6_disabled_iface = None;
-        if ipv6_killswitch {
-            if let Some(name) = &orig_iface {
-                let _ = cmd::run(
-                    NETSH,
-                    &["interface", "ipv6", "set", "interface", name, "disabled"],
-                );
-                v6_disabled_iface = Some(name.clone());
-            }
+        if ipv6_killswitch && let Some(name) = &orig_iface {
+            let _ = cmd::run(
+                NETSH,
+                &["interface", "ipv6", "set", "interface", name, "disabled"],
+            );
+            v6_disabled_iface = Some(name.clone());
         }
 
         let controller = Arc::new(WindowsController {
@@ -221,6 +232,23 @@ fn original_iface_name() -> Option<String> {
         .filter(|l| l.contains("connected"))
         .filter_map(|l| l.split_whitespace().nth(4).map(str::to_string))
         .find(|n| !n.eq_ignore_ascii_case("Loopback"))
+}
+
+/// The interface index (`Idx` column) of `name` from `netsh interface ipv4 show interfaces`,
+/// used to add via-TUN routes through the net_route IP Helper API (no `netsh` per route).
+/// Returns `None` if it can't be parsed (callers fall back to netsh-by-name). The tun name is a
+/// single token (e.g. "leshiy0"), so a column match is unambiguous.
+fn interface_index(name: &str) -> Option<u32> {
+    let out = cmd::run_capture(NETSH, &["interface", "ipv4", "show", "interfaces"]).ok()?;
+    out.lines().find_map(|l| {
+        let cols: Vec<&str> = l.split_whitespace().collect();
+        // Idx  Met  MTU  State  Name
+        if cols.len() >= 5 && cols[4] == name {
+            cols[0].parse::<u32>().ok()
+        } else {
+            None
+        }
+    })
 }
 
 /// Read the current `DisableSmartNameResolution` policy value (as a string), or `None`
