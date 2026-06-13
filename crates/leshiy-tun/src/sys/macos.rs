@@ -75,9 +75,10 @@ impl PrivilegedOps for MacOsOps {
                 continue;
             };
             // Route by interface name (no ifindex FFI). Use BSD `route` for reliability.
+            // Best-effort: a bad route in a large subscription list must not fail the session.
             let args = cmd::mac_route_add_via_iface_args(&c.addr.to_string(), c.prefix, &iface);
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-            cmd::run(ROUTE, &argv)?;
+            let _ = cmd::run(ROUTE, &argv);
         }
 
         // 2b. Split-tunnel bypass routes (Exclude): each CIDR escapes via the original

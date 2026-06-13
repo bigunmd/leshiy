@@ -167,6 +167,27 @@ impl SplitPlan {
             SplitMode::Exclude => self.exclude.extend(rules),
         }
     }
+
+    /// The rules that can actually affect routing, dropping provably-redundant ones:
+    /// - Under an **Exclude** base with **no exclude rules**, every include is already tunneled
+    ///   by the default override, so includes are redundant (returned empty).
+    /// - Under an **Include** base with **no include rules**, every exclude is already direct, so
+    ///   excludes are redundant (returned empty).
+    ///
+    /// This both fixes the semantics (an Include preset under the default Exclude base is a
+    /// no-op — the user must switch the mode to Include) and avoids installing thousands of
+    /// pointless routes (which is slow, and on Windows/macOS is one subprocess per route).
+    pub fn effective(&self) -> (RuleSet, RuleSet) {
+        match self.base_mode {
+            SplitMode::Exclude if self.exclude.is_empty() => {
+                (RuleSet::default(), RuleSet::default())
+            }
+            SplitMode::Include if self.include.is_empty() => {
+                (RuleSet::default(), RuleSet::default())
+            }
+            _ => (self.include.clone(), self.exclude.clone()),
+        }
+    }
 }
 
 impl SplitTunnel {
@@ -402,6 +423,37 @@ bare.example.org
         let p = SplitPlan::default();
         assert!(p.is_empty());
         assert_eq!(p.base_mode, SplitMode::Exclude);
+    }
+
+    #[test]
+    fn effective_drops_redundant_includes_under_exclude_base() {
+        // Exclude base + an Include preset, no excludes → includes are redundant (full tunnel).
+        let mut p = SplitPlan::default(); // base Exclude
+        let host = |s: &str| SplitCidr {
+            addr: s.parse().unwrap(),
+            prefix: 32,
+        };
+        p.merge(
+            SplitMode::Include,
+            &RuleSet {
+                cidrs: vec![host("1.1.1.1")],
+                domains: vec!["x.example".into()],
+            },
+        );
+        let (inc, exc) = p.effective();
+        assert!(inc.is_empty() && exc.is_empty());
+
+        // But with an exclude present, the include is kept (it can override the exclude).
+        p.merge(
+            SplitMode::Exclude,
+            &RuleSet {
+                cidrs: vec![host("2.2.2.2")],
+                domains: vec![],
+            },
+        );
+        let (inc, exc) = p.effective();
+        assert_eq!(inc.cidrs.len(), 1);
+        assert_eq!(exc.cidrs.len(), 1);
     }
 
     #[test]

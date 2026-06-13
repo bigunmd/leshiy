@@ -62,7 +62,7 @@ export function SettingsSheet(p: Props) {
               <div className={row}>
                 <Label className="text-[13px]">{t("settings.splitTunnel")}</Label>
                 <Button size="sm" variant="ghost" className="font-mono text-[10px] uppercase tracking-widest text-wisp" onClick={p.onOpenSplit}>
-                  {p.settings.split_tunnel.cidrs.length + p.settings.split_tunnel.domains.length || t("splitTunnel.none")}
+                  {p.settings.split_tunnel.cidrs.length + p.settings.split_tunnel.domains.length + p.settings.rule_subscriptions.filter((s) => s.enabled).length || t("splitTunnel.none")}
                 </Button>
               </div>
               {p.helperInstalled && (

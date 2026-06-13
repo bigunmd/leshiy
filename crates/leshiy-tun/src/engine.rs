@@ -98,22 +98,13 @@ impl TunEngine {
         cfg: TunConfig,
         counters: Arc<ByteCounters>,
     ) -> std::io::Result<()> {
-        let include_cidrs: Vec<crate::route_plan::Cidr> = cfg
-            .split
-            .include
-            .cidrs
-            .iter()
-            .copied()
-            .map(Into::into)
-            .collect();
-        let exclude_cidrs: Vec<crate::route_plan::Cidr> = cfg
-            .split
-            .exclude
-            .cidrs
-            .iter()
-            .copied()
-            .map(Into::into)
-            .collect();
+        // Drop provably-redundant rules (e.g. Include rules under an Exclude base with no
+        // excludes are already tunneled) before installing routes / resolving domains.
+        let (eff_include, eff_exclude) = cfg.split.effective();
+        let include_cidrs: Vec<crate::route_plan::Cidr> =
+            eff_include.cidrs.iter().copied().map(Into::into).collect();
+        let exclude_cidrs: Vec<crate::route_plan::Cidr> =
+            eff_exclude.cidrs.iter().copied().map(Into::into).collect();
         let plan = RoutePlan::from_split(
             cfg.split.base_mode,
             &include_cidrs,
@@ -153,13 +144,12 @@ impl TunEngine {
         // Domain rules (if any) are resolved + refreshed by a background task. `AbortOnDrop`
         // (declared after `guard`, so dropped before it) stops the task before `guard`'s
         // teardown removes the routes it installed — clean on both normal exit and abort.
-        let has_domains =
-            !cfg.split.include.domains.is_empty() || !cfg.split.exclude.domains.is_empty();
+        let has_domains = !eff_include.domains.is_empty() || !eff_exclude.domains.is_empty();
         let _resolver = has_domains.then(move || {
             AbortOnDrop(tokio::spawn(crate::resolver::run_resolver(
                 controller,
-                cfg.split.include.domains.clone(),
-                cfg.split.exclude.domains.clone(),
+                eff_include.domains,
+                eff_exclude.domains,
                 crate::resolver::REFRESH,
             )))
         });

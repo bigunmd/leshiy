@@ -109,6 +109,17 @@ export function SplitTunnelSheet(p: Props) {
     return e ? e.rules.cidrs.length + e.rules.domains.length : 0;
   };
 
+  // Warn when a direction can't take effect under the current base mode (mirrors the engine's
+  // redundancy rule): e.g. Include subscriptions do nothing in Exclude mode (all already tunneled).
+  const enabledSubs = p.subscriptions.filter((s) => s.enabled);
+  const manualEmpty = p.value.cidrs.length === 0 && p.value.domains.length === 0;
+  const excludeSide = (p.value.mode === "exclude" && !manualEmpty) || enabledSubs.some((s) => s.mode === "exclude");
+  const includeSide = (p.value.mode === "include" && !manualEmpty) || enabledSubs.some((s) => s.mode === "include");
+  const subHint =
+    p.value.mode === "exclude" && includeSide && !excludeSide ? t("splitTunnel.hintInclude")
+    : p.value.mode === "include" && excludeSide && !includeSide ? t("splitTunnel.hintExclude")
+    : null;
+
   const row = "flex items-center justify-between border-b border-border py-3";
   const empty = p.value.cidrs.length === 0 && p.value.domains.length === 0;
 
@@ -242,6 +253,8 @@ export function SplitTunnelSheet(p: Props) {
               </div>
             ))}
           </div>
+
+          {subHint && <p className="mt-2 text-warn text-[11px] leading-relaxed">{subHint}</p>}
 
           {/* Add preset */}
           <button onClick={() => setShowPresets((v) => !v)}

@@ -73,10 +73,11 @@ impl PrivilegedOps for WindowsOps {
             let IpAddr::V4(_) = c.addr else {
                 continue; // IPv4-only this phase; skip an Include IPv6 CIDR.
             };
+            // Best-effort: a bad route in a large subscription list must not fail the session.
             let args =
                 cmd::win_route_add_via_iface_args(&format!("{}/{}", c.addr, c.prefix), &iface);
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-            cmd::run(NETSH, &argv)?;
+            let _ = cmd::run(NETSH, &argv);
         }
 
         // 2b. Split-tunnel bypass routes (Exclude): each CIDR escapes via the original gateway

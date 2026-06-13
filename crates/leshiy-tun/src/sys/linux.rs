@@ -62,9 +62,14 @@ impl PrivilegedOps for LinuxOps {
                 tracing::warn!(cidr = %c, "skipping IPv6 via_tun route (IPv6 disabled this phase)");
                 continue;
             };
-            handle
+            // Best-effort: one bad/duplicate route in a large subscription list must not tear
+            // down the whole session (the default-override /1 routes are fresh and won't fail).
+            if let Err(e) = handle
                 .add(&Route::new(c.addr, c.prefix).with_ifindex(ifindex))
-                .await?;
+                .await
+            {
+                tracing::warn!(cidr = %c, "via_tun route add failed (continuing): {e}");
+            }
         }
 
         // 2b. Split-tunnel bypass routes (Exclude mode): each listed CIDR escapes the tunnel
