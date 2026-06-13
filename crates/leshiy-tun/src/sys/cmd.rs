@@ -96,22 +96,9 @@ pub(crate) fn win_route_add_via_gateway_args(
     ]
 }
 
-/// `netsh interface ipv4 add route <dest_cidr> <iface>` — send a CIDR through the tun
-/// interface by name (no ifindex FFI needed).
-#[cfg(any(target_os = "windows", test))]
-pub(crate) fn win_route_add_via_iface_args(dest_cidr: &str, iface: &str) -> Vec<String> {
-    vec![
-        "interface".into(),
-        "ipv4".into(),
-        "add".into(),
-        "route".into(),
-        dest_cidr.to_string(),
-        iface.to_string(),
-    ]
-}
-
 /// `netsh interface ipv4 delete route <dest_cidr> <iface> <gateway>` — remove a bypass route
-/// (split-tunnel teardown / dynamic domain-route removal). Mirrors the gateway add builder.
+/// on teardown. Mirrors the gateway add builder. (via_tun / include routes are managed through
+/// the net_route IP Helper API, not netsh, so there's no `*_via_iface` builder.)
 #[cfg(any(target_os = "windows", test))]
 pub(crate) fn win_route_del_via_gateway_args(
     dest_cidr: &str,
@@ -126,20 +113,6 @@ pub(crate) fn win_route_del_via_gateway_args(
         dest_cidr.to_string(),
         orig_iface.to_string(),
         gateway.to_string(),
-    ]
-}
-
-/// `netsh interface ipv4 delete route <dest_cidr> <iface>` — remove an include (via-tun)
-/// route. Mirrors the iface add builder; used by the Include-mode route controller.
-#[cfg(any(target_os = "windows", test))]
-pub(crate) fn win_route_del_via_iface_args(dest_cidr: &str, iface: &str) -> Vec<String> {
-    vec![
-        "interface".into(),
-        "ipv4".into(),
-        "delete".into(),
-        "route".into(),
-        dest_cidr.to_string(),
-        iface.to_string(),
     ]
 }
 
@@ -256,15 +229,6 @@ mod tests {
     }
 
     #[test]
-    fn route_add_via_iface_args_win() {
-        let args = win_route_add_via_iface_args("0.0.0.0/1", "leshiy0");
-        assert_eq!(
-            args,
-            vec!["interface", "ipv4", "add", "route", "0.0.0.0/1", "leshiy0"]
-        );
-    }
-
-    #[test]
     fn mac_dns_set_args_lists_each_server() {
         let dns: Vec<std::net::IpAddr> =
             vec!["1.1.1.1".parse().unwrap(), "9.9.9.9".parse().unwrap()];
@@ -309,22 +273,6 @@ mod tests {
                 "198.51.100.0/24",
                 "Ethernet",
                 "192.168.1.1"
-            ]
-        );
-    }
-
-    #[test]
-    fn win_route_del_via_iface_args_builds() {
-        let args = win_route_del_via_iface_args("10.0.0.0/8", "leshiy0");
-        assert_eq!(
-            args,
-            vec![
-                "interface",
-                "ipv4",
-                "delete",
-                "route",
-                "10.0.0.0/8",
-                "leshiy0"
             ]
         );
     }

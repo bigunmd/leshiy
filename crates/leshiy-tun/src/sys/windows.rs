@@ -79,21 +79,13 @@ impl PrivilegedOps for WindowsOps {
             let IpAddr::V4(_) = c.addr else {
                 continue; // IPv4-only this phase; skip an Include IPv6 CIDR.
             };
-            match tun_idx {
-                Some(idx) => {
-                    let _ = handle
-                        .add(&Route::new(c.addr, c.prefix).with_ifindex(idx))
-                        .await;
-                }
-                None => {
-                    let args = cmd::win_route_add_via_iface_args(
-                        &format!("{}/{}", c.addr, c.prefix),
-                        &iface,
-                    );
-                    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-                    let _ = cmd::run(NETSH, &argv);
-                }
-            }
+            // Route through the Wintun adapter by ifindex, or via its own on-link address if
+            // the index is unknown — always net_route (never a netsh subprocess per route).
+            let route = match tun_idx {
+                Some(idx) => Route::new(c.addr, c.prefix).with_ifindex(idx),
+                None => Route::new(c.addr, c.prefix).with_gateway(IpAddr::V4(tun4)),
+            };
+            let _ = handle.add(&route).await;
         }
 
         // 2b. Split-tunnel bypass routes (Exclude): each CIDR escapes via the original gateway.
@@ -152,9 +144,10 @@ impl PrivilegedOps for WindowsOps {
         }
 
         let controller = Arc::new(WindowsController {
-            tun_iface: iface.clone(),
-            orig_iface: orig_iface_str.clone(),
-            gateway: gateway.clone(),
+            handle: Handle::new()?,
+            tun_idx,
+            tun_addr: tun4,
+            gateway: plan.server_exception.gateway,
             installed_bypass: installed_bypass.clone(),
         });
         let guard = WindowsTeardown {
@@ -173,14 +166,26 @@ impl PrivilegedOps for WindowsOps {
     }
 }
 
-/// Live runtime route control for the Windows session via `netsh`. Bypass (Exclude) additions
-/// are tracked in `installed_bypass` so teardown can remove them on abort; via_tun (Include)
-/// routes auto-clear on Wintun drop and aren't tracked.
+/// Live runtime route control for the Windows session via the net_route `Handle` (IP Helper
+/// API) — NOT a `netsh` subprocess per route, which (for a domain preset resolving to thousands
+/// of IPs) would spawn thousands of processes and wedge the runtime. via_tun routes through the
+/// Wintun adapter by ifindex (or, if unknown, via the tun's own on-link address). Bypass
+/// additions are tracked in `installed_bypass` so teardown can remove them on abort.
 struct WindowsController {
-    tun_iface: String,
-    orig_iface: String,
-    gateway: String,
+    handle: Handle,
+    tun_idx: Option<u32>,
+    tun_addr: std::net::Ipv4Addr,
+    gateway: IpAddr,
     installed_bypass: Arc<Mutex<Vec<Cidr>>>,
+}
+
+impl WindowsController {
+    fn via_tun_route(&self, c: &Cidr) -> Route {
+        match self.tun_idx {
+            Some(idx) => Route::new(c.addr, c.prefix).with_ifindex(idx),
+            None => Route::new(c.addr, c.prefix).with_gateway(IpAddr::V4(self.tun_addr)),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -189,18 +194,17 @@ impl RouteController for WindowsController {
         let IpAddr::V4(_) = c.addr else {
             return Ok(());
         };
-        let dest = format!("{}/{}", c.addr, c.prefix);
-        let args = cmd::win_route_add_via_gateway_args(&dest, &self.gateway, &self.orig_iface);
-        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        cmd::run(NETSH, &argv)?;
+        self.handle
+            .add(&Route::new(c.addr, c.prefix).with_gateway(self.gateway))
+            .await?;
         self.installed_bypass.lock().unwrap().push(c.clone());
         Ok(())
     }
     async fn remove_bypass(&self, c: &Cidr) -> std::io::Result<()> {
-        let dest = format!("{}/{}", c.addr, c.prefix);
-        let args = cmd::win_route_del_via_gateway_args(&dest, &self.gateway, &self.orig_iface);
-        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        let _ = cmd::run(NETSH, &argv);
+        let _ = self
+            .handle
+            .delete(&Route::new(c.addr, c.prefix).with_gateway(self.gateway))
+            .await;
         self.installed_bypass.lock().unwrap().retain(|x| x != c);
         Ok(())
     }
@@ -208,16 +212,13 @@ impl RouteController for WindowsController {
         let IpAddr::V4(_) = c.addr else {
             return Ok(());
         };
-        let dest = format!("{}/{}", c.addr, c.prefix);
-        let args = cmd::win_route_add_via_iface_args(&dest, &self.tun_iface);
-        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        cmd::run(NETSH, &argv)
+        self.handle.add(&self.via_tun_route(c)).await
     }
     async fn remove_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
-        let dest = format!("{}/{}", c.addr, c.prefix);
-        let args = cmd::win_route_del_via_iface_args(&dest, &self.tun_iface);
-        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        let _ = cmd::run(NETSH, &argv);
+        let IpAddr::V4(_) = c.addr else {
+            return Ok(());
+        };
+        let _ = self.handle.delete(&self.via_tun_route(c)).await;
         Ok(())
     }
 }

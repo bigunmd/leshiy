@@ -135,8 +135,10 @@ impl PrivilegedOps for MacOsOps {
         }
 
         let controller = Arc::new(MacOsController {
-            iface: iface.clone(),
-            gateway: plan.server_exception.gateway.to_string(),
+            handle: Handle::new()?,
+            tun_idx,
+            tun_addr: tun4,
+            gateway: plan.server_exception.gateway,
             installed_bypass: installed_bypass.clone(),
         });
         let guard = MacOsTeardown {
@@ -152,13 +154,26 @@ impl PrivilegedOps for MacOsOps {
     }
 }
 
-/// Live runtime route control for the macOS session via BSD `route`. Bypass (Exclude)
-/// additions are tracked in `installed_bypass` so teardown can remove them on abort; via_tun
-/// (Include) routes auto-clear on utun drop and aren't tracked.
+/// Live runtime route control for the macOS session via the net_route `Handle` (PF_ROUTE
+/// socket) — NOT a `route` subprocess per route, which (for a domain preset resolving to
+/// thousands of IPs) would spawn thousands of processes and wedge the runtime. via_tun routes
+/// through the utun by ifindex (or, if unknown, via the tun's on-link address). Bypass
+/// additions are tracked in `installed_bypass` so teardown can remove them on abort.
 struct MacOsController {
-    iface: String,
-    gateway: String,
+    handle: Handle,
+    tun_idx: Option<u32>,
+    tun_addr: std::net::Ipv4Addr,
+    gateway: IpAddr,
     installed_bypass: Arc<Mutex<Vec<Cidr>>>,
+}
+
+impl MacOsController {
+    fn via_tun_route(&self, c: &Cidr) -> Route {
+        match self.tun_idx {
+            Some(idx) => Route::new(c.addr, c.prefix).with_ifindex(idx),
+            None => Route::new(c.addr, c.prefix).with_gateway(IpAddr::V4(self.tun_addr)),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -167,17 +182,17 @@ impl RouteController for MacOsController {
         let IpAddr::V4(_) = c.addr else {
             return Ok(());
         };
-        let args =
-            cmd::mac_route_add_via_gateway_args(&c.addr.to_string(), c.prefix, &self.gateway);
-        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        cmd::run(ROUTE, &argv)?;
+        self.handle
+            .add(&Route::new(c.addr, c.prefix).with_gateway(self.gateway))
+            .await?;
         self.installed_bypass.lock().unwrap().push(c.clone());
         Ok(())
     }
     async fn remove_bypass(&self, c: &Cidr) -> std::io::Result<()> {
-        let args = cmd::mac_route_del_args(&c.addr.to_string(), c.prefix);
-        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        let _ = cmd::run(ROUTE, &argv);
+        let _ = self
+            .handle
+            .delete(&Route::new(c.addr, c.prefix).with_gateway(self.gateway))
+            .await;
         self.installed_bypass.lock().unwrap().retain(|x| x != c);
         Ok(())
     }
@@ -185,14 +200,13 @@ impl RouteController for MacOsController {
         let IpAddr::V4(_) = c.addr else {
             return Ok(());
         };
-        let args = cmd::mac_route_add_via_iface_args(&c.addr.to_string(), c.prefix, &self.iface);
-        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        cmd::run(ROUTE, &argv)
+        self.handle.add(&self.via_tun_route(c)).await
     }
     async fn remove_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
-        let args = cmd::mac_route_del_args(&c.addr.to_string(), c.prefix);
-        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        let _ = cmd::run(ROUTE, &argv);
+        let IpAddr::V4(_) = c.addr else {
+            return Ok(());
+        };
+        let _ = self.handle.delete(&self.via_tun_route(c)).await;
         Ok(())
     }
 }
