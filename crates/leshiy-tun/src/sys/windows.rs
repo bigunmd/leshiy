@@ -55,11 +55,19 @@ impl PrivilegedOps for WindowsOps {
         //    default-override halves via the tun interface. Prefer net-route; fall back
         //    to netsh by interface name.
         let handle = Handle::new()?;
-        // The active physical interface name, used for the host-exception fallback, the
-        // split-tunnel bypass routes, and the IPv6 restore. Resolved once.
+        // The active physical interface name (for the host-exception netsh fallback + IPv6
+        // restore) and its ifindex. On Windows, net_route needs the interface index to install
+        // a gateway (next-hop) route — a gateway alone fails — so bypass routes that lacked it
+        // were silently dropped. Take it from the current default route.
         let orig_iface = original_iface_name();
+        let orig_idx = handle
+            .default_route()
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.ifindex);
         let exc = &plan.server_exception;
-        let exc_route = Route::new(exc.dest.addr, exc.dest.prefix).with_gateway(exc.gateway);
+        let exc_route = gateway_route(exc.dest.addr, exc.dest.prefix, exc.gateway, orig_idx);
         if handle.add(&exc_route).await.is_err() {
             let args = cmd::win_route_add_via_gateway_args(
                 &format!("{}/{}", exc.dest.addr, exc.dest.prefix),
@@ -99,7 +107,12 @@ impl PrivilegedOps for WindowsOps {
                 continue;
             };
             let _ = handle
-                .add(&Route::new(b.dest.addr, b.dest.prefix).with_gateway(b.gateway))
+                .add(&gateway_route(
+                    b.dest.addr,
+                    b.dest.prefix,
+                    b.gateway,
+                    orig_idx,
+                ))
                 .await; // best-effort, fast (IP Helper API)
             installed_bypass.lock().unwrap().push(b.dest.clone());
         }
@@ -148,6 +161,7 @@ impl PrivilegedOps for WindowsOps {
             tun_idx,
             tun_addr: tun4,
             gateway: plan.server_exception.gateway,
+            orig_idx,
             installed_bypass: installed_bypass.clone(),
         });
         let guard = WindowsTeardown {
@@ -176,6 +190,8 @@ struct WindowsController {
     tun_idx: Option<u32>,
     tun_addr: std::net::Ipv4Addr,
     gateway: IpAddr,
+    /// Physical NIC ifindex — required for net_route to install a gateway route on Windows.
+    orig_idx: Option<u32>,
     installed_bypass: Arc<Mutex<Vec<Cidr>>>,
 }
 
@@ -195,7 +211,12 @@ impl RouteController for WindowsController {
             return Ok(());
         };
         self.handle
-            .add(&Route::new(c.addr, c.prefix).with_gateway(self.gateway))
+            .add(&gateway_route(
+                c.addr,
+                c.prefix,
+                self.gateway,
+                self.orig_idx,
+            ))
             .await?;
         self.installed_bypass.lock().unwrap().push(c.clone());
         Ok(())
@@ -203,7 +224,12 @@ impl RouteController for WindowsController {
     async fn remove_bypass(&self, c: &Cidr) -> std::io::Result<()> {
         let _ = self
             .handle
-            .delete(&Route::new(c.addr, c.prefix).with_gateway(self.gateway))
+            .delete(&gateway_route(
+                c.addr,
+                c.prefix,
+                self.gateway,
+                self.orig_idx,
+            ))
             .await;
         self.installed_bypass.lock().unwrap().retain(|x| x != c);
         Ok(())
@@ -220,6 +246,17 @@ impl RouteController for WindowsController {
         };
         let _ = self.handle.delete(&self.via_tun_route(c)).await;
         Ok(())
+    }
+}
+
+/// Build a next-hop (gateway) route. On Windows net_route needs the egress interface index to
+/// install a gateway route — a gateway alone is rejected — so attach the physical NIC's ifindex
+/// when known. Used for the server exception and all bypass routes.
+fn gateway_route(addr: IpAddr, prefix: u8, gateway: IpAddr, ifindex: Option<u32>) -> Route {
+    let route = Route::new(addr, prefix).with_gateway(gateway);
+    match ifindex {
+        Some(i) => route.with_ifindex(i),
+        None => route,
     }
 }
 

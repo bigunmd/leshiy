@@ -57,8 +57,16 @@ impl PrivilegedOps for MacOsOps {
         // 2. Routes: server host-exception FIRST (escape the tunnel via the original
         //    gateway), then the default-override halves via the utun interface.
         let handle = Handle::new()?;
+        // Physical NIC ifindex (from the current default route). net_route may need the egress
+        // interface to install a gateway route, so attach it to the exception + bypass routes.
+        let orig_idx = handle
+            .default_route()
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.ifindex);
         let exc = &plan.server_exception;
-        let exc_route = Route::new(exc.dest.addr, exc.dest.prefix).with_gateway(exc.gateway);
+        let exc_route = gateway_route(exc.dest.addr, exc.dest.prefix, exc.gateway, orig_idx);
         if handle.add(&exc_route).await.is_err() {
             // Fallback to BSD `route` if net-route's gateway add is rejected.
             let args = cmd::mac_route_add_via_gateway_args(
@@ -104,7 +112,12 @@ impl PrivilegedOps for MacOsOps {
                 continue;
             };
             let _ = handle
-                .add(&Route::new(b.dest.addr, b.dest.prefix).with_gateway(b.gateway))
+                .add(&gateway_route(
+                    b.dest.addr,
+                    b.dest.prefix,
+                    b.gateway,
+                    orig_idx,
+                ))
                 .await; // best-effort, fast (PF_ROUTE socket)
             installed_bypass.lock().unwrap().push(b.dest.clone());
         }
@@ -139,6 +152,7 @@ impl PrivilegedOps for MacOsOps {
             tun_idx,
             tun_addr: tun4,
             gateway: plan.server_exception.gateway,
+            orig_idx,
             installed_bypass: installed_bypass.clone(),
         });
         let guard = MacOsTeardown {
@@ -164,6 +178,7 @@ struct MacOsController {
     tun_idx: Option<u32>,
     tun_addr: std::net::Ipv4Addr,
     gateway: IpAddr,
+    orig_idx: Option<u32>,
     installed_bypass: Arc<Mutex<Vec<Cidr>>>,
 }
 
@@ -183,7 +198,12 @@ impl RouteController for MacOsController {
             return Ok(());
         };
         self.handle
-            .add(&Route::new(c.addr, c.prefix).with_gateway(self.gateway))
+            .add(&gateway_route(
+                c.addr,
+                c.prefix,
+                self.gateway,
+                self.orig_idx,
+            ))
             .await?;
         self.installed_bypass.lock().unwrap().push(c.clone());
         Ok(())
@@ -191,7 +211,12 @@ impl RouteController for MacOsController {
     async fn remove_bypass(&self, c: &Cidr) -> std::io::Result<()> {
         let _ = self
             .handle
-            .delete(&Route::new(c.addr, c.prefix).with_gateway(self.gateway))
+            .delete(&gateway_route(
+                c.addr,
+                c.prefix,
+                self.gateway,
+                self.orig_idx,
+            ))
             .await;
         self.installed_bypass.lock().unwrap().retain(|x| x != c);
         Ok(())
@@ -208,6 +233,16 @@ impl RouteController for MacOsController {
         };
         let _ = self.handle.delete(&self.via_tun_route(c)).await;
         Ok(())
+    }
+}
+
+/// Build a next-hop (gateway) route, attaching the egress interface index when known —
+/// net_route may need it to install a gateway route. Used for the server exception + bypass.
+fn gateway_route(addr: IpAddr, prefix: u8, gateway: IpAddr, ifindex: Option<u32>) -> Route {
+    let route = Route::new(addr, prefix).with_gateway(gateway);
+    match ifindex {
+        Some(i) => route.with_ifindex(i),
+        None => route,
     }
 }
 
