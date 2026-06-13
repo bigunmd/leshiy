@@ -2650,6 +2650,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "leshiy-desktop"
+version = "1.2.0"
+dependencies = [
+ "directories",
+ "leshiy-client",
+ "leshiy-helper",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+ "tokio",
+]
+
+[[package]]
 name = "leshiy-helper"
 version = "1.2.0"
 dependencies = [
@@ -5006,22 +5022,6 @@ dependencies = [
  "webview2-com",
  "window-vibrancy",
  "windows",
-]
-
-[[package]]
-name = "tauri-app"
-version = "1.2.0"
-dependencies = [
- "directories",
- "leshiy-client",
- "leshiy-helper",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
- "tokio",
 ]
 
 [[package]]
