@@ -15,9 +15,12 @@ use crate::transport::Endpoint;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-/// Maximum bytes accepted per request line (same cap rationale as `control.rs`): a peer
-/// streaming bytes with no newline hits the cap and yields a parse error, not OOM.
-const MAX_LINE: u64 = 64 * 1024;
+/// Maximum bytes accepted per request line: a peer streaming bytes with no newline hits the
+/// cap and yields a parse error, not OOM. Must comfortably fit a `StartVpn` whose `split_tunnel`
+/// carries a large community ruleset — e.g. antifilter (~15.5k CIDRs ≈ 1 MB JSON) or Re:filter's
+/// domain list — merged from several subscriptions. The peer is uid-authorized, so a generous
+/// 16 MiB bound is safe.
+const MAX_LINE: u64 = 16 * 1024 * 1024;
 
 /// Who is permitted to drive the helper. Unix uses `uid`; Windows uses `sid`. The field for
 /// the other OS is simply ignored, so the struct is constructible on every platform.
@@ -288,6 +291,46 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos()
+    }
+
+    // Regression: a StartVpn carrying a large community ruleset (here ~5000 CIDRs, well past
+    // the old 64 KiB cap) must read back fully through the server's `take(MAX_LINE)` reader.
+    // A too-small cap truncates the JSON → parse error → "won't connect".
+    #[tokio::test]
+    async fn large_split_tunnel_request_fits_within_max_line() {
+        use leshiy_client::{RuleSet, SplitCidr, SplitMode, SplitPlan};
+        use std::net::Ipv4Addr;
+        use tokio::io::AsyncReadExt;
+
+        let cidrs: Vec<SplitCidr> = (0..5000u32)
+            .map(|i| SplitCidr {
+                addr: Ipv4Addr::new(10, (i >> 8) as u8, (i & 0xff) as u8, 0).into(),
+                prefix: 24,
+            })
+            .collect();
+        let mut p = params();
+        p.split_tunnel = SplitPlan {
+            base_mode: SplitMode::Include,
+            include: RuleSet {
+                cidrs,
+                domains: vec![],
+            },
+            exclude: RuleSet::default(),
+        };
+        let mut payload = serde_json::to_string(&Request::StartVpn(p.clone())).unwrap();
+        payload.push('\n');
+        assert!(
+            payload.len() > 64 * 1024,
+            "should exceed the old 64 KiB cap"
+        );
+        assert!((payload.len() as u64) < MAX_LINE, "must fit the raised cap");
+
+        // Read through the SAME bounded reader the server uses.
+        let mut r = BufReader::new(payload.as_bytes().take(MAX_LINE));
+        let mut line = String::new();
+        r.read_line(&mut line).await.unwrap();
+        let back: Request = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(back, Request::StartVpn(p));
     }
 
     fn me() -> u32 {
