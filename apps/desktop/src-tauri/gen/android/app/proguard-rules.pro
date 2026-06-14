@@ -19,3 +19,10 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Leshiy VPN: the plugin is loaded reflectively by Tauri (register_android_plugin) and the
+# @InvokeArg arg classes are deserialized reflectively — R8 must not strip/rename them. The
+# VpnService is kept automatically (declared in the manifest).
+-keep class app.leshiy.desktop.VpnPlugin { *; }
+-keep class app.leshiy.desktop.EstablishArgs { *; }
+-keep class app.leshiy.desktop.RouteArg { *; }
