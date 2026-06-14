@@ -20,6 +20,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+# Cross-platform clipboard (Android's webview blocks navigator.clipboard).
+tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 leshiy-client = { path = "../../../crates/leshiy-client" }
@@ -38,6 +40,13 @@ directories = "5"
 
 # Android-only: the in-process VPN engine (TunEngine driven with the VpnService fd). The
 # Rust<->Kotlin bridge goes through Tauri's mobile-plugin channel (run_mobile_plugin), not raw JNI.
+# tracing + paranoid-android forward the crates' `tracing` logs to logcat (`adb logcat`), so
+# connect/dial failures are diagnosable on-device.
 [target.'cfg(target_os = "android")'.dependencies]
 leshiy-tun = { path = "../../../crates/leshiy-tun" }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+paranoid-android = "0.2"
+# Camera QR scanning (mobile-only plugin).
+tauri-plugin-barcode-scanner = "2"
 

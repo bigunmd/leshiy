@@ -123,6 +123,7 @@ pub async fn connect(state: &AppState, uri: String, settings: Settings) -> Resul
         .ok_or_else(|| "VPN plugin not registered".to_string())?;
 
     let _ = app.emit("tunnel:state", "Connecting");
+    tracing::info!("android connect: requesting consent + establishing tunnel");
 
     // 1. VPN consent (one-time system dialog).
     let prep: PrepareResp = plugin
@@ -187,7 +188,7 @@ pub async fn connect(state: &AppState, uri: String, settings: Settings) -> Resul
         let sampler =
             tauri::async_runtime::spawn(sample_throughput(app_task.clone(), counters.clone()));
         if let Err(e) = TunEngine::run(tunnel, cfg, counters, engine_cancel).await {
-            eprintln!("android tun engine exited: {e}");
+            tracing::warn!("android tun engine exited: {e}");
         }
         sampler.abort();
         let _ = app_task.emit("tunnel:state", State::Disconnected);

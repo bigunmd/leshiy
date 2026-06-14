@@ -32,3 +32,9 @@ rustc-ice-*.txt
 *.db
 *.db-wal
 *.db-shm
+
+# Android signing keystores — NEVER commit
+*.jks
+*.keystore
+*.jks.b64
+keystore.properties

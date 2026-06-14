@@ -699,12 +699,32 @@ fn build_app_state(cfg_dir: PathBuf) -> AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    #[allow(unused_mut)]
-    let mut builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
-    // Android: register the VpnService bridge plugin (no-op on desktop).
+    // Android: forward the crates' `tracing` logs to logcat so connect/dial failures are
+    // diagnosable via `adb logcat -s leshiy`. `try_init` is a no-op if a subscriber already exists.
     #[cfg(target_os = "android")]
     {
-        builder = builder.plugin(mobile::init());
+        use tracing_subscriber::prelude::*;
+        let _ = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(paranoid_android::AndroidLogMakeWriter::new(
+                        "leshiy".to_owned(),
+                    )),
+            )
+            .try_init();
+    }
+
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init());
+    // Android: register the VpnService bridge plugin + the camera barcode scanner (mobile-only).
+    #[cfg(target_os = "android")]
+    {
+        builder = builder
+            .plugin(mobile::init())
+            .plugin(tauri_plugin_barcode_scanner::init());
     }
     builder
         .invoke_handler(tauri::generate_handler![

@@ -17,7 +17,12 @@ export function ConnectScreen(p: Props) {
   const reveal = (delay: number) => ({ initial: { opacity: 0, y: 12 }, animate: { opacity: 1, y: 0 }, transition: { delay, duration: 0.5, ease: "easeOut" as const } });
   const idle = p.state === "Disconnected" || p.state === "Error";
   return (
-    <div className="relative z-10 flex h-full flex-col">
+    <div
+      className="relative z-10 flex h-full flex-col"
+      // Respect the device safe-area (status/navigation bars) so the top bar isn't hidden under the
+      // status bar on Android edge-to-edge. Insets are 0 on desktop, so the desktop layout is unchanged.
+      style={{ paddingTop: "env(safe-area-inset-top)", paddingBottom: "env(safe-area-inset-bottom)" }}
+    >
       <motion.div {...reveal(0.05)}><TopBar mode={p.mode} onModeChange={p.onModeChange} onLanguage={p.onOpenLanguage} onSettings={p.onOpenSettings} /></motion.div>
       <main className="flex flex-1 flex-col items-center justify-center gap-[26px]">
         <motion.div {...reveal(0.18)}><ConnectButton state={p.state} onToggle={p.onToggle} disabled={!p.active} /></motion.div>

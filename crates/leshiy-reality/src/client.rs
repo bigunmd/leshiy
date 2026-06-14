@@ -186,18 +186,34 @@ async fn connect_server(server_addr: &str) -> std::io::Result<TcpStream> {
     {
         use std::os::fd::AsRawFd;
         use tokio::net::TcpSocket;
-        // `TcpSocket` needs a concrete addr (not a host:port string), so resolve first.
-        let addr = tokio::net::lookup_host(server_addr)
-            .await?
-            .next()
-            .ok_or_else(|| std::io::Error::other("no address for server"))?;
-        let socket = if addr.is_ipv4() {
-            TcpSocket::new_v4()?
-        } else {
-            TcpSocket::new_v6()?
-        };
-        leshiy_core::protect::protect_fd(socket.as_raw_fd());
-        socket.connect(addr).await
+        // `TcpSocket` needs a concrete addr (not a host:port string), so resolve first. Try EVERY
+        // resolved address (like `TcpStream::connect` does), not just the first — otherwise a
+        // leading unreachable address (e.g. an AAAA on an IPv4-only network) fails the whole dial.
+        let addrs: Vec<std::net::SocketAddr> =
+            tokio::net::lookup_host(server_addr).await?.collect();
+        let mut last_err =
+            std::io::Error::new(std::io::ErrorKind::NotFound, "no address for server");
+        for addr in addrs {
+            let socket = match if addr.is_ipv4() {
+                TcpSocket::new_v4()
+            } else {
+                TcpSocket::new_v6()
+            } {
+                Ok(s) => s,
+                Err(e) => {
+                    last_err = e;
+                    continue;
+                }
+            };
+            // Protect the socket from the VpnService so the SYN egresses the physical NIC (no-op
+            // when no callback is registered — our own app is already excluded from the VPN).
+            leshiy_core::protect::protect_fd(socket.as_raw_fd());
+            match socket.connect(addr).await {
+                Ok(stream) => return Ok(stream),
+                Err(e) => last_err = e,
+            }
+        }
+        Err(last_err)
     }
     #[cfg(not(target_os = "android"))]
     {

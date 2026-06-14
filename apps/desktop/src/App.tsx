@@ -115,7 +115,7 @@ export default function App() {
         onOpenConfigs={() => setSheet("config")} onOpenSettings={() => setSheet("settings")} onOpenLanguage={() => setSheet("language")}
       />
       <ConfigSheet open={sheet === "config"} onOpenChange={close}
-        profiles={profiles.profiles} activeId={profiles.activeId}
+        profiles={profiles.profiles} activeId={profiles.activeId} canScanCamera={platform === "android"}
         onImport={profiles.importProfile} onSelect={profiles.select} onRemove={profiles.remove} onRename={profiles.rename} />
       <SettingsSheet open={sheet === "settings"} onOpenChange={close} settings={settings} onChange={update}
         helperInstalled={helperInstalled && !onDemand} onRemoveHelper={onRemoveHelper}
