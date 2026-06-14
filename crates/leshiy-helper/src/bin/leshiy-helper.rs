@@ -84,10 +84,18 @@ async fn main() -> Result<()> {
 
     let runner = Arc::new(EngineRunner::new());
     tracing::info!(?mode, "leshiy-helper listening");
-    serve_control(&endpoint, runner, auth, mode)
-        .await
-        .context("control server")?;
-    Ok(())
+    let result = serve_control(&endpoint, runner, auth, mode).await;
+
+    // The ephemeral helper must actually terminate when the session ends. Returning from `main`
+    // can hang on tokio-runtime / Wintun reader-thread teardown (the helper would linger in
+    // Task Manager and block the next connect). Force an immediate, clean process exit instead.
+    match result {
+        Ok(()) => std::process::exit(0),
+        Err(e) => {
+            tracing::error!("control server: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Resolve the run flags into an endpoint + authorization, per OS.

@@ -7,7 +7,7 @@
 //! Authorization is OS-enforced by the DACL and additionally checked per-connection by
 //! comparing the client's token SID to `allow.sid` (mirroring the Unix `peer_uid` gate).
 use crate::runner::VpnRunner;
-use crate::server::{Auth, ServeMode, spawn_conn, spawn_exit_watchdog};
+use crate::server::{Auth, ServeMode, spawn_conn};
 use crate::transport::Endpoint;
 use std::os::windows::io::AsRawHandle;
 use std::sync::Arc;
@@ -162,10 +162,9 @@ pub async fn serve(
         std::io::Error::other("missing --allow-sid: refusing to serve an unauthenticated pipe")
     })?;
 
+    // The ephemeral helper stays alive across Stop (instant reconnect, no re-elevation) and
+    // exits only on an explicit `Shutdown` or a dropped `Subscribe` (both via `spawn_conn`).
     let exit = Arc::new(tokio::sync::Notify::new());
-    if matches!(mode, ServeMode::Ephemeral) {
-        spawn_exit_watchdog(runner.clone(), exit.clone());
-    }
     let mut first = true;
     loop {
         // One pending pipe instance; spawn the handler on connect so a held-open Subscribe

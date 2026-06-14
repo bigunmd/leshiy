@@ -31,8 +31,12 @@ pub struct StartParams {
 pub enum Request {
     /// Build the tunnel + bring up the TUN device (idempotent guard: errors if running).
     StartVpn(StartParams),
-    /// Tear down the active session (restores routes/DNS). No-op if idle.
+    /// Tear down the active session (restores routes/DNS). No-op if idle. The helper stays
+    /// alive and ready for a reconnect.
     Stop,
+    /// Tear down the active session AND, for an ephemeral helper, exit the process. Sent by the
+    /// GUI when it quits, so the on-demand helper doesn't linger.
+    Shutdown,
     /// Return a one-shot `Status` snapshot.
     GetStatus,
     /// Stream `Event` frames (one JSON line each) as state/stats change, until the
@@ -121,7 +125,12 @@ mod tests {
 
     #[test]
     fn control_requests_round_trip() {
-        for req in [Request::Stop, Request::GetStatus, Request::Subscribe] {
+        for req in [
+            Request::Stop,
+            Request::Shutdown,
+            Request::GetStatus,
+            Request::Subscribe,
+        ] {
             let line = serde_json::to_string(&req).unwrap();
             let back: Request = serde_json::from_str(&line).unwrap();
             assert_eq!(back, req);

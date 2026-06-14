@@ -149,8 +149,14 @@ impl VpnRunner for EngineRunner {
     }
 
     async fn stop(&self) {
-        if let Some(h) = self.task.lock().unwrap().take() {
+        // Take the handle out (drop the lock before awaiting), then WAIT for the aborted task
+        // to finish unwinding — its `TunSession` guard `Drop` tears down the TUN device + routes
+        // + DNS. Without this await, a quick reconnect's `start()` races the teardown and the
+        // new `tun::create_as_async` hits the not-yet-removed adapter → reconnect silently fails.
+        let handle = self.task.lock().unwrap().take();
+        if let Some(h) = handle {
             h.abort();
+            let _ = h.await;
         }
         self.state_tx.send_replace(State::Disconnected);
     }

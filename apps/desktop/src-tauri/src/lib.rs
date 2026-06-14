@@ -313,6 +313,25 @@ fn set_settings(state: State<AppState>, settings: Settings) -> Result<(), String
     state.save_settings()
 }
 
+/// Stop any running VPN session, then quit. Stopping first makes the ephemeral helper tear
+/// down (routes/DNS restored) and exit on its own — relying on the helper noticing the dropped
+/// pipe after the app is gone is unreliable on Windows, so it would otherwise linger.
+async fn shutdown_and_exit(app: tauri::AppHandle) {
+    let client = { app.state::<AppState>().helper.lock().unwrap().take() };
+    if let Some(c) = client {
+        let _ = c.shutdown().await; // stop the session AND exit the ephemeral helper
+    }
+    app.exit(0);
+}
+
+/// Fully quit the application. Used by the close-window dialog ("Quit") and mirrors the tray
+/// "Quit" item. The frontend owns the close decision (see App.tsx), so this is the single
+/// explicit exit path.
+#[tauri::command]
+async fn quit_app(app: tauri::AppHandle) {
+    shutdown_and_exit(app).await;
+}
+
 /// Parse split-tunnel rule text in the given `format` ("lines" = native, "hosts" = hosts-file)
 /// and `mode`. Reuses the `leshiy-client` parser; the error string is shown in the editor.
 fn parse_split_text(
@@ -487,7 +506,11 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
                     let _ = w.set_focus();
                 }
             }
-            "quit" => app.exit(0),
+            "quit" => {
+                // Stop the VPN session (so the ephemeral helper exits) before quitting.
+                let app2 = app.clone();
+                tauri::async_runtime::spawn(async move { shutdown_and_exit(app2).await });
+            }
             _ => {}
         })
         .build(app)?;
@@ -566,7 +589,8 @@ pub fn run() {
             helper_installed,
             install_helper,
             remove_helper,
-            platform
+            platform,
+            quit_app
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -608,12 +632,9 @@ pub fn run() {
             build_tray(app)?;
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
-            }
-        })
+        // The frontend owns the window-close decision (ask / quit / hide-to-tray):
+        // it intercepts CloseRequested via getCurrentWindow().onCloseRequested() and
+        // either hides the window or calls the `quit_app` command. See App.tsx.
         .run(tauri::generate_context!())
         .expect("error while running leshiy desktop");
 }

@@ -51,9 +51,21 @@ impl HelperClient {
         }
     }
 
-    /// Tear down the active session (idempotent on the helper side).
+    /// Tear down the active session (idempotent on the helper side). The helper stays alive,
+    /// ready for a reconnect.
     pub async fn stop(&self) -> Result<(), HelperError> {
         match self.request(&Request::Stop).await? {
+            Response::Ok => Ok(()),
+            Response::Err { message } => Err(HelperError::Engine(message)),
+            other => Err(HelperError::BadRequest(format!(
+                "unexpected reply: {other:?}"
+            ))),
+        }
+    }
+
+    /// Tear down the active session AND ask an ephemeral helper to exit (the GUI is quitting).
+    pub async fn shutdown(&self) -> Result<(), HelperError> {
+        match self.request(&Request::Shutdown).await? {
             Response::Ok => Ok(()),
             Response::Err { message } => Err(HelperError::Engine(message)),
             other => Err(HelperError::BadRequest(format!(

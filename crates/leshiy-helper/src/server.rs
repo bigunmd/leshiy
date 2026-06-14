@@ -46,6 +46,8 @@ pub enum ServeMode {
 pub enum Handled {
     /// A `Subscribe` stream that has now ended (the controlling client went away).
     Subscribe,
+    /// An explicit `Shutdown` request (the GUI is quitting) — the engine has been stopped.
+    Shutdown,
     /// Any other one-shot request.
     Other,
 }
@@ -61,10 +63,9 @@ pub async fn serve_control(
     {
         let Endpoint::Socket(path) = endpoint;
         let listener = crate::transport::unix::bind(path, allow.uid)?;
+        // The ephemeral helper stays alive across Stop (so reconnect is instant — no re-elevation)
+        // and exits only on an explicit `Shutdown` or a dropped `Subscribe` (both via `spawn_conn`).
         let exit = Arc::new(tokio::sync::Notify::new());
-        if matches!(mode, ServeMode::Ephemeral) {
-            spawn_exit_watchdog(runner.clone(), exit.clone());
-        }
         loop {
             tokio::select! {
                 accepted = crate::transport::unix::accept(&listener, allow.uid) => {
@@ -82,30 +83,11 @@ pub async fn serve_control(
     }
 }
 
-/// Ephemeral exit watchdog: notify `exit` once the session ends — i.e. the state returns to
-/// `Disconnected`/`Error` after having been active (the GUI sent `Stop`, or the engine exited).
-/// Runs as its own task with `borrow_and_update`, so it processes EVERY state change and can't
-/// miss a `Connected -> Disconnected` transition the way polling inside the accept loop can.
-pub(crate) fn spawn_exit_watchdog(runner: Arc<dyn VpnRunner>, exit: Arc<tokio::sync::Notify>) {
-    use crate::State;
-    let mut sw = runner.subscribe_state();
-    tokio::spawn(async move {
-        let mut ever_connected = false;
-        while sw.changed().await.is_ok() {
-            match *sw.borrow_and_update() {
-                State::Connecting | State::Connected | State::Reconnecting => ever_connected = true,
-                State::Disconnected | State::Error if ever_connected => {
-                    exit.notify_one();
-                    break;
-                }
-                _ => {}
-            }
-        }
-    });
-}
-
-/// Spawn a per-connection handler. If it carried the controlling `Subscribe` stream and that
-/// stream ended, stop the engine (restore the network); in `Ephemeral` mode also signal exit.
+/// Spawn a per-connection handler. Two cases end an ephemeral helper's session: the controlling
+/// `Subscribe` stream dropping (GUI closed/crashed with no `Shutdown`) — stop the engine to
+/// restore the network, then signal exit; or an explicit `Shutdown` (GUI quitting) — the engine
+/// was already stopped in `dispatch`, just signal exit. A plain `Stop` (disconnect) is
+/// `Handled::Other`: the helper stays alive for a fast reconnect.
 pub(crate) fn spawn_conn<S>(
     stream: S,
     runner: Arc<dyn VpnRunner>,
@@ -115,14 +97,19 @@ pub(crate) fn spawn_conn<S>(
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
-        if matches!(
-            handle_stream(stream, runner.clone()).await,
-            Ok(Handled::Subscribe)
-        ) {
-            runner.stop().await;
-            if matches!(mode, ServeMode::Ephemeral) {
-                exit.notify_one();
+        match handle_stream(stream, runner.clone()).await {
+            Ok(Handled::Subscribe) => {
+                runner.stop().await;
+                if matches!(mode, ServeMode::Ephemeral) {
+                    exit.notify_one();
+                }
             }
+            Ok(Handled::Shutdown) => {
+                if matches!(mode, ServeMode::Ephemeral) {
+                    exit.notify_one();
+                }
+            }
+            _ => {}
         }
     });
 }
@@ -177,6 +164,13 @@ where
             runner.stop().await;
             write_line(stream, &Response::Ok).await?;
             Ok(Handled::Other)
+        }
+        Request::Shutdown => {
+            // Stop the engine, ack, and signal the serve loop to exit (ephemeral): the GUI is
+            // quitting and wants the on-demand helper gone, not lingering for a reconnect.
+            runner.stop().await;
+            write_line(stream, &Response::Ok).await?;
+            Ok(Handled::Shutdown)
         }
         Request::GetStatus => {
             let status = Status {
@@ -492,18 +486,17 @@ mod tests {
         );
     }
 
-    /// On a normal disconnect (`Stop`), the ephemeral helper must RETURN from `serve_control`
-    /// (the process would then exit) — via the watchdog catching `Connected -> Disconnected`,
-    /// not the old racy accept-loop poll.
+    /// `Stop` keeps the ephemeral helper alive (for reconnect); only `Shutdown` makes
+    /// `serve_control` return (the process then exits). This verifies the Shutdown path.
     #[tokio::test]
-    async fn ephemeral_serve_returns_after_stop() {
+    async fn ephemeral_serve_returns_after_shutdown() {
         let dir = std::env::temp_dir().join(format!("leshiy-helper-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join(format!("e-{}.sock", uuid_like()));
         let runner = Arc::new(FakeRunner::new());
         let r2 = runner.clone();
         let path = sock.clone();
-        let serve = tokio::spawn(async move {
+        let mut serve = tokio::spawn(async move {
             serve_control(
                 &Endpoint::Socket(path),
                 r2,
@@ -526,7 +519,20 @@ mod tests {
             serde_json::from_str::<Response>(r.trim()).unwrap(),
             Response::Ok
         );
+        // Stop alone must NOT end the helper (it stays for reconnect).
         let r = line(&sock, &Request::Stop).await;
+        assert_eq!(
+            serde_json::from_str::<Response>(r.trim()).unwrap(),
+            Response::Ok
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), &mut serve)
+                .await
+                .is_err(),
+            "ephemeral serve_control must stay alive after Stop"
+        );
+        // Shutdown ends it.
+        let r = line(&sock, &Request::Shutdown).await;
         assert_eq!(
             serde_json::from_str::<Response>(r.trim()).unwrap(),
             Response::Ok
@@ -534,7 +540,28 @@ mod tests {
         let done = tokio::time::timeout(std::time::Duration::from_secs(3), serve).await;
         assert!(
             done.is_ok(),
-            "ephemeral serve_control must return after Stop"
+            "ephemeral serve_control must return after Shutdown"
         );
+    }
+
+    /// Connect → disconnect → connect again must work without the helper exiting in between
+    /// (the on-demand helper stays alive across `Stop` so reconnect needs no re-elevation).
+    #[tokio::test]
+    async fn ephemeral_reconnect_after_stop() {
+        let (sock, runner) = spawn(me(), ServeMode::Ephemeral).await;
+        for _ in 0..2 {
+            let r = line(&sock, &Request::StartVpn(params())).await;
+            assert_eq!(
+                serde_json::from_str::<Response>(r.trim()).unwrap(),
+                Response::Ok
+            );
+            assert_eq!(runner.state(), State::Connected);
+            let r = line(&sock, &Request::Stop).await;
+            assert_eq!(
+                serde_json::from_str::<Response>(r.trim()).unwrap(),
+                Response::Ok
+            );
+            assert_eq!(runner.state(), State::Disconnected);
+        }
     }
 }
