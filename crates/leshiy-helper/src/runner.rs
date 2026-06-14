@@ -17,6 +17,11 @@ use tokio::task::JoinHandle;
 /// `start` can reset the state to `Disconnected` rather than leave the GUI spinning forever.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Upper bound on the graceful engine teardown (route/DNS restore). Generous because a large
+/// split-tunnel ruleset removes many routes; if it's exceeded we proceed anyway (the helper is
+/// either staying alive for a fresh session or about to exit, which the OS cleans up).
+const STOP_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Zeroed rates — the resting value published before connecting and after disconnect.
 fn zero_rates() -> Rates {
     Rates {
@@ -53,13 +58,21 @@ pub trait VpnRunner: Send + Sync {
     fn subscribe_stats(&self) -> watch::Receiver<Rates>;
 }
 
+/// A running engine session: the spawned task plus the `Notify` used to ask it to stop
+/// gracefully (see [`EngineRunner::stop`] — we cancel cooperatively, never `abort`, so the
+/// Wintun adapter is released cleanly on Windows).
+struct Session {
+    task: JoinHandle<()>,
+    cancel: Arc<tokio::sync::Notify>,
+}
+
 /// Production runner: dials the URI to a `Tunnel`, resolves the server IP + original
-/// gateway, and runs `TunEngine::run` in a spawned task. On exit (engine returns or the
-/// task is aborted by `stop`), state flips back to `Disconnected`.
+/// gateway, and runs `TunEngine::run` in a spawned task. On exit (engine returns or it's
+/// cancelled by `stop`), state flips back to `Disconnected`.
 pub struct EngineRunner {
     state_tx: watch::Sender<State>,
     stats_tx: watch::Sender<Rates>,
-    task: Mutex<Option<JoinHandle<()>>>,
+    session: Mutex<Option<Session>>,
 }
 
 impl Default for EngineRunner {
@@ -75,7 +88,7 @@ impl EngineRunner {
         EngineRunner {
             state_tx,
             stats_tx,
-            task: Mutex::new(None),
+            session: Mutex::new(None),
         }
     }
 
@@ -135,11 +148,15 @@ impl EngineRunner {
         let state_tx = self.state_tx.clone();
         let stats_tx = self.stats_tx.clone();
         let counters = Arc::new(ByteCounters::new());
+        // Cooperative-stop signal: `stop` fires this and the engine returns gracefully (see
+        // `TunEngine::run`). We never `abort` the task — that wedges the Wintun teardown.
+        let cancel = Arc::new(tokio::sync::Notify::new());
+        let engine_cancel = cancel.clone();
         state_tx.send_replace(State::Connected);
         let handle = tokio::spawn(async move {
             // Publish live throughput while the engine runs; abort the sampler on exit.
             let sampler = tokio::spawn(sample_throughput(counters.clone(), stats_tx.clone()));
-            if let Err(e) = TunEngine::run(tunnel, cfg, counters).await {
+            if let Err(e) = TunEngine::run(tunnel, cfg, counters, engine_cancel).await {
                 tracing::warn!("tun engine exited: {e}");
             }
             sampler.abort();
@@ -147,7 +164,10 @@ impl EngineRunner {
             stats_tx.send_replace(zero_rates());
             state_tx.send_replace(State::Disconnected);
         });
-        *self.task.lock().unwrap() = Some(handle);
+        *self.session.lock().unwrap() = Some(Session {
+            task: handle,
+            cancel,
+        });
         Ok(())
     }
 }
@@ -169,16 +189,20 @@ impl VpnRunner for EngineRunner {
     }
 
     async fn stop(&self) {
-        // Take the handle out (drop the lock before awaiting), then WAIT for the aborted task
-        // to finish unwinding — its `TunSession` guard `Drop` tears down the TUN device + routes
-        // + DNS. Without this await, a quick reconnect's `start()` races the teardown and the
-        // new `tun::create_as_async` hits the not-yet-removed adapter → reconnect silently fails.
-        let handle = self.task.lock().unwrap().take();
-        if let Some(h) = handle {
-            tracing::info!("stop: aborting engine task and awaiting teardown");
-            h.abort();
-            let _ = h.await;
-            tracing::info!("stop: engine teardown complete");
+        // Take the session out (drop the lock before awaiting). Ask the engine to stop
+        // GRACEFULLY (`cancel`) rather than aborting the task: an aborted task drops the netstack
+        // from a cancellation context, which can't release the Wintun reader's blocking wait, so
+        // the device drop hangs and the adapter is never freed (next session → 0x4DF). The
+        // graceful path returns from `TunEngine::run` after the route/DNS restore completes. Bound
+        // the wait so a pathological teardown can't hang the helper forever.
+        let session = self.session.lock().unwrap().take();
+        if let Some(Session { task, cancel }) = session {
+            tracing::info!("stop: signalling engine cancel and awaiting graceful teardown");
+            cancel.notify_one();
+            match tokio::time::timeout(STOP_TIMEOUT, task).await {
+                Ok(_) => tracing::info!("stop: engine teardown complete"),
+                Err(_) => tracing::warn!("stop: engine teardown timed out; proceeding"),
+            }
         }
         self.state_tx.send_replace(State::Disconnected);
     }

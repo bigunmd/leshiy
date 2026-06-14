@@ -12,6 +12,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::Notify;
 
 /// Configuration for one full-tunnel session.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,6 +98,7 @@ impl TunEngine {
         tunnel: Arc<dyn Tunnel>,
         cfg: TunConfig,
         counters: Arc<ByteCounters>,
+        cancel: Arc<Notify>,
     ) -> std::io::Result<()> {
         // Drop provably-redundant rules (e.g. Include rules under an Exclude base with no
         // excludes are already tunneled) before installing routes / resolving domains.
@@ -154,10 +156,27 @@ impl TunEngine {
             )))
         });
 
-        let result = accept_loop(&mut ip_stack, tunnel, counters).await;
-        tracing::info!(?result, "tun engine accept loop exited");
+        // Run until the accept loop errors OR the caller signals a graceful stop. We must NOT rely
+        // on the spawned task being aborted for teardown: aborting drops the netstack mid-flight,
+        // and the Wintun reader's blocking `WaitForMultipleObjects` is only released by the
+        // session's clean shutdown path — which a cancellation-context drop skips. The adapter then
+        // never releases and the next session fails with "rings already registered" (0x4DF). So the
+        // caller signals `cancel`; we return normally and tear down in a controlled order, which
+        // guarantees the route/DNS restore (`guard`) runs to completion before we return.
+        let result = tokio::select! {
+            biased;
+            () = cancel.notified() => {
+                tracing::info!("tun engine cancel requested; tearing down");
+                Ok(())
+            }
+            r = accept_loop(&mut ip_stack, tunnel, counters) => {
+                tracing::info!(?r, "tun engine accept loop exited");
+                r
+            }
+        };
         drop(_resolver); // stop the resolver BEFORE teardown removes its routes
-        drop(guard); // restore DNS + IPv6, remove bypass routes
+        drop(ip_stack); // release the netstack/TUN device (override routes auto-clear)
+        drop(guard); // restore DNS + IPv6, remove bypass routes — runs to completion here
         result
     }
 }

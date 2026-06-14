@@ -49,7 +49,17 @@ pub async fn run(
     tracing::info!(%server_ip, %orig_gateway, tun = %cfg.tun_name, "starting full-tunnel VPN");
     // The CLI doesn't display throughput; pass a throwaway counter.
     let counters = Arc::new(leshiy_client::ByteCounters::new());
-    TunEngine::run(tunnel, cfg, counters)
+    // Cooperative-stop signal, fired on Ctrl-C so the engine tears down cleanly (restores
+    // routes/DNS + releases the TUN device) instead of the process being killed mid-flight.
+    let cancel = Arc::new(tokio::sync::Notify::new());
+    let sig_cancel = cancel.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!("ctrl-c received; stopping VPN");
+            sig_cancel.notify_one();
+        }
+    });
+    TunEngine::run(tunnel, cfg, counters, cancel)
         .await
         .map_err(|e| anyhow!("tun engine: {e}"))
 }
