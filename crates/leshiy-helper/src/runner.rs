@@ -13,6 +13,10 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+/// How long to wait for the REALITY dial/handshake before giving up. A stuck dial must fail so
+/// `start` can reset the state to `Disconnected` rather than leave the GUI spinning forever.
+const DIAL_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Zeroed rates — the resting value published before connecting and after disconnect.
 fn zero_rates() -> Rates {
     Rates {
@@ -82,16 +86,11 @@ impl EngineRunner {
     fn pref(_t: TransportPref) -> TransportPref {
         TransportPref::Tcp
     }
-}
 
-#[async_trait::async_trait]
-impl VpnRunner for EngineRunner {
-    async fn start(&self, params: &StartParams) -> Result<(), HelperError> {
-        if matches!(self.state(), State::Connecting | State::Connected) {
-            return Err(HelperError::AlreadyRunning);
-        }
-        self.state_tx.send_replace(State::Connecting);
-
+    /// The fallible body of `start`: resolve the server, dial the tunnel, and spawn the engine.
+    /// Kept separate so `start` can uniformly reset the published state to `Disconnected` if any
+    /// of these steps fails (rather than leaving the GUI wedged on "Connecting").
+    async fn start_session(&self, params: &StartParams) -> Result<(), HelperError> {
         let parsed = RealityUri::parse(&params.uri)
             .map_err(|e| HelperError::Engine(format!("bad uri: {e}")))?;
         let server_ip = tokio::net::lookup_host(&parsed.server_addr)
@@ -105,13 +104,17 @@ impl VpnRunner for EngineRunner {
             .map_err(|e| HelperError::Engine(format!("discover default gateway: {e}")))?;
 
         tracing::info!(server = %parsed.server_addr, %server_ip, %orig_gateway, "dialing server");
-        let tunnel: Arc<dyn Tunnel> = Arc::from(
-            RealTransport
-                .dial(&params.uri, Self::pref(params.transport))
-                .await
-                // Surface the real dial error (don't swallow it) so failures are diagnosable.
-                .map_err(|e| HelperError::Engine(format!("dial failed: {e}")))?,
-        );
+        // Bound the dial so a stuck handshake fails (and resets state) instead of pinning the GUI
+        // on "Connecting" indefinitely.
+        let dialed = tokio::time::timeout(
+            DIAL_TIMEOUT,
+            RealTransport.dial(&params.uri, Self::pref(params.transport)),
+        )
+        .await
+        .map_err(|_| HelperError::Engine("dial timed out".into()))?
+        // Surface the real dial error (don't swallow it) so failures are diagnosable.
+        .map_err(|e| HelperError::Engine(format!("dial failed: {e}")))?;
+        let tunnel: Arc<dyn Tunnel> = Arc::from(dialed);
         tracing::info!("tunnel dialed; bringing up the TUN engine");
 
         let cfg = TunConfig {
@@ -146,6 +149,23 @@ impl VpnRunner for EngineRunner {
         });
         *self.task.lock().unwrap() = Some(handle);
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl VpnRunner for EngineRunner {
+    async fn start(&self, params: &StartParams) -> Result<(), HelperError> {
+        if matches!(self.state(), State::Connecting | State::Connected) {
+            return Err(HelperError::AlreadyRunning);
+        }
+        self.state_tx.send_replace(State::Connecting);
+        // If ANY setup step below fails, reset to Disconnected before returning — otherwise the
+        // state stays "Connecting" forever and the GUI hangs on the spinner with no way back.
+        let result = self.start_session(params).await;
+        if result.is_err() {
+            self.state_tx.send_replace(State::Disconnected);
+        }
+        result
     }
 
     async fn stop(&self) {

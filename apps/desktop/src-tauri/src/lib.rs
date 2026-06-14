@@ -191,10 +191,20 @@ async fn connect(state: State<'_, AppState>) -> Result<(), String> {
 async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
     let mode = state.settings.lock().unwrap().mode;
     if mode_uses_helper(mode) {
-        // Clone the cheap handle out of the guard, then drop the lock before `stop().await`.
-        let client = { state.helper.lock().unwrap().clone() };
+        // Take the handle out (the helper is about to exit, so don't keep a stale client around),
+        // then drop the lock before `shutdown().await`. We use `shutdown` (not `stop`) so the
+        // on-demand helper TEARS DOWN and EXITS on disconnect: the next connect spawns a fresh,
+        // clean helper. Reusing a long-lived helper across reconnects left stale in-process state
+        // that wedged the second dial (UI stuck on "Connecting"); a fresh process per connect
+        // behaves exactly like the first (working) connect.
+        let client = { state.helper.lock().unwrap().take() };
         if let Some(c) = client {
-            c.stop().await.map_err(|e| e.to_string())?;
+            c.shutdown().await.map_err(|e| e.to_string())?;
+        }
+        // The helper is exiting, so its dropped `Subscribe` stream won't deliver a final state.
+        // Tell the UI we're disconnected directly so the orb returns to idle.
+        if let Some(app) = state.app_handle.get() {
+            let _ = app.emit("tunnel:state", leshiy_client::State::Disconnected);
         }
     } else {
         state.supervisor.disconnect();
