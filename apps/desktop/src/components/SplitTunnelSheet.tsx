@@ -288,23 +288,21 @@ export function SplitTunnelSheet(p: Props) {
           <div className="mt-3 flex flex-col gap-2">
             <Input className="font-mono bg-bg1 text-xs" placeholder={t("splitTunnel.customUrl")} value={customUrl}
               onChange={(e) => setCustomUrl(e.target.value)} />
-            <div className="flex items-center gap-2">
-              <div className="flex gap-1">
-                {(["lines", "hosts", "domainlist"] as const).map((f) => (
-                  <Button key={f} size="sm" variant={customFmt === f ? "secondary" : "ghost"} onClick={() => setCustomFmt(f)}
-                    className={cn("font-mono text-[10px] uppercase tracking-widest", customFmt === f ? "bg-moss text-foreground" : "text-dim")}>
-                    {t(`splitTunnel.fmt_${f}`)}
-                  </Button>
-                ))}
-              </div>
-              <div className="flex gap-1">
-                {(["include", "exclude"] as const).map((m) => (
-                  <Button key={m} size="sm" variant={customMode === m ? "secondary" : "ghost"} onClick={() => setCustomMode(m)}
-                    className={cn("font-mono text-[10px] uppercase tracking-widest", customMode === m ? "bg-moss text-foreground" : "text-dim")}>
-                    {t(`splitTunnel.${m}`)}
-                  </Button>
-                ))}
-              </div>
+            <div className="flex flex-wrap gap-1">
+              {(["lines", "hosts", "domainlist"] as const).map((f) => (
+                <Button key={f} size="sm" variant={customFmt === f ? "secondary" : "ghost"} onClick={() => setCustomFmt(f)}
+                  className={cn("font-mono text-[10px] uppercase tracking-widest", customFmt === f ? "bg-moss text-foreground" : "text-dim")}>
+                  {t(`splitTunnel.fmt_${f}`)}
+                </Button>
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-1">
+              {(["include", "exclude"] as const).map((m) => (
+                <Button key={m} size="sm" variant={customMode === m ? "secondary" : "ghost"} onClick={() => setCustomMode(m)}
+                  className={cn("font-mono text-[10px] uppercase tracking-widest", customMode === m ? "bg-moss text-foreground" : "text-dim")}>
+                  {t(`splitTunnel.${m}`)}
+                </Button>
+              ))}
               <Button onClick={addCustom} disabled={!customUrl.trim()} className="ml-auto">{t("splitTunnel.add")}</Button>
             </div>
           </div>
