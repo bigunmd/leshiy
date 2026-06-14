@@ -2654,8 +2654,10 @@ name = "leshiy-desktop"
 version = "1.2.0"
 dependencies = [
  "directories",
+ "jni",
  "leshiy-client",
  "leshiy-helper",
+ "leshiy-tun",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

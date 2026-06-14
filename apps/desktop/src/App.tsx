@@ -39,7 +39,9 @@ export default function App() {
 
   // Intercept the window close: honor a remembered preference, otherwise prompt.
   // The frontend is the sole owner of close handling (the Rust side no longer hides).
+  // Desktop-only: Android has no window close button / system tray (OS-managed lifecycle).
   useEffect(() => {
+    if (!platform || platform === "android") return;
     const win = getCurrentWindow();
     let unlisten: (() => void) | undefined;
     void win.onCloseRequested((event) => {
@@ -51,7 +53,7 @@ export default function App() {
       }
     }).then((u) => { unlisten = u; });
     return () => { unlisten?.(); };
-  }, []);
+  }, [platform]);
 
   const onCloseQuit = (remember: boolean) => {
     setCloseOpen(false);
