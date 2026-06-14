@@ -23,6 +23,7 @@ export const api = {
   removeHelper: () => invoke<void>("remove_helper"),
   platform: () => invoke<string>("platform"),
   quit: () => invoke<void>("quit_app"),
+  hideToTray: () => invoke<void>("hide_window"),
 };
 export const onState = (cb: (s: TunnelState) => void): Promise<UnlistenFn> =>
   listen<TunnelState>("tunnel:state", (e) => cb(e.payload));

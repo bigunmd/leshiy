@@ -46,7 +46,7 @@ export default function App() {
       event.preventDefault();
       switch (settingsRef.current.close_behavior) {
         case "quit": void api.quit(); break;
-        case "minimize": void win.hide(); break;
+        case "minimize": void api.hideToTray(); break;
         default: setCloseOpen(true); break;
       }
     }).then((u) => { unlisten = u; });
@@ -61,7 +61,7 @@ export default function App() {
   const onCloseMinimize = (remember: boolean) => {
     setCloseOpen(false);
     if (remember) void update({ close_behavior: "minimize" });
-    void getCurrentWindow().hide();
+    void api.hideToTray();
   };
 
   // All desktop platforms use the on-demand model: connect() itself triggers the OS elevation

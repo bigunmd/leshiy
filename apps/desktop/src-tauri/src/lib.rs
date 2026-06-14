@@ -157,13 +157,12 @@ async fn connect(state: State<'_, AppState>) -> Result<(), String> {
 
         let client = HelperClient::connect(endpoint);
         *state.helper.lock().unwrap() = Some(client.clone());
-        let cache = state.sub_cache.lock().unwrap().clone();
-        let params = build_start_params(uri, &settings, &cache);
-        client.start_vpn(params).await.map_err(|e| e.to_string())?;
 
-        // Relay the helper's state/stats onto the SAME webview events the proxy path uses,
-        // so `useTunnel` is reused unchanged. The forwarder ends when the helper closes the
-        // subscribe stream (final Disconnected event returns the orb to idle).
+        // Relay the helper's state/stats onto the SAME webview events the proxy path uses, so
+        // `useTunnel` is reused unchanged. SUBSCRIBE FIRST (before start_vpn) so the orb reflects
+        // helper state immediately — Connecting → Connected, or Connecting → Disconnected if the
+        // dial fails — regardless of how long start_vpn takes or whether it errors. The forwarder
+        // ends when the helper closes the subscribe stream.
         let app = state
             .app_handle
             .get()
@@ -180,6 +179,19 @@ async fn connect(state: State<'_, AppState>) -> Result<(), String> {
                 }
             }
         });
+
+        let cache = state.sub_cache.lock().unwrap().clone();
+        let params = build_start_params(uri, &settings, &cache);
+        // Self-heal a reused helper left in a bad state (e.g. a previous teardown that didn't
+        // fully complete): if the first start fails, tear the session down and retry once.
+        if let Err(e) = client.start_vpn(params.clone()).await {
+            eprintln!("start_vpn failed ({e}); resetting the helper session and retrying");
+            let _ = client.stop().await;
+            client
+                .start_vpn(params)
+                .await
+                .map_err(|e2| e2.to_string())?;
+        }
     } else {
         // Proxy mode: unchanged from today.
         state.supervisor.connect(uri);
@@ -199,10 +211,14 @@ async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
         // behaves exactly like the first (working) connect.
         let client = { state.helper.lock().unwrap().take() };
         if let Some(c) = client {
-            c.shutdown().await.map_err(|e| e.to_string())?;
+            // Best-effort: tear down the session AND exit the helper. We deliberately DON'T
+            // propagate an error here — a wedged helper or a broken pipe must not block the UI
+            // reset below, otherwise the orb stays stuck on "Connected" ("first click does
+            // nothing"). The next connect re-elevates a fresh helper regardless.
+            let _ = c.shutdown().await;
         }
         // The helper is exiting, so its dropped `Subscribe` stream won't deliver a final state.
-        // Tell the UI we're disconnected directly so the orb returns to idle.
+        // Tell the UI we're disconnected directly so the orb always returns to idle.
         if let Some(app) = state.app_handle.get() {
             let _ = app.emit("tunnel:state", leshiy_client::State::Disconnected);
         }
@@ -340,6 +356,15 @@ async fn shutdown_and_exit(app: tauri::AppHandle) {
 #[tauri::command]
 async fn quit_app(app: tauri::AppHandle) {
     shutdown_and_exit(app).await;
+}
+
+/// Hide the main window to the system tray. Done from Rust (like the old close handler) so it
+/// doesn't require the `core:window:allow-hide` capability that a JS `window.hide()` would.
+#[tauri::command]
+fn hide_window(app: tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
 }
 
 /// Parse split-tunnel rule text in the given `format` ("lines" = native, "hosts" = hosts-file)
@@ -600,7 +625,8 @@ pub fn run() {
             install_helper,
             remove_helper,
             platform,
-            quit_app
+            quit_app,
+            hide_window
         ])
         .setup(|app| {
             let handle = app.handle().clone();
