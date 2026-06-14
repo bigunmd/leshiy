@@ -177,13 +177,41 @@ impl RealityConn {
     }
 }
 
+/// Open the TCP connection to the REALITY server. On Android the socket must be **protected**
+/// from the VpnService (so the SYN egresses the physical NIC instead of looping back into our own
+/// tunnel) — we create the socket via `TcpSocket`, hand its fd to the registered protect callback
+/// *before* connecting, then connect. Everywhere else this is a plain `TcpStream::connect`.
+async fn connect_server(server_addr: &str) -> std::io::Result<TcpStream> {
+    #[cfg(target_os = "android")]
+    {
+        use std::os::fd::AsRawFd;
+        use tokio::net::TcpSocket;
+        // `TcpSocket` needs a concrete addr (not a host:port string), so resolve first.
+        let addr = tokio::net::lookup_host(server_addr)
+            .await?
+            .next()
+            .ok_or_else(|| std::io::Error::other("no address for server"))?;
+        let socket = if addr.is_ipv4() {
+            TcpSocket::new_v4()?
+        } else {
+            TcpSocket::new_v6()?
+        };
+        leshiy_core::protect::protect_fd(socket.as_raw_fd());
+        socket.connect(addr).await
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        TcpStream::connect(server_addr).await
+    }
+}
+
 /// Connect to the REALITY server, authenticate, and establish the mux tunnel.
 /// Returns a [`RealityConn`] that can be passed to [`serve_socks5`].
 pub async fn connect_reality(
     server_addr: &str,
     cfg: ClientAuthConfig,
 ) -> crate::Result<RealityConn> {
-    let sock = TcpStream::connect(server_addr)
+    let sock = connect_server(server_addr)
         .await
         .map_err(crate::RealityError::Io)?;
     sock.set_nodelay(true).ok();

@@ -25,6 +25,16 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::WindowsOps as PlatformOps;
 
+// Android: the TUN fd is created by the OS `VpnService` (routing/DNS owned by it). The backend
+// just wraps that fd; no `net-route`, no privilege elevation. The fd is injected via
+// `android::set_tun_fd` by the mobile bridge before the engine starts.
+#[cfg(target_os = "android")]
+mod android;
+#[cfg(target_os = "android")]
+pub use android::AndroidOps as PlatformOps;
+#[cfg(target_os = "android")]
+pub use android::{set_tun_fd, take_tun_fd};
+
 // Shared command runner + pure argument-builders for the macOS + Windows backends.
 // Gated to also compile under `test` so the pure builders (and their unit tests) run on
 // the Linux host via `cargo test` — the privileged glue in macos.rs/windows.rs stays
@@ -32,9 +42,19 @@ pub use windows::WindowsOps as PlatformOps;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod cmd;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "android"
+)))]
 mod stub;
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "android"
+)))]
 pub use stub::StubOps as PlatformOps;
 
 /// An opened TUN device plus an RAII guard that restores DNS / IPv6 state on drop, and a

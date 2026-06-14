@@ -2,7 +2,11 @@
 //! local SOCKS5 port (and, with the kill switch, to *leave it set* on an unexpected
 //! drop so apps fail closed). Real per-OS implementations land in Plan 4; the trait
 //! lets the supervisor be tested with a recording fake.
-use crate::error::{ClientError, Result};
+use crate::error::Result;
+// `ClientError` is only constructed by the per-OS proxy impls (gsettings/networksetup/registry),
+// which are cfg'd out on targets like Android — import it only where those impls compile.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use crate::error::ClientError;
 use std::net::SocketAddr;
 
 /// Sets/clears the operating-system proxy.

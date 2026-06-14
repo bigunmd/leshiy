@@ -13,4 +13,10 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 tun = { workspace = true }
 ipstack = { workspace = true }
+
+# Route-table manipulation + gateway discovery — desktop-only. On Android the routing is owned
+# by VpnService.Builder (and `net-route`/its `nix`/libc plumbing doesn't target the Android NDK),
+# so it's gated to the desktop OSes. The host build (incl. `cfg(test)` which compiles the macOS
+# backend for type-checking) is covered by the `linux` arm.
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 net-route = { workspace = true }
