@@ -52,13 +52,7 @@ struct RunArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "leshiy_helper=info,leshiy_tun=info,leshiy_client=info,leshiy_reality=info".into()
-            }),
-        )
-        .init();
+    init_tracing();
 
     let raw: Vec<String> = std::env::args().collect();
     match parse_subcommand(raw.get(1).map(String::as_str)) {
@@ -94,6 +88,37 @@ async fn main() -> Result<()> {
         Err(e) => {
             tracing::error!("control server: {e}");
             std::process::exit(1);
+        }
+    }
+}
+
+/// Initialise tracing. The elevated helper runs with no visible console (especially on Windows,
+/// where it's launched `-WindowStyle Hidden`), so its logs are otherwise invisible. Write them to
+/// `<temp>/leshiy-helper.log` (append) so connect/disconnect issues are diagnosable, and also mirror
+/// to stderr when a console is attached. Falls back to stderr-only if the log file can't be opened.
+fn init_tracing() {
+    let directives = std::env::var("RUST_LOG").unwrap_or_else(|_| {
+        "leshiy_helper=info,leshiy_tun=info,leshiy_client=info,leshiy_reality=info".into()
+    });
+    let log_path = std::env::temp_dir().join("leshiy-helper.log");
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(file) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::new(&directives))
+                .with_ansi(false)
+                // A fresh handle per event (cheap fd dup) — append mode keeps lines ordered.
+                .with_writer(move || file.try_clone().expect("clone log file handle"))
+                .init();
+            tracing::info!(log = %log_path.display(), "leshiy-helper log file");
+        }
+        Err(_) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::new(&directives))
+                .init();
         }
     }
 }

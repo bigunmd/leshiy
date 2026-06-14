@@ -175,8 +175,10 @@ impl VpnRunner for EngineRunner {
         // new `tun::create_as_async` hits the not-yet-removed adapter → reconnect silently fails.
         let handle = self.task.lock().unwrap().take();
         if let Some(h) = handle {
+            tracing::info!("stop: aborting engine task and awaiting teardown");
             h.abort();
             let _ = h.await;
+            tracing::info!("stop: engine teardown complete");
         }
         self.state_tx.send_replace(State::Disconnected);
     }

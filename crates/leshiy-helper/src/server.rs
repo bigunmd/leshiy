@@ -99,17 +99,21 @@ pub(crate) fn spawn_conn<S>(
     tokio::spawn(async move {
         match handle_stream(stream, runner.clone()).await {
             Ok(Handled::Subscribe) => {
+                tracing::info!("subscribe stream dropped; stopping engine");
                 runner.stop().await;
                 if matches!(mode, ServeMode::Ephemeral) {
+                    tracing::info!("ephemeral: signalling exit (subscribe drop)");
                     exit.notify_one();
                 }
             }
             Ok(Handled::Shutdown) => {
                 if matches!(mode, ServeMode::Ephemeral) {
+                    tracing::info!("ephemeral: signalling exit (shutdown request)");
                     exit.notify_one();
                 }
             }
-            _ => {}
+            Ok(Handled::Other) => {}
+            Err(e) => tracing::warn!("connection handler error: {e}"),
         }
     });
 }
@@ -149,6 +153,14 @@ async fn dispatch<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let name = match &req {
+        Request::StartVpn(_) => "start-vpn",
+        Request::Stop => "stop",
+        Request::Shutdown => "shutdown",
+        Request::GetStatus => "get-status",
+        Request::Subscribe => "subscribe",
+    };
+    tracing::info!(request = name, "control request");
     match req {
         Request::StartVpn(params) => {
             let resp = match runner.start(&params).await {
