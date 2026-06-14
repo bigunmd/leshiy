@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { setLanguage } from "./i18n";
@@ -143,6 +142,23 @@ export default function App() {
     try { const bc = await import("@tauri-apps/plugin-barcode-scanner"); await bc.cancel(); } catch { /* ignore */ }
   };
 
+  // During a camera scan, render ONLY the cancel overlay (the camera shows behind the transparent
+  // webview). The rest of the app — including any Radix sheet — is unmounted, which avoids the
+  // sheet's focus-trap neutralizing the cancel button and the close-animation getting stuck
+  // (the "invisible drawer" bug).
+  if (scanning) {
+    return (
+      <div className="qr-overlay">
+        <button
+          onClick={cancelScan}
+          className="rounded-full border border-wisp/60 bg-panel px-6 py-3 font-mono text-sm text-foreground shadow-lg"
+        >
+          {t("config.cancelScan")}
+        </button>
+      </div>
+    );
+  }
+
   return (
     <>
       <Atmosphere />
@@ -169,18 +185,6 @@ export default function App() {
         onNotNow={() => setInstallOpen(false)} onInstall={onInstall} />
       <CloseWindowDialog open={closeOpen} onOpenChange={setCloseOpen}
         onQuit={onCloseQuit} onMinimize={onCloseMinimize} />
-      {scanning &&
-        createPortal(
-          <div className="qr-overlay">
-            <button
-              onClick={cancelScan}
-              className="rounded-full border border-wisp/60 bg-panel px-6 py-3 font-mono text-sm text-foreground shadow-lg"
-            >
-              {t("config.cancelScan")}
-            </button>
-          </div>,
-          document.body,
-        )}
     </>
   );
 }

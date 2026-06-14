@@ -80,11 +80,10 @@
 }
 
 /* Camera QR scan (Android): tauri-plugin-barcode-scanner renders the camera *behind* the
-   webview, so during a scan we make everything transparent and hide ALL webview content —
-   not just #root but also any open sheet/dialog (Radix portals those to <body>, outside #root) —
-   leaving only the `.qr-overlay` (the cancel control) visible over the live camera. */
+   webview. During a scan, App renders ONLY the `.qr-overlay` (the rest of the app is unmounted),
+   and this makes the page transparent so the live camera shows behind the cancel control. */
 body.qr-scanning { background: transparent !important; }
-body.qr-scanning > *:not(.qr-overlay) { display: none !important; }
+body.qr-scanning #root { background: transparent !important; }
 .qr-overlay { position: fixed; inset: 0; z-index: 200; display: flex; flex-direction: column;
   align-items: center; justify-content: flex-end; padding-bottom: 12vh;
   padding-bottom: calc(12vh + env(safe-area-inset-bottom)); pointer-events: none; }
