@@ -234,6 +234,23 @@ impl RouteController for MacOsController {
         let _ = self.handle.delete(&self.via_tun_route(c)).await;
         Ok(())
     }
+    async fn teardown_bypass(&self) {
+        // Drain the shared list so the guard's `Drop` (same Arc) finds it empty and skips its slow
+        // per-route `route delete` subprocess fallback. Delete each in-process via net_route —
+        // far faster than a subprocess per CIDR for a large rule set.
+        let routes: Vec<Cidr> = std::mem::take(&mut *self.installed_bypass.lock().unwrap());
+        for c in &routes {
+            let _ = self
+                .handle
+                .delete(&gateway_route(
+                    c.addr,
+                    c.prefix,
+                    self.gateway,
+                    self.orig_idx,
+                ))
+                .await;
+        }
+    }
 }
 
 /// Build a next-hop (gateway) route, attaching the egress interface index when known —

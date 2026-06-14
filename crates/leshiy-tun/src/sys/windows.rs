@@ -247,6 +247,23 @@ impl RouteController for WindowsController {
         let _ = self.handle.delete(&self.via_tun_route(c)).await;
         Ok(())
     }
+    async fn teardown_bypass(&self) {
+        // Drain the shared list so the guard's `Drop` (which shares the same Arc) finds it empty
+        // and skips its slow per-route `netsh` fallback. Delete each route in-process via the
+        // net_route Handle (IP Helper API) — orders of magnitude faster than a subprocess per CIDR.
+        let routes: Vec<Cidr> = std::mem::take(&mut *self.installed_bypass.lock().unwrap());
+        for c in &routes {
+            let _ = self
+                .handle
+                .delete(&gateway_route(
+                    c.addr,
+                    c.prefix,
+                    self.gateway,
+                    self.orig_idx,
+                ))
+                .await;
+        }
+    }
 }
 
 /// Build a next-hop (gateway) route. On Windows net_route needs the egress interface index to

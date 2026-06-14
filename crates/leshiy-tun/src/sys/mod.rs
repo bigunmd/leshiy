@@ -80,6 +80,15 @@ pub trait RouteController: Send + Sync {
     async fn remove_bypass(&self, cidr: &Cidr) -> std::io::Result<()>;
     async fn add_via_tun(&self, cidr: &Cidr) -> std::io::Result<()>;
     async fn remove_via_tun(&self, cidr: &Cidr) -> std::io::Result<()>;
+
+    /// Bulk-remove ALL installed bypass routes in-process (via the OS routing API), clearing the
+    /// shared tracking list. The engine calls this on graceful shutdown BEFORE dropping the RAII
+    /// guard — so a large rule set is torn down with fast in-process deletes instead of falling
+    /// back to the guard's per-route subprocess path (`netsh`/`route` per CIDR = thousands of
+    /// process spawns = minutes, which wedges disconnect/reconnect). After this the guard's `Drop`
+    /// finds an empty list and does nothing. Default: no-op (NullController; Linux, whose `Drop`
+    /// already batches all deletes through a single `ip -batch` process).
+    async fn teardown_bypass(&self) {}
 }
 
 /// No-op controller for sessions without runtime route control (no domain rules, the stub

@@ -143,6 +143,9 @@ impl TunEngine {
         let mut ip_stack = netstack::build(device, cfg.mtu)?;
         tracing::info!(tun = %cfg.tun_name, mtu = cfg.mtu, server_ip = %cfg.server_ip, "tun engine running; reading packets from the device");
 
+        // Keep a handle to the controller for the fast in-process bypass teardown below (the
+        // resolver, if spawned, takes its own clone).
+        let teardown_controller = controller.clone();
         // Domain rules (if any) are resolved + refreshed by a background task. `AbortOnDrop`
         // (declared after `guard`, so dropped before it) stops the task before `guard`'s
         // teardown removes the routes it installed — clean on both normal exit and abort.
@@ -175,8 +178,12 @@ impl TunEngine {
             }
         };
         drop(_resolver); // stop the resolver BEFORE teardown removes its routes
+        // Remove bypass routes in-process (fast) BEFORE dropping the guard, so a large rule set
+        // doesn't hit the guard's slow per-route subprocess fallback (which makes disconnect take
+        // minutes and wedges reconnect). No-op on Linux (its guard batches) / when there are none.
+        teardown_controller.teardown_bypass().await;
         drop(ip_stack); // release the netstack/TUN device (override routes auto-clear)
-        drop(guard); // restore DNS + IPv6, remove bypass routes — runs to completion here
+        drop(guard); // restore DNS + IPv6 (bypass list now empty) — runs to completion here
         result
     }
 }

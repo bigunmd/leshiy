@@ -182,16 +182,11 @@ async fn connect(state: State<'_, AppState>) -> Result<(), String> {
 
         let cache = state.sub_cache.lock().unwrap().clone();
         let params = build_start_params(uri, &settings, &cache);
-        // Self-heal a reused helper left in a bad state (e.g. a previous teardown that didn't
-        // fully complete): if the first start fails, tear the session down and retry once.
-        if let Err(e) = client.start_vpn(params.clone()).await {
-            eprintln!("start_vpn failed ({e}); resetting the helper session and retrying");
-            let _ = client.stop().await;
-            client
-                .start_vpn(params)
-                .await
-                .map_err(|e2| e2.to_string())?;
-        }
+        // Single start. We deliberately do NOT retry with an in-process stop+start: on Windows
+        // that creates a second Wintun session on the same adapter before the first is released
+        // (0x4DF "rings already registered"). Disconnect now exits the ephemeral helper promptly
+        // (fast in-process route teardown), so every connect gets a fresh process.
+        client.start_vpn(params).await.map_err(|e| e.to_string())?;
     } else {
         // Proxy mode: unchanged from today.
         state.supervisor.connect(uri);
