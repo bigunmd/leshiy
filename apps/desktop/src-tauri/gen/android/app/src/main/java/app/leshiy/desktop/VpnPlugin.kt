@@ -27,6 +27,8 @@ class EstablishArgs {
     var dns: List<String> = emptyList()
     var routes: List<RouteArg> = emptyList()
     var excludeRoutes: List<RouteArg> = emptyList()
+    var perAppMode: String = "off"
+    var perAppPackages: List<String> = emptyList()
 }
 
 /**
@@ -69,6 +71,8 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
             dns = args.dns,
             routes = args.routes.map { VpnRoute(it.address, it.prefix) },
             excludeRoutes = args.excludeRoutes.map { VpnRoute(it.address, it.prefix) },
+            perAppMode = args.perAppMode,
+            perAppPackages = args.perAppPackages,
         )
         LeshiyVpnService.onEstablished = { fd ->
             val ret = JSObject()
@@ -85,6 +89,27 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     fun stop(invoke: Invoke) {
         LeshiyVpnService.instance?.stopVpn()
         invoke.resolve(JSObject())
+    }
+
+    /** List launchable installed apps for the per-app split-tunnel picker. Resolves
+     *  `{ apps: [{ package, label }] }` (excluding ourselves). */
+    @Command
+    fun listApps(invoke: Invoke) {
+        val pm = activity.packageManager
+        val main = Intent(Intent.ACTION_MAIN, null).apply { addCategory(Intent.CATEGORY_LAUNCHER) }
+        val arr = app.tauri.plugin.JSArray()
+        val seen = HashSet<String>()
+        for (ri in pm.queryIntentActivities(main, 0)) {
+            val pkg = ri.activityInfo.packageName
+            if (pkg == activity.packageName || !seen.add(pkg)) continue
+            val o = JSObject()
+            o.put("package", pkg)
+            o.put("label", ri.loadLabel(pm).toString())
+            arr.put(o)
+        }
+        val ret = JSObject()
+        ret.put("apps", arr)
+        invoke.resolve(ret)
     }
 
     /** Read the system clipboard as text. Resolves `{ text: String }` ("" if empty). The Tauri

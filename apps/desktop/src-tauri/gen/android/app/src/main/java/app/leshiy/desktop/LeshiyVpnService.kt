@@ -24,6 +24,9 @@ data class VpnConfig(
     val dns: List<String>,
     val routes: List<VpnRoute>,
     val excludeRoutes: List<VpnRoute>,
+    /** Per-app routing: "off" | "include" | "exclude". */
+    val perAppMode: String,
+    val perAppPackages: List<String>,
 )
 
 /**
@@ -79,10 +82,25 @@ class LeshiyVpnService : VpnService() {
                     builder.excludeRoute(IpPrefix(InetAddress.getByName(r.address), r.prefix))
                 }
             }
-            // Our own app's traffic (the tunnel dial) must NOT enter the VPN, else it loops.
-            try {
-                builder.addDisallowedApplication(packageName)
-            } catch (_: Exception) {
+            // Per-app routing + loop avoidance. addAllowed/addDisallowed are mutually exclusive.
+            //  - include: ONLY the listed apps tunnel; our own app isn't listed, so it bypasses
+            //             the VPN (no loop). Empty list ⇒ degenerate, fall back to off.
+            //  - exclude: everything tunnels except the listed apps + our own app.
+            //  - off:     everything tunnels except our own app (loop avoidance).
+            val includeApps = cfg.perAppMode == "include" && cfg.perAppPackages.isNotEmpty()
+            if (includeApps) {
+                for (pkg in cfg.perAppPackages) {
+                    try { builder.addAllowedApplication(pkg) } catch (_: Exception) {}
+                }
+            } else {
+                try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
+                if (cfg.perAppMode == "exclude") {
+                    for (pkg in cfg.perAppPackages) {
+                        if (pkg != packageName) {
+                            try { builder.addDisallowedApplication(pkg) } catch (_: Exception) {}
+                        }
+                    }
+                }
             }
 
             android.util.Log.i(

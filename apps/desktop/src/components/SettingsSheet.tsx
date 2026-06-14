@@ -15,6 +15,8 @@ interface Props {
   helperInstalled: boolean; onRemoveHelper: () => void; onOpenSplit: () => void;
   /** Android: hide desktop-only rows (window-close behavior — Android has no window). */
   isAndroid?: boolean;
+  /** Android: open the per-app split-tunnel picker. */
+  onOpenPerApp?: () => void;
 }
 export function SettingsSheet(p: Props) {
   const { t, i18n } = useTranslation();
@@ -82,6 +84,14 @@ export function SettingsSheet(p: Props) {
                   {p.settings.split_tunnel.cidrs.length + p.settings.split_tunnel.domains.length + p.settings.rule_subscriptions.filter((s) => s.enabled).length || t("splitTunnel.none")}
                 </Button>
               </div>
+              {p.isAndroid && (
+                <div className={row}>
+                  <Label className="text-[13px]">{t("perApp.title")}</Label>
+                  <Button size="sm" variant="ghost" className="font-mono text-[10px] uppercase tracking-widest text-wisp" onClick={p.onOpenPerApp}>
+                    {p.settings.per_app.mode === "off" ? t("perApp.off") : `${t(`perApp.${p.settings.per_app.mode}`)} · ${p.settings.per_app.packages.length}`}
+                  </Button>
+                </div>
+              )}
               {p.helperInstalled && (
                 <div className={row}>
                   <Label className="text-[13px]">{t("settings.removeHelper")}</Label>

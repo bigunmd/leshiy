@@ -41,6 +41,28 @@ pub enum CloseBehavior {
     Minimize,
 }
 
+/// Per-app VPN routing (Android only). Which apps' traffic the tunnel captures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PerAppMode {
+    /// All apps go through the VPN (the default; only this app is excluded for loop avoidance).
+    #[default]
+    Off,
+    /// ONLY the listed apps go through the VPN (addAllowedApplication).
+    Include,
+    /// All apps EXCEPT the listed go through the VPN (addDisallowedApplication).
+    Exclude,
+}
+
+/// Per-app routing rules (Android `VpnService` allowed/disallowed applications). Package names.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PerAppRules {
+    #[serde(default)]
+    pub mode: PerAppMode,
+    #[serde(default)]
+    pub packages: Vec<String>,
+}
+
 /// Persisted application settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
@@ -69,6 +91,9 @@ pub struct Settings {
     /// Configured community rule subscriptions (each with its own Include/Exclude direction).
     #[serde(default)]
     pub rule_subscriptions: Vec<Subscription>,
+    /// Per-app VPN routing (Android only; ignored elsewhere).
+    #[serde(default)]
+    pub per_app: PerAppRules,
 }
 
 fn default_language() -> String {
@@ -101,6 +126,7 @@ impl Default for Settings {
             close_behavior: CloseBehavior::Ask,
             split_tunnel: SplitTunnel::default(),
             rule_subscriptions: Vec::new(),
+            per_app: PerAppRules::default(),
         }
     }
 }

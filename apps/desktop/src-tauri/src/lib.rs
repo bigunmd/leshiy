@@ -396,6 +396,26 @@ async fn measure_latency(state: State<'_, AppState>) -> Result<u32, String> {
     Ok(start.elapsed().as_millis().min(u32::MAX as u128) as u32)
 }
 
+/// An installed app, for the Android per-app split-tunnel picker.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct AppInfo {
+    pub package: String,
+    pub label: String,
+}
+
+/// List launchable installed apps (Android per-app picker). Empty on desktop (no per-app there).
+#[tauri::command]
+fn list_apps() -> Result<Vec<AppInfo>, String> {
+    #[cfg(target_os = "android")]
+    {
+        mobile::list_apps()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(Vec::new())
+    }
+}
+
 /// Read the system clipboard as text. On Android this uses a native Kotlin read (the JS/plugin
 /// clipboard read returns empty in the webview); on desktop it uses the clipboard-manager plugin.
 #[cfg_attr(target_os = "android", allow(unused_variables))]
@@ -796,6 +816,7 @@ pub fn run() {
             set_settings,
             read_clipboard,
             measure_latency,
+            list_apps,
             validate_split_rules,
             subscription_cache,
             refresh_subscriptions,

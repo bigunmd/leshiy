@@ -18,6 +18,9 @@ export interface Subscription { id: string; name: string; url: string; format: S
 export interface SubRuleSet { cidrs: SplitCidr[]; domains: string[]; }
 export interface SubscriptionCacheEntry { rules: SubRuleSet; etag: string | null; last_modified: string | null; fetched_at: number; }
 export interface SubscriptionCache { entries: Record<string, SubscriptionCacheEntry>; }
+export type PerAppMode = "off" | "include" | "exclude";
+export interface PerAppRules { mode: PerAppMode; packages: string[]; }
+export interface AppInfo { package: string; label: string; }
 export interface Settings {
   language: string;
   kill_switch: boolean;
@@ -30,4 +33,5 @@ export interface Settings {
   close_behavior: CloseBehavior;
   split_tunnel: SplitTunnel;
   rule_subscriptions: Subscription[];
+  per_app: PerAppRules;
 }

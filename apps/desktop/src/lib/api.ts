@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { Profile, Rates, Settings, SplitMode, SplitTunnel, SubscriptionCache, TunnelState } from "./types";
+import type { AppInfo, Profile, Rates, Settings, SplitMode, SplitTunnel, SubscriptionCache, TunnelState } from "./types";
 
 export const api = {
   listProfiles: () => invoke<Profile[]>("list_profiles"),
@@ -15,6 +15,7 @@ export const api = {
   setSettings: (settings: Settings) => invoke<void>("set_settings", { settings }),
   readClipboard: () => invoke<string>("read_clipboard"),
   measureLatency: () => invoke<number>("measure_latency"),
+  listApps: () => invoke<AppInfo[]>("list_apps"),
   validateSplitRules: (mode: SplitMode, format: "lines" | "hosts", text: string) =>
     invoke<SplitTunnel>("validate_split_rules", { mode, format, text }),
   subscriptionCache: () => invoke<SubscriptionCache>("subscription_cache"),

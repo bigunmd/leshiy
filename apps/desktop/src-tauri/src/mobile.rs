@@ -12,8 +12,8 @@
 //! socket (the tunnel dial) bypasses the VPN — no per-socket `protect()` needed.
 use crate::{build_split_plan, AppState};
 use leshiy_client::{
-    ByteCounters, RealTransport, Settings, SplitMode, SplitPlan, State, Throughput, Transport,
-    TransportPref, Tunnel,
+    ByteCounters, PerAppMode, RealTransport, Settings, SplitMode, SplitPlan, State, Throughput,
+    Transport, TransportPref, Tunnel,
 };
 use leshiy_tun::{TunConfig, TunEngine};
 use serde::{Deserialize, Serialize};
@@ -72,6 +72,9 @@ struct EstablishArgs {
     dns: Vec<String>,
     routes: Vec<RouteArg>,
     exclude_routes: Vec<RouteArg>,
+    /// Per-app routing: "off" | "include" | "exclude", with the package list.
+    per_app_mode: String,
+    per_app_packages: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +90,22 @@ struct EstablishResp {
 #[derive(Deserialize)]
 struct ClipboardResp {
     text: String,
+}
+
+#[derive(Deserialize)]
+struct AppsResp {
+    apps: Vec<crate::AppInfo>,
+}
+
+/// List launchable installed apps via the native Kotlin plugin (for the per-app picker).
+pub fn list_apps() -> Result<Vec<crate::AppInfo>, String> {
+    let plugin = VPN_PLUGIN
+        .get()
+        .ok_or_else(|| "VPN plugin not registered".to_string())?;
+    let resp: AppsResp = plugin
+        .run_mobile_plugin("listApps", ())
+        .map_err(|e| e.to_string())?;
+    Ok(resp.apps)
 }
 
 /// Read the system clipboard via the native Kotlin plugin (the Tauri clipboard plugin returns
@@ -201,6 +220,11 @@ pub async fn connect(state: &AppState, uri: String, settings: Settings) -> Resul
         cached_subs = cache.entries.len(),
         "android split routes for VpnService.Builder"
     );
+    let (per_app_mode, per_app_packages) = match settings.per_app.mode {
+        PerAppMode::Off => ("off", Vec::new()),
+        PerAppMode::Include => ("include", settings.per_app.packages.clone()),
+        PerAppMode::Exclude => ("exclude", settings.per_app.packages.clone()),
+    };
     let est: EstablishResp = plugin
         .run_mobile_plugin(
             "establish",
@@ -211,6 +235,8 @@ pub async fn connect(state: &AppState, uri: String, settings: Settings) -> Resul
                 dns: vec![settings.vpn_dns.clone()],
                 routes,
                 exclude_routes,
+                per_app_mode: per_app_mode.into(),
+                per_app_packages,
             },
         )
         .map_err(|e| {
