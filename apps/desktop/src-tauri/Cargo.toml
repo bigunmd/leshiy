@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2" }
+tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -36,8 +36,8 @@ leshiy-helper = { path = "../../../crates/leshiy-helper" }
 # settings; Android uses Tauri's app_config_dir instead (see `config_dir`).
 directories = "5"
 
-# Android-only: the JNI bridge to the Kotlin VpnService + the engine (drives TunEngine in-process).
+# Android-only: the in-process VPN engine (TunEngine driven with the VpnService fd). The
+# Rust<->Kotlin bridge goes through Tauri's mobile-plugin channel (run_mobile_plugin), not raw JNI.
 [target.'cfg(target_os = "android")'.dependencies]
 leshiy-tun = { path = "../../../crates/leshiy-tun" }
-jni = "0.21"
 

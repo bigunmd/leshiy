@@ -626,7 +626,6 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Resolve the config directory. Desktop keeps its historical `directories` path so existing
 /// users don't lose settings; Android uses Tauri's app-private `app_config_dir`.
 #[cfg(not(target_os = "android"))]
@@ -698,9 +697,16 @@ fn build_app_state(cfg_dir: PathBuf) -> AppState {
     }
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    // Android: register the VpnService bridge plugin (no-op on desktop).
+    #[cfg(target_os = "android")]
+    {
+        builder = builder.plugin(mobile::init());
+    }
+    builder
         .invoke_handler(tauri::generate_handler![
             list_profiles,
             active_profile,

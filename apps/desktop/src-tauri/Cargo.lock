@@ -2654,7 +2654,6 @@ name = "leshiy-desktop"
 version = "1.2.0"
 dependencies = [
  "directories",
- "jni",
  "leshiy-client",
  "leshiy-helper",
  "leshiy-tun",
