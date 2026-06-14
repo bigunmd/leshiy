@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { setLanguage } from "./i18n";
 import { api } from "@/lib/api";
 import { isVpn, isActiveState, needsHelper } from "@/lib/mode";
@@ -9,6 +10,7 @@ import { SettingsSheet } from "@/components/SettingsSheet";
 import { SplitTunnelSheet } from "@/components/SplitTunnelSheet";
 import { LanguageMenu } from "@/components/LanguageMenu";
 import { InstallHelperDialog } from "@/components/InstallHelperDialog";
+import { CloseWindowDialog } from "@/components/CloseWindowDialog";
 import { useTunnel } from "@/state/useTunnel";
 import { useProfiles } from "@/state/useProfiles";
 import { useSettings } from "@/state/useSettings";
@@ -19,7 +21,12 @@ export default function App() {
   const { state, rates } = useTunnel();
   const profiles = useProfiles();
   const { settings, update } = useSettings();
+  // The close-request handler is registered once but must read the *current*
+  // preference, so mirror settings into a ref the closure can read.
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
   const [sheet, setSheet] = useState<SheetId>(null);
+  const [closeOpen, setCloseOpen] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
@@ -29,6 +36,33 @@ export default function App() {
 
   useEffect(() => { void api.helperInstalled().then(setHelperInstalled).catch(() => setHelperInstalled(false)); }, []);
   useEffect(() => { void api.platform().then(setPlatform).catch(() => setPlatform("")); }, []);
+
+  // Intercept the window close: honor a remembered preference, otherwise prompt.
+  // The frontend is the sole owner of close handling (the Rust side no longer hides).
+  useEffect(() => {
+    const win = getCurrentWindow();
+    let unlisten: (() => void) | undefined;
+    void win.onCloseRequested((event) => {
+      event.preventDefault();
+      switch (settingsRef.current.close_behavior) {
+        case "quit": void api.quit(); break;
+        case "minimize": void win.hide(); break;
+        default: setCloseOpen(true); break;
+      }
+    }).then((u) => { unlisten = u; });
+    return () => { unlisten?.(); };
+  }, []);
+
+  const onCloseQuit = (remember: boolean) => {
+    setCloseOpen(false);
+    if (remember) { void update({ close_behavior: "quit" }).finally(() => void api.quit()); }
+    else { void api.quit(); }
+  };
+  const onCloseMinimize = (remember: boolean) => {
+    setCloseOpen(false);
+    if (remember) void update({ close_behavior: "minimize" });
+    void getCurrentWindow().hide();
+  };
 
   // All desktop platforms use the on-demand model: connect() itself triggers the OS elevation
   // prompt (pkexec / osascript / UAC), so there's no install dialog and no persistent helper
@@ -89,6 +123,8 @@ export default function App() {
       <InstallHelperDialog open={installOpen} onOpenChange={setInstallOpen}
         installing={installing} error={installError}
         onNotNow={() => setInstallOpen(false)} onInstall={onInstall} />
+      <CloseWindowDialog open={closeOpen} onOpenChange={setCloseOpen}
+        onQuit={onCloseQuit} onMinimize={onCloseMinimize} />
     </>
   );
 }

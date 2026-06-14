@@ -3,6 +3,7 @@ export interface Rates { up_bps: number; down_bps: number; total_up: number; tot
 export interface Profile { id: string; name: string; uri: string; created_at: number; last_latency_ms: number | null; }
 export type TransportPref = "auto" | "quic" | "tcp";
 export type Mode = "proxy" | "vpn";
+export type CloseBehavior = "ask" | "quit" | "minimize";
 export type SplitMode = "exclude" | "include";
 export interface SplitCidr { addr: string; prefix: number; }
 export interface SplitTunnel { mode: SplitMode; cidrs: SplitCidr[]; domains: string[]; }
@@ -20,6 +21,7 @@ export interface Settings {
   vpn_dns: string;
   socks_port: number;
   start_minimized: boolean;
+  close_behavior: CloseBehavior;
   split_tunnel: SplitTunnel;
   rule_subscriptions: Subscription[];
 }

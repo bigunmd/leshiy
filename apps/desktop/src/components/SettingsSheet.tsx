@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { isVpn } from "@/lib/mode";
-import type { Settings, TransportPref } from "@/lib/types";
+import type { CloseBehavior, Settings, TransportPref } from "@/lib/types";
 
 interface Props {
   open: boolean; onOpenChange: (o: boolean) => void;
@@ -17,6 +17,7 @@ interface Props {
 export function SettingsSheet(p: Props) {
   const { t, i18n } = useTranslation();
   const transports: TransportPref[] = ["auto", "quic", "tcp"];
+  const closeBehaviors: CloseBehavior[] = ["ask", "quit", "minimize"];
   const vpn = isVpn(p.settings.mode);
   const row = "flex items-center justify-between border-b border-border py-3";
   return (
@@ -43,6 +44,18 @@ export function SettingsSheet(p: Props) {
                   onClick={() => p.onChange({ transport: tr })}
                   className={cn("font-mono text-[10px] uppercase tracking-widest", p.settings.transport === tr ? "bg-moss text-foreground" : "text-dim")}>
                   {t(`settings.${tr}`)}
+                </Button>
+              ))}
+            </div>
+          </div>
+          <div className={row}>
+            <Label className="text-[13px]">{t("settings.closeBehavior")}</Label>
+            <div className="flex gap-1">
+              {closeBehaviors.map((cb) => (
+                <Button key={cb} size="sm" variant={p.settings.close_behavior === cb ? "secondary" : "ghost"}
+                  onClick={() => p.onChange({ close_behavior: cb })}
+                  className={cn("font-mono text-[10px] uppercase tracking-widest", p.settings.close_behavior === cb ? "bg-moss text-foreground" : "text-dim")}>
+                  {t(`settings.close_${cb}`)}
                 </Button>
               ))}
             </div>

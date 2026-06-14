@@ -28,6 +28,19 @@ pub enum Mode {
     Vpn,
 }
 
+/// What should happen when the user closes the main window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloseBehavior {
+    /// Prompt the user every time (the default until they pick "remember").
+    #[default]
+    Ask,
+    /// Fully quit the application.
+    Quit,
+    /// Hide the window to the system tray.
+    Minimize,
+}
+
 /// Persisted application settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
@@ -47,6 +60,9 @@ pub struct Settings {
     pub socks_port: u16,
     #[serde(default)]
     pub start_minimized: bool,
+    /// What to do when the user closes the main window (ask / quit / minimize to tray).
+    #[serde(default)]
+    pub close_behavior: CloseBehavior,
     /// Global split-tunnel ruleset (manual rules). Empty (the default) means plain full tunnel.
     #[serde(default)]
     pub split_tunnel: SplitTunnel,
@@ -82,6 +98,7 @@ impl Default for Settings {
             vpn_dns: default_vpn_dns(),
             socks_port: default_socks_port(),
             start_minimized: false,
+            close_behavior: CloseBehavior::Ask,
             split_tunnel: SplitTunnel::default(),
             rule_subscriptions: Vec::new(),
         }
@@ -166,5 +183,37 @@ mod tests {
         // A pre-split-tunnel settings.json deserializes with an empty ruleset.
         let s: Settings = serde_json::from_str(r#"{"language":"en","mode":"vpn"}"#).unwrap();
         assert!(s.split_tunnel.is_empty());
+    }
+
+    #[test]
+    fn settings_default_close_behavior_is_ask() {
+        assert_eq!(Settings::default().close_behavior, CloseBehavior::Ask);
+    }
+
+    #[test]
+    fn old_settings_file_without_close_behavior_defaults_to_ask() {
+        // A pre-close-behavior settings.json deserializes with Ask.
+        let s: Settings = serde_json::from_str(r#"{"language":"en","mode":"vpn"}"#).unwrap();
+        assert_eq!(s.close_behavior, CloseBehavior::Ask);
+    }
+
+    #[test]
+    fn close_behavior_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&CloseBehavior::Minimize).unwrap(),
+            "\"minimize\""
+        );
+    }
+
+    #[test]
+    fn close_behavior_round_trips() {
+        let s = Settings {
+            close_behavior: CloseBehavior::Quit,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.close_behavior, CloseBehavior::Quit);
+        assert_eq!(s, back);
     }
 }
