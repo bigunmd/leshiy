@@ -9,9 +9,14 @@ use leshiy_client::{
     spawn_supervisor, system_proxy, Profile, ProfileStore, Settings, SupervisorConfig,
     SupervisorHandle,
 };
-// Free functions for the install probe (NOT HelperClient methods); HelperClient drives VPN mode.
+// Desktop VPN goes through the privileged `leshiy-helper` (elevation). On Android the VPN runs
+// in-process via `VpnService` (see `mobile`), so the helper isn't compiled there.
+#[cfg(not(target_os = "android"))]
 use leshiy_helper::{is_installed, HelperClient, StartParams};
 use tauri::{Emitter, Manager, State};
+
+#[cfg(target_os = "android")]
+mod mobile;
 
 /// Application state managed by Tauri.
 struct AppState {
@@ -20,8 +25,12 @@ struct AppState {
     settings: Mutex<Settings>,
     profiles_path: PathBuf,
     settings_path: PathBuf,
-    /// Lazily-connected privileged-helper client; `None` until VPN mode connects.
+    /// Lazily-connected privileged-helper client; `None` until VPN mode connects. Desktop-only.
+    #[cfg(not(target_os = "android"))]
     helper: Mutex<Option<HelperClient>>,
+    /// Android in-process VPN session handle (cancel signal + engine task). `None` until connect.
+    #[cfg(target_os = "android")]
+    android_vpn: Mutex<Option<mobile::VpnSession>>,
     /// Cached rules fetched from rule subscriptions (separate from settings so a settings write
     /// never drops fetched data).
     sub_cache: Mutex<leshiy_client::SubscriptionCache>,
@@ -105,31 +114,41 @@ fn vpn_active(handle: &tauri::AppHandle) -> bool {
     mode_uses_helper(handle.state::<AppState>().settings.lock().unwrap().mode)
 }
 
-/// Build the VPN `StartParams` from the active profile URI + the user's settings + the
-/// subscription cache. The manual split-tunnel rules form the base of a two-directional
-/// `SplitPlan`; each enabled subscription's cached rules merge into its own direction.
-/// Extracted from `connect` so it's unit-testable.
+/// Merge the manual split-tunnel rules with each enabled subscription's cached rules into the
+/// two-directional `SplitPlan`. Cross-platform (used by the desktop `StartParams` builder and the
+/// Android in-process engine alike).
+// Android calls this from `mobile::connect` in Phase C; until then it's unused on that target.
+#[cfg_attr(target_os = "android", allow(dead_code))]
+fn build_split_plan(
+    settings: &Settings,
+    cache: &leshiy_client::SubscriptionCache,
+) -> leshiy_client::SplitPlan {
+    let mut split = leshiy_client::SplitPlan::from_manual(&settings.split_tunnel);
+    for sub in &settings.rule_subscriptions {
+        if sub.enabled {
+            if let Some(entry) = cache.get(&sub.id) {
+                split.merge(sub.mode, &entry.rules);
+            }
+        }
+    }
+    split
+}
+
+/// Build the VPN `StartParams` (the helper's wire type) from the active profile URI + settings +
+/// subscription cache. Desktop-only — the Android engine is driven in-process (see `mobile`).
+#[cfg(not(target_os = "android"))]
 fn build_start_params(
     uri: String,
     settings: &Settings,
     cache: &leshiy_client::SubscriptionCache,
 ) -> StartParams {
-    let mut split = leshiy_client::SplitPlan::from_manual(&settings.split_tunnel);
-    for sub in &settings.rule_subscriptions {
-        if !sub.enabled {
-            continue;
-        }
-        if let Some(entry) = cache.get(&sub.id) {
-            split.merge(sub.mode, &entry.rules);
-        }
-    }
     StartParams {
         uri,
         transport: settings.transport,
         mtu: settings.vpn_mtu,
         tun_name: "leshiy0".into(),
         dns: settings.vpn_dns.clone(),
-        split_tunnel: split,
+        split_tunnel: build_split_plan(settings, cache),
     }
 }
 
@@ -146,49 +165,58 @@ async fn connect(state: State<'_, AppState>) -> Result<(), String> {
     };
 
     if mode_uses_helper(settings.mode) {
-        let endpoint = leshiy_helper::default_endpoint();
+        #[cfg(not(target_os = "android"))]
+        {
+            let endpoint = leshiy_helper::default_endpoint();
 
-        // On-demand model on all desktop platforms: if no helper is answering, launch an
-        // elevated ephemeral one (pkexec / osascript / UAC) and wait for the endpoint.
-        let bin = helper_sidecar_path()?;
-        leshiy_helper::elevate::ensure_running(&bin)
-            .await
-            .map_err(|e| e.to_string())?;
+            // On-demand model on all desktop platforms: if no helper is answering, launch an
+            // elevated ephemeral one (pkexec / osascript / UAC) and wait for the endpoint.
+            let bin = helper_sidecar_path()?;
+            leshiy_helper::elevate::ensure_running(&bin)
+                .await
+                .map_err(|e| e.to_string())?;
 
-        let client = HelperClient::connect(endpoint);
-        *state.helper.lock().unwrap() = Some(client.clone());
+            let client = HelperClient::connect(endpoint);
+            *state.helper.lock().unwrap() = Some(client.clone());
 
-        // Relay the helper's state/stats onto the SAME webview events the proxy path uses, so
-        // `useTunnel` is reused unchanged. SUBSCRIBE FIRST (before start_vpn) so the orb reflects
-        // helper state immediately — Connecting → Connected, or Connecting → Disconnected if the
-        // dial fails — regardless of how long start_vpn takes or whether it errors. The forwarder
-        // ends when the helper closes the subscribe stream.
-        let app = state
-            .app_handle
-            .get()
-            .cloned()
-            .ok_or_else(|| "app not ready".to_string())?;
-        let mut rx = client.subscribe().await.map_err(|e| e.to_string())?;
-        tauri::async_runtime::spawn(async move {
-            while let Some(ev) = rx.recv().await {
-                if let Some(s) = ev.state {
-                    let _ = app.emit("tunnel:state", s);
+            // Relay the helper's state/stats onto the SAME webview events the proxy path uses, so
+            // `useTunnel` is reused unchanged. SUBSCRIBE FIRST (before start_vpn) so the orb
+            // reflects helper state immediately — Connecting → Connected, or → Disconnected if the
+            // dial fails — regardless of how long start_vpn takes or whether it errors. The
+            // forwarder ends when the helper closes the subscribe stream.
+            let app = state
+                .app_handle
+                .get()
+                .cloned()
+                .ok_or_else(|| "app not ready".to_string())?;
+            let mut rx = client.subscribe().await.map_err(|e| e.to_string())?;
+            tauri::async_runtime::spawn(async move {
+                while let Some(ev) = rx.recv().await {
+                    if let Some(s) = ev.state {
+                        let _ = app.emit("tunnel:state", s);
+                    }
+                    if let Some(r) = ev.rates {
+                        let _ = app.emit("tunnel:stats", r);
+                    }
                 }
-                if let Some(r) = ev.rates {
-                    let _ = app.emit("tunnel:stats", r);
-                }
-            }
-        });
+            });
 
-        let cache = state.sub_cache.lock().unwrap().clone();
-        let params = build_start_params(uri, &settings, &cache);
-        // Single start. We deliberately do NOT retry with an in-process stop+start: on Windows
-        // that creates a second Wintun session on the same adapter before the first is released
-        // (0x4DF "rings already registered"). Disconnect now exits the ephemeral helper promptly
-        // (fast in-process route teardown), so every connect gets a fresh process.
-        client.start_vpn(params).await.map_err(|e| e.to_string())?;
+            let cache = state.sub_cache.lock().unwrap().clone();
+            let params = build_start_params(uri, &settings, &cache);
+            // Single start. We deliberately do NOT retry with an in-process stop+start: on Windows
+            // that creates a second Wintun session on the same adapter before the first is released
+            // (0x4DF "rings already registered"). Disconnect exits the ephemeral helper promptly
+            // (fast in-process route teardown), so every connect gets a fresh process.
+            client.start_vpn(params).await.map_err(|e| e.to_string())?;
+        }
+        #[cfg(target_os = "android")]
+        {
+            // In-process VpnService path: start the foreground service (which prompts for VPN
+            // consent), hand its TUN fd to the engine, and dial.
+            mobile::connect(state.inner(), uri, settings).await?;
+        }
     } else {
-        // Proxy mode: unchanged from today.
+        // Proxy mode: unchanged from today (no system proxy on Android, so effectively a no-op).
         state.supervisor.connect(uri);
     }
     Ok(())
@@ -198,31 +226,34 @@ async fn connect(state: State<'_, AppState>) -> Result<(), String> {
 async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
     let mode = state.settings.lock().unwrap().mode;
     if mode_uses_helper(mode) {
-        // Take the handle out (the helper is about to exit, so don't keep a stale client around),
-        // then drop the lock before `shutdown().await`. We use `shutdown` (not `stop`) so the
-        // on-demand helper TEARS DOWN and EXITS on disconnect: the next connect spawns a fresh,
-        // clean helper. Reusing a long-lived helper across reconnects left stale in-process state
-        // that wedged the second dial (UI stuck on "Connecting"); a fresh process per connect
-        // behaves exactly like the first (working) connect.
-        let client = { state.helper.lock().unwrap().take() };
-        if let Some(c) = client {
-            // Route/DNS teardown takes a moment (it removes the split-tunnel routes), so tell the
-            // UI we're tearing down — the orb shows a "Disconnecting…" busy state instead of
-            // looking frozen. "Disconnecting" is a UI-only transient (not in the Rust State enum),
-            // so we emit it as a plain string the webview's `tunnel:state` listener understands.
-            if let Some(app) = state.app_handle.get() {
-                let _ = app.emit("tunnel:state", "Disconnecting");
+        #[cfg(not(target_os = "android"))]
+        {
+            // Take the handle out (the helper is about to exit, so don't keep a stale client
+            // around), then drop the lock before `shutdown().await`. We use `shutdown` (not
+            // `stop`) so the on-demand helper TEARS DOWN and EXITS on disconnect: the next connect
+            // spawns a fresh, clean helper. Reusing a long-lived helper across reconnects left
+            // stale in-process state that wedged the second dial (UI stuck on "Connecting").
+            let client = { state.helper.lock().unwrap().take() };
+            if let Some(c) = client {
+                // Route/DNS teardown takes a moment, so tell the UI we're tearing down — the orb
+                // shows a "Disconnecting…" busy state instead of looking frozen. "Disconnecting"
+                // is a UI-only transient (not in the Rust State enum), emitted as a plain string.
+                if let Some(app) = state.app_handle.get() {
+                    let _ = app.emit("tunnel:state", "Disconnecting");
+                }
+                // Best-effort: tear down + exit the helper. We deliberately DON'T propagate an
+                // error — a wedged helper / broken pipe must not block the UI reset below.
+                let _ = c.shutdown().await;
             }
-            // Best-effort: tear down the session AND exit the helper. We deliberately DON'T
-            // propagate an error here — a wedged helper or a broken pipe must not block the UI
-            // reset below, otherwise the orb stays stuck ("first click does nothing"). The next
-            // connect re-elevates a fresh helper regardless.
-            let _ = c.shutdown().await;
+            // The helper is exiting, so its dropped `Subscribe` stream won't deliver a final state.
+            // Tell the UI we're disconnected directly so the orb always returns to idle.
+            if let Some(app) = state.app_handle.get() {
+                let _ = app.emit("tunnel:state", leshiy_client::State::Disconnected);
+            }
         }
-        // The helper is exiting, so its dropped `Subscribe` stream won't deliver a final state.
-        // Tell the UI we're disconnected directly so the orb always returns to idle.
-        if let Some(app) = state.app_handle.get() {
-            let _ = app.emit("tunnel:state", leshiy_client::State::Disconnected);
+        #[cfg(target_os = "android")]
+        {
+            mobile::disconnect(state.inner()).await?;
         }
     } else {
         state.supervisor.disconnect();
@@ -231,9 +262,17 @@ async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 /// True if the privileged VPN helper is already installed on this system (privilege-free).
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 fn helper_installed() -> bool {
     is_installed()
+}
+
+/// Android has no privileged helper (the VPN runs in-process via VpnService).
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn helper_installed() -> bool {
+    false
 }
 
 /// Host OS, so the GUI adapts the VPN flow: Linux uses an installed daemon (+ install dialog);
@@ -246,13 +285,22 @@ fn platform() -> String {
 /// Install the privileged VPN helper. Runs OS elevation to invoke the helper's own
 /// `install` subcommand — it does NOT call any install method on `HelperClient`. Idempotent.
 /// The actual elevation is integration/manual-tested (it pops a system auth prompt).
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn install_helper() -> Result<(), String> {
     run_helper_subcommand("install")
 }
 
+/// Android has no privileged helper to install.
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn install_helper() -> Result<(), String> {
+    Err("the privileged helper is not used on Android".into())
+}
+
 /// Locate the bundled `leshiy-helper` binary (Tauri sidecar) and run `<bin> <sub>` with OS
 /// elevation. Returns Err on a non-zero exit. Per-OS elevation; manual/integration-tested.
+#[cfg(not(target_os = "android"))]
 fn run_helper_subcommand(sub: &str) -> Result<(), String> {
     let bin = std::env::current_exe()
         .ok()
@@ -303,6 +351,7 @@ fn run_helper_subcommand(sub: &str) -> Result<(), String> {
 
 /// Locate the bundled `leshiy-helper` sidecar next to the app executable (on-demand model).
 /// Tauri places `externalBin` next to the main binary at runtime.
+#[cfg(not(target_os = "android"))]
 fn helper_sidecar_path() -> Result<std::path::PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let dir = exe
@@ -318,6 +367,7 @@ fn helper_sidecar_path() -> Result<std::path::PathBuf, String> {
 /// Remove the privileged VPN helper (stops it if running, then uninstalls). Like install,
 /// the removal runs the helper's own `uninstall` subcommand under OS elevation — NOT a
 /// `HelperClient` method. The actual elevation is integration/manual-tested.
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn remove_helper(state: State<'_, AppState>) -> Result<(), String> {
     // Stop any running session first, dropping our cached client handle.
@@ -328,6 +378,13 @@ async fn remove_helper(state: State<'_, AppState>) -> Result<(), String> {
         }
     }
     run_helper_subcommand("uninstall")
+}
+
+/// Android has no privileged helper to remove.
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn remove_helper(_state: State<'_, AppState>) -> Result<(), String> {
+    Err("the privileged helper is not used on Android".into())
 }
 
 #[tauri::command]
@@ -344,6 +401,7 @@ fn set_settings(state: State<AppState>, settings: Settings) -> Result<(), String
 /// Stop any running VPN session, then quit. Stopping first makes the ephemeral helper tear
 /// down (routes/DNS restored) and exit on its own — relying on the helper noticing the dropped
 /// pipe after the app is gone is unreliable on Windows, so it would otherwise linger.
+#[cfg(not(target_os = "android"))]
 async fn shutdown_and_exit(app: tauri::AppHandle) {
     let client = { app.state::<AppState>().helper.lock().unwrap().take() };
     if let Some(c) = client {
@@ -355,19 +413,32 @@ async fn shutdown_and_exit(app: tauri::AppHandle) {
 /// Fully quit the application. Used by the close-window dialog ("Quit") and mirrors the tray
 /// "Quit" item. The frontend owns the close decision (see App.tsx), so this is the single
 /// explicit exit path.
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn quit_app(app: tauri::AppHandle) {
     shutdown_and_exit(app).await;
 }
 
+/// Android apps don't programmatically exit (the OS manages lifecycle) — make this a no-op so the
+/// shared frontend can call it unconditionally.
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn quit_app(_app: tauri::AppHandle) {}
+
 /// Hide the main window to the system tray. Done from Rust (like the old close handler) so it
 /// doesn't require the `core:window:allow-hide` capability that a JS `window.hide()` would.
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 fn hide_window(app: tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.hide();
     }
 }
+
+/// No system tray / window-hide on Android (no tray, OS-managed lifecycle) — no-op.
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn hide_window(_app: tauri::AppHandle) {}
 
 /// Parse split-tunnel rule text in the given `format` ("lines" = native, "hosts" = hosts-file)
 /// and `mode`. Reuses the `leshiy-client` parser; the error string is shown in the editor.
@@ -508,6 +579,7 @@ async fn refresh_subscription(
     Ok(state.sub_cache.lock().unwrap().clone())
 }
 
+#[cfg(not(target_os = "android"))]
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder};
     use tauri::tray::TrayIconBuilder;
@@ -554,11 +626,27 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    let dirs = directories::ProjectDirs::from("app", "leshiy", "Leshiy")
-        .expect("could not resolve a config directory");
-    let cfg_dir = dirs.config_dir().to_path_buf();
+/// Resolve the config directory. Desktop keeps its historical `directories` path so existing
+/// users don't lose settings; Android uses Tauri's app-private `app_config_dir`.
+#[cfg(not(target_os = "android"))]
+fn config_dir(_app: &tauri::App) -> PathBuf {
+    directories::ProjectDirs::from("app", "leshiy", "Leshiy")
+        .expect("could not resolve a config directory")
+        .config_dir()
+        .to_path_buf()
+}
+
+#[cfg(target_os = "android")]
+fn config_dir(app: &tauri::App) -> PathBuf {
+    app.path()
+        .app_config_dir()
+        .expect("could not resolve the app config directory")
+}
+
+/// Build the managed application state: load persisted profiles/settings/subscription cache from
+/// `cfg_dir`, and spawn the proxy supervisor on a fresh tokio runtime. Called from `setup` (where
+/// the Tauri path API is available).
+fn build_app_state(cfg_dir: PathBuf) -> AppState {
     std::fs::create_dir_all(&cfg_dir).ok();
     let profiles_path = cfg_dir.join("profiles.json");
     let settings_path = cfg_dir.join("settings.json");
@@ -592,22 +680,33 @@ pub fn run() {
         spawn_supervisor(RealTransport, system_proxy(), sup_cfg)
     };
 
-    let app_state = AppState {
+    AppState {
         supervisor,
         profiles: Mutex::new(profiles),
         settings: Mutex::new(settings),
         profiles_path,
         settings_path,
+        #[cfg(not(target_os = "android"))]
         helper: Mutex::new(None),
+        #[cfg(target_os = "android")]
+        android_vpn: Mutex::new(None),
         sub_cache: Mutex::new(sub_cache),
         sub_cache_path,
         app_handle: OnceLock::new(),
         _runtime: runtime,
-    };
+    }
+}
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .manage(app_state)
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    // Android: register the VpnService bridge plugin (no-op on desktop).
+    #[cfg(target_os = "android")]
+    {
+        builder = builder.plugin(mobile::init());
+    }
+    builder
         .invoke_handler(tauri::generate_handler![
             list_profiles,
             active_profile,
@@ -631,6 +730,11 @@ pub fn run() {
             hide_window
         ])
         .setup(|app| {
+            // Build + manage state here (not before the builder) so the Tauri path API is
+            // available for the Android config dir.
+            let cfg_dir = config_dir(app);
+            app.manage(build_app_state(cfg_dir));
+
             let handle = app.handle().clone();
             // Store the app handle so commands (the VPN helper relay) can emit webview events.
             let _ = app.state::<AppState>().app_handle.set(handle.clone());
@@ -667,6 +771,7 @@ pub fn run() {
                     tokio::time::sleep(SUB_REFRESH).await;
                 }
             });
+            #[cfg(not(target_os = "android"))]
             build_tray(app)?;
             Ok(())
         })

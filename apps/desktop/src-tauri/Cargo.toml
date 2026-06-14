@@ -18,14 +18,26 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 leshiy-client = { path = "../../../crates/leshiy-client" }
-leshiy-helper = { path = "../../../crates/leshiy-helper" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-directories = "5"
-# Subscription fetching. rustls-tls (no system OpenSSL); the Tauri crate is host-built only.
+# Subscription fetching. rustls-tls (no system OpenSSL); portable to Android.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
+
+# Desktop-only: the system tray, and the privileged `leshiy-helper` (elevation model). On
+# Android the VPN runs in-process via VpnService, so neither is used or compiled there.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+leshiy-helper = { path = "../../../crates/leshiy-helper" }
+# Desktop keeps its existing config-dir path (~/.config/Leshiy etc.) so users don't lose
+# settings; Android uses Tauri's app_config_dir instead (see `config_dir`).
+directories = "5"
+
+# Android-only: the in-process VPN engine (TunEngine driven with the VpnService fd). The
+# Rust<->Kotlin bridge goes through Tauri's mobile-plugin channel (run_mobile_plugin), not raw JNI.
+[target.'cfg(target_os = "android")'.dependencies]
+leshiy-tun = { path = "../../../crates/leshiy-tun" }
 

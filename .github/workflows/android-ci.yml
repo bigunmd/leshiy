@@ -1,0 +1,36 @@
+name: android-ci
+on:
+  push:
+    paths: ["apps/desktop/**", "crates/**", ".github/workflows/android-ci.yml"]
+  pull_request:
+    paths: ["apps/desktop/**", "crates/**", ".github/workflows/android-ci.yml"]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      # Compile-gate the engine for every Android ABI (uses the runner's preinstalled NDK). This
+      # catches Android breakage early without the full (slow) Gradle/APK build the release does.
+      - name: Cross-compile the core for Android (3 ABIs)
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 build -p leshiy-client -p leshiy-tun
+      - name: Frontend build
+        working-directory: apps/desktop
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build

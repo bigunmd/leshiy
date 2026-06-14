@@ -73,3 +73,58 @@ Windows in the dev/CI environment. Verify on real hardware:
 **Known follow-ups (out of scope):** persistent services (Windows Service / macOS LaunchDaemon
 via SMAppService) for prompt-free connects — needs code-signing/notarization. The on-demand
 path is the unsigned-friendly MVP.
+
+---
+
+# Leshiy Android — Manual Verification
+
+Android reuses the React UI and Rust core; the VPN runs **in-process** via a Kotlin `VpnService`
+(no helper/root). The engine path is compile-gated in CI; the on-device behavior is verified by
+hand (VPN consent + the system VPN lifecycle can't be unit-tested).
+
+## Toolchain (local builds)
+
+- Rust targets: `rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android`
+- `cargo install cargo-ndk`; Android **NDK r26+** (this repo built with r28).
+- **JDK 17** for Gradle (Gradle 8.14 rejects newer JDKs — e.g. Java 25 fails with
+  "Unsupported class file major version 69"). Set `JAVA_HOME` to a 17 JDK.
+- `export ANDROID_HOME=~/Android NDK_HOME=$ANDROID_HOME/ndk/<ver> ANDROID_NDK_HOME=$NDK_HOME`
+- Run: `cd apps/desktop && pnpm tauri android dev` (emulator/device) or
+  `pnpm tauri android build --debug --target aarch64` (APK).
+
+## Automated gates (green)
+
+- `cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 build -p leshiy-client -p leshiy-tun` (CI: `android-ci.yml`).
+- Host + Android `cargo clippy -- -D warnings`, `cargo fmt --check`, `pnpm build`.
+- Full `pnpm tauri android build` produces an APK (compiles the Kotlin VpnService/plugin + links the engine `.so`).
+
+## Manual checklist (device/emulator — acceptance gate)
+
+1. Install the APK; launch — the normal UI appears (no install/remove-helper rows, no tray).
+2. Import a profile; tap **Connect** → the **system VPN-consent dialog** appears → Allow.
+3. The VPN key icon shows in the status bar; orb → Connected; throughput updates.
+4. Egress IP = the server (e.g. open an IP-check site); DNS resolves through the tunnel.
+5. Background the app → VPN stays up (foreground service); reopen → still Connected.
+6. **Disconnect** → orb shows "Disconnecting…" then Disconnected; VPN icon clears; direct connectivity restored.
+7. Connect → Disconnect → Connect again is clean (no stuck state).
+8. Start another VPN app (or revoke in Settings) → our app handles `onRevoke` (tears down, orb → Disconnected).
+
+## Release / signing
+
+- CI `android-release.yml` triggers on a `android-v*` tag → `tauri android build --apk` (3 ABIs) →
+  signed APK(s) attached to a **draft** GitHub Release + `SHA256SUMS`.
+- Secrets required for signing: `ANDROID_KEYSTORE_B64` (base64 of the `.jks`),
+  `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`. Without them the
+  release APK is **unsigned** (installable for testing, not updatable).
+- Generate a keystore once: `keytool -genkeypair -v -keystore release.jks -alias leshiy -keyalg RSA -keysize 4096 -validity 10000`.
+  **Back it up** — losing it means a new package identity (users must reinstall).
+
+## Known limitations / deferred (out of scope)
+
+- **Per-app split tunnel** (`addAllowedApplication`/`addDisallowedApplication` + an installed-apps
+  picker) — the planned follow-up. (We already `addDisallowedApplication(self)` for loop avoidance.)
+- **Domain-based split rules** aren't enforced on Android yet (routes come from the VpnService.Builder
+  CIDR list; the engine's domain resolver no-ops through Android's `NullController`). CIDR include/exclude
+  works (exclude needs API 33+ `excludeRoute`; older devices fall back to full tunnel).
+- **QUIC** isn't used on Android (VPN forces REALITY/TCP).
+- Google Play (AAB) / F-Droid distribution.
