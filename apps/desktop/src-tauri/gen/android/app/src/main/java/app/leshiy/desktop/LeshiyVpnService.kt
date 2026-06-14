@@ -120,9 +120,11 @@ class LeshiyVpnService : VpnService() {
         // Background VPN: when the user swipes the app from recents we deliberately KEEP the tunnel
         // running (like other VPN apps). The foreground service holds the process + engine alive;
         // do not stop here. Disconnect is only via the explicit UI action / onRevoke.
+        android.util.Log.i("leshiy", "VpnService onTaskRemoved — keeping VPN alive in background")
     }
 
     override fun onDestroy() {
+        android.util.Log.i("leshiy", "VpnService onDestroy")
         instance = null
         super.onDestroy()
     }
@@ -148,7 +150,15 @@ class LeshiyVpnService : VpnService() {
         } else {
             0
         }
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type)
+        // If this throws (e.g. FGS-type/notification policy), the service won't be promoted to
+        // foreground and the OS will kill the process when the app is swiped → VPN stops. Log it
+        // loudly so `adb logcat -s leshiy` shows the reason.
+        try {
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type)
+            android.util.Log.i("leshiy", "VpnService is now foreground (type=$type)")
+        } catch (e: Exception) {
+            android.util.Log.e("leshiy", "startForeground failed: ${e.message}", e)
+        }
     }
 
     private fun reportEstablished(fd: Int) {

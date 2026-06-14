@@ -25,11 +25,25 @@ use tokio::sync::Notify;
 /// Handle to the Kotlin `VpnPlugin`, set once during plugin setup.
 static VPN_PLUGIN: OnceLock<tauri::plugin::PluginHandle<Wry>> = OnceLock::new();
 
+/// Dedicated multi-thread runtime for the dial + engine. Created once and **never dropped**, so it
+/// (and the tunnel/engine tasks on it) survive the Tauri Activity/app being destroyed when the user
+/// closes the app — the foreground `VpnService` keeps the process alive, and the VPN keeps running.
+static ENGINE_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+fn engine_runtime() -> &'static tokio::runtime::Runtime {
+    ENGINE_RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build the engine runtime")
+    })
+}
+
 /// A running in-process VPN session: the cooperative-cancel signal for the engine (same graceful
-/// teardown contract as desktop — never abort) plus its task handle.
+/// teardown contract as desktop — never abort) plus its task handle (on [`engine_runtime`]).
 pub struct VpnSession {
     pub cancel: Arc<Notify>,
-    pub task: tauri::async_runtime::JoinHandle<()>,
+    pub task: tokio::task::JoinHandle<()>,
 }
 
 /// Register the Tauri mobile plugin that fronts the Kotlin `VpnPlugin`. Called from `run()`.
@@ -204,19 +218,12 @@ pub async fn connect(state: &AppState, uri: String, settings: Settings) -> Resul
             e.to_string()
         })?;
 
-    // 3. Dial the tunnel (our app is excluded from the VPN, so this egresses directly).
-    let tunnel: Arc<dyn Tunnel> = Arc::from(
-        RealTransport
-            .dial(&uri, TransportPref::Tcp)
-            .await
-            .map_err(|e| {
-                let _ = app.emit("tunnel:state", "Error");
-                format!("dial failed: {e}")
-            })?,
-    );
-
-    // 4. Run the engine in-process over the VpnService fd (server_ip/orig_gateway are unused on
-    //    Android — AndroidOps ignores the route plan; VpnService owns routing).
+    // 4. Build config + run the dial AND engine on the dedicated ENGINE runtime, NOT Tauri's.
+    //    Tauri's runtime/app is torn down when the Activity is destroyed (app closed/swiped), which
+    //    would kill the tunnel's mux tasks + the engine even though the foreground service keeps
+    //    the process alive — so the VPN would stop on close. The static engine runtime outlives the
+    //    Activity, so the tunnel keeps pumping in the background as long as the process lives.
+    //    (server_ip/orig_gateway are unused on Android — AndroidOps ignores the plan.)
     let cfg = TunConfig {
         tun_name: "leshiy0".into(),
         mtu: settings.vpn_mtu,
@@ -227,15 +234,24 @@ pub async fn connect(state: &AppState, uri: String, settings: Settings) -> Resul
         split,
         ..TunConfig::default()
     };
-    leshiy_tun::sys::set_tun_fd(est.fd);
-
+    let fd = est.fd;
     let cancel = Arc::new(Notify::new());
-    let counters = Arc::new(ByteCounters::new());
-    let app_task = app.clone();
     let engine_cancel = cancel.clone();
-    let task = tauri::async_runtime::spawn(async move {
-        let sampler =
-            tauri::async_runtime::spawn(sample_throughput(app_task.clone(), counters.clone()));
+    let app_task = app.clone();
+    let task = engine_runtime().spawn(async move {
+        // Dial here (on the surviving runtime) so the tunnel's mux tasks live past app close.
+        let tunnel: Arc<dyn Tunnel> = match RealTransport.dial(&uri, TransportPref::Tcp).await {
+            Ok(t) => Arc::from(t),
+            Err(e) => {
+                tracing::warn!("android dial failed: {e}");
+                let _ = app_task.emit("tunnel:state", "Error");
+                return;
+            }
+        };
+        leshiy_tun::sys::set_tun_fd(fd);
+        let counters = Arc::new(ByteCounters::new());
+        let sampler = tokio::spawn(sample_throughput(app_task.clone(), counters.clone()));
+        let _ = app_task.emit("tunnel:state", State::Connected);
         if let Err(e) = TunEngine::run(tunnel, cfg, counters, engine_cancel).await {
             tracing::warn!("android tun engine exited: {e}");
         }
@@ -244,7 +260,6 @@ pub async fn connect(state: &AppState, uri: String, settings: Settings) -> Resul
     });
 
     *state.android_vpn.lock().unwrap() = Some(VpnSession { cancel, task });
-    let _ = app.emit("tunnel:state", State::Connected);
     Ok(())
 }
 
