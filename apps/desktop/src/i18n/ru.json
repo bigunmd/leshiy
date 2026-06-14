@@ -1,6 +1,6 @@
 {
   "brand": "LESHIY",
-  "state": { "Disconnected": "Отключено", "Connecting": "Подключение…", "Connected": "Подключено", "Reconnecting": "Переподключение…", "Error": "Не удалось подключиться" },
+  "state": { "Disconnected": "Отключено", "Connecting": "Подключение…", "Connected": "Подключено", "Reconnecting": "Переподключение…", "Disconnecting": "Отключение…", "Error": "Не удалось подключиться" },
   "tapToConnect": "Нажмите, чтобы подключиться", "tapToRetry": "нажмите, чтобы повторить", "noConfig": "Нет конфигурации — добавьте", "manageConfigs": "Конфигурации", "total": "всего",
   "mode": { "proxy": "Прокси", "vpn": "VPN", "label": "Режим", "proxyHint": "Прокси — направляет приложения с поддержкой прокси", "vpnHint": "VPN — готов направить весь трафик" },
   "vpnStatus": { "protected": "весь трафик защищён", "details": "детали туннеля", "ip": "Назначенный IP", "dns": "DNS", "route": "Активный маршрут", "mtu": "MTU", "fullTunnel": "полный туннель" },

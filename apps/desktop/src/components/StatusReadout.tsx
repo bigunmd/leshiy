@@ -6,7 +6,7 @@ import { ArrowDown, ArrowUp, ChevronDown } from "./icons";
 import { cn } from "@/lib/utils";
 
 const COLOR: Record<TunnelState, string> = {
-  Disconnected: "text-dim", Connecting: "text-wisp-bright", Connected: "text-wisp-bright", Reconnecting: "text-wisp-bright", Error: "text-warn",
+  Disconnected: "text-dim", Connecting: "text-wisp-bright", Connected: "text-wisp-bright", Reconnecting: "text-wisp-bright", Disconnecting: "text-dim", Error: "text-warn",
 };
 
 interface Props { state: TunnelState; rates: Rates; mode: Mode; vpnDns: string; vpnMtu: number; }
@@ -15,6 +15,8 @@ export function StatusReadout({ state, rates, mode, vpnDns, vpnMtu }: Props) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const live = state === "Connected";
+  // In-flight transitions: the orb/label already convey "busy", so suppress the tap hint.
+  const busy = state === "Connecting" || state === "Reconnecting" || state === "Disconnecting";
   const vpnLive = live && mode === "vpn";
 
   const speeds = (
@@ -34,7 +36,9 @@ export function StatusReadout({ state, rates, mode, vpnDns, vpnMtu }: Props) {
         <div className={`font-mono text-[13px] font-medium tracking-wide ${COLOR[state]}`}>{t(`state.${state}`)}</div>
       )}
 
-      {live ? speeds : (
+      {live ? speeds : busy ? (
+        <div className="min-h-4" />
+      ) : (
         <div className="flex min-h-4 gap-[18px] font-mono text-xs tabular-nums text-dim">
           <span>{state === "Error" ? t("tapToRetry") : t("tapToConnect")}</span>
         </div>

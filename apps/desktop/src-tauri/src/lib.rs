@@ -206,10 +206,17 @@ async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
         // behaves exactly like the first (working) connect.
         let client = { state.helper.lock().unwrap().take() };
         if let Some(c) = client {
+            // Route/DNS teardown takes a moment (it removes the split-tunnel routes), so tell the
+            // UI we're tearing down — the orb shows a "Disconnecting…" busy state instead of
+            // looking frozen. "Disconnecting" is a UI-only transient (not in the Rust State enum),
+            // so we emit it as a plain string the webview's `tunnel:state` listener understands.
+            if let Some(app) = state.app_handle.get() {
+                let _ = app.emit("tunnel:state", "Disconnecting");
+            }
             // Best-effort: tear down the session AND exit the helper. We deliberately DON'T
             // propagate an error here — a wedged helper or a broken pipe must not block the UI
-            // reset below, otherwise the orb stays stuck on "Connected" ("first click does
-            // nothing"). The next connect re-elevates a fresh helper regardless.
+            // reset below, otherwise the orb stays stuck ("first click does nothing"). The next
+            // connect re-elevates a fresh helper regardless.
             let _ = c.shutdown().await;
         }
         // The helper is exiting, so its dropped `Subscribe` stream won't deliver a final state.

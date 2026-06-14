@@ -1,6 +1,6 @@
 {
   "brand": "LESHIY",
-  "state": { "Disconnected": "Disconnected", "Connecting": "Connecting…", "Connected": "Connected", "Reconnecting": "Reconnecting…", "Error": "Couldn't connect" },
+  "state": { "Disconnected": "Disconnected", "Connecting": "Connecting…", "Connected": "Connected", "Reconnecting": "Reconnecting…", "Disconnecting": "Disconnecting…", "Error": "Couldn't connect" },
   "tapToConnect": "Tap to connect", "tapToRetry": "tap to retry", "noConfig": "No config — import one", "manageConfigs": "Manage configs", "total": "total",
   "mode": { "proxy": "Proxy", "vpn": "VPN", "label": "Mode", "proxyHint": "Proxy — routes proxy-aware apps", "vpnHint": "VPN — ready to route all apps" },
   "vpnStatus": { "protected": "all traffic protected", "details": "tunnel details", "ip": "Assigned IP", "dns": "DNS", "route": "Active route", "mtu": "MTU", "fullTunnel": "full tunnel" },

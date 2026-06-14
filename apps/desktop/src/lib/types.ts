@@ -1,4 +1,10 @@
-export type TunnelState = "Disconnected" | "Connecting" | "Connected" | "Reconnecting" | "Error";
+export type TunnelState =
+  | "Disconnected"
+  | "Connecting"
+  | "Connected"
+  | "Reconnecting"
+  | "Disconnecting"
+  | "Error";
 export interface Rates { up_bps: number; down_bps: number; total_up: number; total_down: number; }
 export interface Profile { id: string; name: string; uri: string; created_at: number; last_latency_ms: number | null; }
 export type TransportPref = "auto" | "quic" | "tcp";

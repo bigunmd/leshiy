@@ -72,6 +72,8 @@ export default function App() {
   const startConnect = () => { void api.connect(); };
 
   const onToggle = () => {
+    // Mid-teardown: ignore clicks so the route/DNS restore completes uninterrupted.
+    if (state === "Disconnecting") return;
     if (isActiveState(state)) { void api.disconnect(); return; }
     // Linux only: if the daemon isn't installed yet, show the install dialog first.
     if (needsHelper(settings.mode) && !onDemand && !helperInstalled) { setInstallError(null); setInstallOpen(true); return; }
