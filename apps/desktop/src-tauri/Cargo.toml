@@ -25,7 +25,7 @@ tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 leshiy-client = { path = "../../../crates/leshiy-client" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 # Logging. On Android `paranoid-android` forwards this to logcat (`adb logcat -s leshiy`);
 # on desktop there's no subscriber so it's a no-op.
 tracing = "0.1"

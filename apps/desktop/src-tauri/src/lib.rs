@@ -364,6 +364,54 @@ fn helper_sidecar_path() -> Result<std::path::PathBuf, String> {
     Ok(dir.join(name))
 }
 
+/// Extract the `host:port` from a `leshiy://…@host:port?…` URI (mirrors the JS `defaultConfigName`).
+fn server_addr_from_uri(uri: &str) -> Option<String> {
+    let after = uri.split_once('@')?.1;
+    let host = after.split(['?', '#']).next()?.trim();
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+/// Measure round-trip latency to the active profile's server (a timed TCP connect to host:port).
+/// On Android our app is excluded from the VPN, so this reflects the real path to the server.
+#[tauri::command]
+async fn measure_latency(state: State<'_, AppState>) -> Result<u32, String> {
+    let uri = {
+        state
+            .profiles
+            .lock()
+            .unwrap()
+            .active()
+            .map(|p| p.uri.clone())
+    }
+    .ok_or_else(|| "no active profile".to_string())?;
+    let addr = server_addr_from_uri(&uri).ok_or_else(|| "no server in uri".to_string())?;
+    let start = std::time::Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect(&addr),
+    )
+    .await
+    .map_err(|_| "timed out".to_string())?
+    .map_err(|e| e.to_string())?;
+    Ok(start.elapsed().as_millis().min(u32::MAX as u128) as u32)
+}
+
+/// Read the system clipboard as text. On Android this uses a native Kotlin read (the JS/plugin
+/// clipboard read returns empty in the webview); on desktop it uses the clipboard-manager plugin.
+#[cfg_attr(target_os = "android", allow(unused_variables))]
+#[tauri::command]
+fn read_clipboard(app: tauri::AppHandle) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        mobile::read_clipboard()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        use tauri_plugin_clipboard_manager::ClipboardExt;
+        app.clipboard().read_text().map_err(|e| e.to_string())
+    }
+}
+
 /// Remove the privileged VPN helper (stops it if running, then uninstalls). Like install,
 /// the removal runs the helper's own `uninstall` subcommand under OS elevation — NOT a
 /// `HelperClient` method. The actual elevation is integration/manual-tested.
@@ -746,6 +794,8 @@ pub fn run() {
             disconnect,
             get_settings,
             set_settings,
+            read_clipboard,
+            measure_latency,
             validate_split_rules,
             subscription_cache,
             refresh_subscriptions,

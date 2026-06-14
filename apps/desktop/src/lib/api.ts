@@ -13,6 +13,8 @@ export const api = {
   disconnect: () => invoke<void>("disconnect"),
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (settings: Settings) => invoke<void>("set_settings", { settings }),
+  readClipboard: () => invoke<string>("read_clipboard"),
+  measureLatency: () => invoke<number>("measure_latency"),
   validateSplitRules: (mode: SplitMode, format: "lines" | "hosts", text: string) =>
     invoke<SplitTunnel>("validate_split_rules", { mode, format, text }),
   subscriptionCache: () => invoke<SubscriptionCache>("subscription_cache"),

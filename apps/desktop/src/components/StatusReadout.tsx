@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { api } from "@/lib/api";
 import type { Mode, Rates, TunnelState } from "@/lib/types";
 import { formatBytes, formatSpeed } from "@/lib/format";
 import { ArrowDown, ArrowUp, ChevronDown } from "./icons";
@@ -19,10 +20,23 @@ export function StatusReadout({ state, rates, mode, vpnDns, vpnMtu }: Props) {
   const busy = state === "Connecting" || state === "Reconnecting" || state === "Disconnecting";
   const vpnLive = live && mode === "vpn";
 
+  // Current round-trip latency to the server, polled while connected (timed TCP connect).
+  const [latency, setLatency] = useState<number | null>(null);
+  useEffect(() => {
+    if (!live) { setLatency(null); return; }
+    let active = true;
+    const poll = () =>
+      api.measureLatency().then((ms) => active && setLatency(ms)).catch(() => active && setLatency(null));
+    void poll();
+    const id = setInterval(() => void poll(), 5000);
+    return () => { active = false; clearInterval(id); };
+  }, [live]);
+
   const speeds = (
     <div className="flex min-h-4 gap-[18px] font-mono text-xs tabular-nums text-dim">
       <span className="inline-flex items-center gap-1"><ArrowDown className="h-2.5 w-2.5" /> {formatSpeed(rates.down_bps)}</span>
       <span className="inline-flex items-center gap-1"><ArrowUp className="h-2.5 w-2.5" /> {formatSpeed(rates.up_bps)}</span>
+      {latency != null && <span className="inline-flex items-center gap-1">⚡ {latency} ms</span>}
     </div>
   );
 

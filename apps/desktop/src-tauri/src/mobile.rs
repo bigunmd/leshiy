@@ -70,6 +70,23 @@ struct EstablishResp {
     fd: i32,
 }
 
+#[derive(Deserialize)]
+struct ClipboardResp {
+    text: String,
+}
+
+/// Read the system clipboard via the native Kotlin plugin (the Tauri clipboard plugin returns
+/// empty in the Android webview).
+pub fn read_clipboard() -> Result<String, String> {
+    let plugin = VPN_PLUGIN
+        .get()
+        .ok_or_else(|| "VPN plugin not registered".to_string())?;
+    let resp: ClipboardResp = plugin
+        .run_mobile_plugin("readClipboard", ())
+        .map_err(|e| e.to_string())?;
+    Ok(resp.text)
+}
+
 /// Map the merged split plan to VpnService routes. Exclude base = full tunnel (`0.0.0.0/0`) plus
 /// per-CIDR `excludeRoute` (API 33+, applied best-effort by the service); Include base = only the
 /// listed CIDRs. IPv4-only this phase (IPv6 isn't tunnelled). Domain rules aren't represented here

@@ -1,11 +1,11 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import jsQR from "jsqr";
-import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { api } from "@/lib/api";
 import type { Profile } from "@/lib/types";
 import { ClipboardIcon, QrIcon } from "./icons";
 import { defaultConfigName } from "@/lib/uri";
@@ -43,18 +43,17 @@ export function ConfigSheet(p: Props) {
   };
   const setFromUri = (v: string) => { setUri(v); setName((n) => (n.trim() ? n : defaultConfigName(v))); };
 
-  // Read the clipboard via the Tauri plugin (Android's webview blocks navigator.clipboard);
-  // fall back to the web API on desktop. Surface a hint if it's empty/unreadable.
+  // Read the clipboard via the backend (native read on Android; clipboard plugin on desktop) —
+  // the JS clipboard APIs are unreliable in the Android webview. Surface real errors.
   const pasteFromClipboard = async () => {
     setError(null);
-    let text: string | undefined;
     try {
-      text = (await readText())?.trim();
-    } catch {
-      try { text = (await navigator.clipboard?.readText())?.trim(); } catch { /* both failed */ }
+      const text = (await api.readClipboard())?.trim();
+      if (text) setFromUri(text);
+      else setError(t("config.clipboardEmpty"));
+    } catch (e) {
+      setError(`clipboard: ${String(e)}`);
     }
-    if (text) setFromUri(text);
-    else setError(t("config.clipboardEmpty"));
   };
   return (
     <Sheet open={p.open} onOpenChange={p.onOpenChange}>

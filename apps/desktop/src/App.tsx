@@ -135,6 +135,10 @@ export default function App() {
     }
   };
   const cancelScan = async () => {
+    // Restore the UI IMMEDIATELY — do not wait on scan()'s promise (it may never resolve on
+    // cancel, which would leave #root hidden over a transparent webview = a stuck white screen).
+    document.body.classList.remove("qr-scanning");
+    setScanning(false);
     try { const bc = await import("@tauri-apps/plugin-barcode-scanner"); await bc.cancel(); } catch { /* ignore */ }
   };
 

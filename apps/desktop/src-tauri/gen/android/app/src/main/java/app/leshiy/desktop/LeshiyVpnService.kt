@@ -85,6 +85,10 @@ class LeshiyVpnService : VpnService() {
             } catch (_: Exception) {
             }
 
+            android.util.Log.i(
+                "leshiy",
+                "VpnService establish: mtu=${cfg.mtu} dns=${cfg.dns.size} routes=${cfg.routes.size} excludeRoutes=${cfg.excludeRoutes.size}",
+            )
             val pfd = builder.establish()
                 ?: throw IllegalStateException("VpnService.establish() returned null")
             vpnInterface = pfd
@@ -110,6 +114,12 @@ class LeshiyVpnService : VpnService() {
         // The system revoked the VPN (e.g. another VPN started). The engine's read on the now-dead
         // fd will error and tear down; just clean up the service here.
         stopVpn()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // Background VPN: when the user swipes the app from recents we deliberately KEEP the tunnel
+        // running (like other VPN apps). The foreground service holds the process + engine alive;
+        // do not stop here. Disconnect is only via the explicit UI action / onRevoke.
     }
 
     override fun onDestroy() {

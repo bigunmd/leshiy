@@ -86,4 +86,21 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         LeshiyVpnService.instance?.stopVpn()
         invoke.resolve(JSObject())
     }
+
+    /** Read the system clipboard as text. Resolves `{ text: String }` ("" if empty). The Tauri
+     *  clipboard plugin proved unreliable in the Android webview, so read it natively here. */
+    @Command
+    fun readClipboard(invoke: Invoke) {
+        val cm = activity.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+            as? android.content.ClipboardManager
+        val clip = cm?.primaryClip
+        val text = if (clip != null && clip.itemCount > 0) {
+            clip.getItemAt(0).coerceToText(activity).toString()
+        } else {
+            ""
+        }
+        val ret = JSObject()
+        ret.put("text", text)
+        invoke.resolve(ret)
+    }
 }
