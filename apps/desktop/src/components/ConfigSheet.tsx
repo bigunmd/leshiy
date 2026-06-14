@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import jsQR from "jsqr";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
@@ -18,6 +17,8 @@ interface Props {
   onSelect: (id: string) => void; onRemove: (id: string) => void; onRename: (id: string, name: string) => void;
   /** Android: offer a live camera QR scan (the barcode-scanner plugin is mobile-only). */
   canScanCamera?: boolean;
+  /** Invoked when the camera-scan button is pressed (App owns the scan + overlay). */
+  onScanCamera?: () => void;
 }
 
 async function decodeQrFile(file: File): Promise<string | null> {
@@ -35,7 +36,6 @@ async function decodeQrFile(file: File): Promise<string | null> {
 export function ConfigSheet(p: Props) {
   const { t } = useTranslation();
   const [uri, setUri] = useState(""); const [name, setName] = useState(""); const [error, setError] = useState<string | null>(null);
-  const [scanning, setScanning] = useState(false);
   const doImport = async () => {
     setError(null);
     try { await p.onImport(uri.trim(), name.trim() || defaultConfigName(uri) || "config"); setUri(""); setName(""); }
@@ -43,40 +43,18 @@ export function ConfigSheet(p: Props) {
   };
   const setFromUri = (v: string) => { setUri(v); setName((n) => (n.trim() ? n : defaultConfigName(v))); };
 
-  // Read the clipboard via the Tauri plugin (Android's webview blocks navigator.clipboard).
+  // Read the clipboard via the Tauri plugin (Android's webview blocks navigator.clipboard);
+  // fall back to the web API on desktop. Surface a hint if it's empty/unreadable.
   const pasteFromClipboard = async () => {
     setError(null);
+    let text: string | undefined;
     try {
-      const text = (await readText())?.trim();
-      if (text) setFromUri(text);
+      text = (await readText())?.trim();
     } catch {
-      /* clipboard empty/blocked; the manual field still works */
+      try { text = (await navigator.clipboard?.readText())?.trim(); } catch { /* both failed */ }
     }
-  };
-
-  // Live camera QR scan (Android). The barcode-scanner renders the camera behind a transparent
-  // webview, so we hide the app (body.qr-scanning) and show only a cancel control over the camera.
-  const scanCamera = async () => {
-    setError(null);
-    const bc = await import("@tauri-apps/plugin-barcode-scanner");
-    try {
-      let perm = await bc.checkPermissions();
-      if (perm !== "granted") perm = await bc.requestPermissions();
-      if (perm !== "granted") { setError(t("config.cameraDenied")); return; }
-      document.body.classList.add("qr-scanning");
-      setScanning(true);
-      const res = await bc.scan({ formats: [bc.Format.QRCode], windowed: true });
-      const v = res.content?.trim();
-      if (v) setFromUri(v); else setError(t("config.invalid"));
-    } catch {
-      setError(t("config.invalid"));
-    } finally {
-      document.body.classList.remove("qr-scanning");
-      setScanning(false);
-    }
-  };
-  const cancelScan = async () => {
-    try { const bc = await import("@tauri-apps/plugin-barcode-scanner"); await bc.cancel(); } catch { /* ignore */ }
+    if (text) setFromUri(text);
+    else setError(t("config.clipboardEmpty"));
   };
   return (
     <Sheet open={p.open} onOpenChange={p.onOpenChange}>
@@ -95,7 +73,7 @@ export function ConfigSheet(p: Props) {
           {p.canScanCamera && (
             <button
               type="button"
-              onClick={scanCamera}
+              onClick={() => p.onScanCamera?.()}
               className="flex flex-col items-center justify-center gap-2 rounded-xl border border-border bg-bg1 py-5 transition hover:-translate-y-0.5 hover:border-wisp/60"
             >
               <QrIcon className="h-7 w-7 text-wisp" />
@@ -121,13 +99,6 @@ export function ConfigSheet(p: Props) {
             />
           </label>
         </div>
-        {scanning &&
-          createPortal(
-            <div className="qr-overlay">
-              <Button onClick={cancelScan} className="bg-panel">{t("config.cancelScan")}</Button>
-            </div>,
-            document.body,
-          )}
 
         {/* Divider */}
         <div className="flex items-center gap-3 px-4 py-3">

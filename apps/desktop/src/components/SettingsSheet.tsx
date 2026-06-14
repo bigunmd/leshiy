@@ -13,6 +13,8 @@ interface Props {
   open: boolean; onOpenChange: (o: boolean) => void;
   settings: Settings; onChange: (patch: Partial<Settings>) => void; onLanguageChange: (lng: string) => void;
   helperInstalled: boolean; onRemoveHelper: () => void; onOpenSplit: () => void;
+  /** Android: hide desktop-only rows (window-close behavior — Android has no window). */
+  isAndroid?: boolean;
 }
 export function SettingsSheet(p: Props) {
   const { t, i18n } = useTranslation();
@@ -48,18 +50,20 @@ export function SettingsSheet(p: Props) {
               ))}
             </div>
           </div>
-          <div className={row}>
-            <Label className="text-[13px]">{t("settings.closeBehavior")}</Label>
-            <div className="flex gap-1">
-              {closeBehaviors.map((cb) => (
-                <Button key={cb} size="sm" variant={p.settings.close_behavior === cb ? "secondary" : "ghost"}
-                  onClick={() => p.onChange({ close_behavior: cb })}
-                  className={cn("font-mono text-[10px] uppercase tracking-widest", p.settings.close_behavior === cb ? "bg-moss text-foreground" : "text-dim")}>
-                  {t(`settings.close_${cb}`)}
-                </Button>
-              ))}
+          {!p.isAndroid && (
+            <div className={row}>
+              <Label className="text-[13px]">{t("settings.closeBehavior")}</Label>
+              <div className="flex gap-1">
+                {closeBehaviors.map((cb) => (
+                  <Button key={cb} size="sm" variant={p.settings.close_behavior === cb ? "secondary" : "ghost"}
+                    onClick={() => p.onChange({ close_behavior: cb })}
+                    className={cn("font-mono text-[10px] uppercase tracking-widest", p.settings.close_behavior === cb ? "bg-moss text-foreground" : "text-dim")}>
+                    {t(`settings.close_${cb}`)}
+                  </Button>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
           {vpn ? (
             <>
               <div className={row}>

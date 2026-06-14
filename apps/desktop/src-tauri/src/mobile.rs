@@ -134,10 +134,42 @@ pub async fn connect(state: &AppState, uri: String, settings: Settings) -> Resul
         return Err("VPN permission was denied".into());
     }
 
-    // 2. Build the tunnel interface (foreground service does establish()).
+    // 2. Make sure enabled subscriptions (routing presets) are fetched — otherwise their CIDRs
+    //    aren't in the cache yet and the preset wouldn't route. Fetch any enabled-but-uncached
+    //    ones now (conditional GET; cached ones are skipped). Failures are logged, not fatal.
+    let missing: Vec<String> = {
+        let s = state.settings.lock().unwrap();
+        let c = state.sub_cache.lock().unwrap();
+        s.rule_subscriptions
+            .iter()
+            .filter(|x| x.enabled && c.get(&x.id).is_none())
+            .map(|x| x.id.clone())
+            .collect()
+    };
+    if !missing.is_empty() {
+        tracing::info!(
+            count = missing.len(),
+            "fetching uncached enabled subscriptions"
+        );
+        for id in &missing {
+            if let Err(e) = crate::refresh_subs(state, Some(id)).await {
+                tracing::warn!(sub = %id, "subscription refresh failed: {e}");
+            }
+        }
+    }
+
+    // 3. Build the tunnel interface (foreground service does establish()).
     let cache = state.sub_cache.lock().unwrap().clone();
     let split = build_split_plan(&settings, &cache);
     let (routes, exclude_routes) = routes_for_builder(&split);
+    tracing::info!(
+        base = ?split.base_mode,
+        routes = routes.len(),
+        exclude_routes = exclude_routes.len(),
+        subs_enabled = settings.rule_subscriptions.iter().filter(|s| s.enabled).count(),
+        cached_subs = cache.entries.len(),
+        "android split routes for VpnService.Builder"
+    );
     let est: EstablishResp = plugin
         .run_mobile_plugin(
             "establish",

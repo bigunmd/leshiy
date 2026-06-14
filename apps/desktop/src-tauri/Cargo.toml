@@ -26,6 +26,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 leshiy-client = { path = "../../../crates/leshiy-client" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+# Logging. On Android `paranoid-android` forwards this to logcat (`adb logcat -s leshiy`);
+# on desktop there's no subscriber so it's a no-op.
+tracing = "0.1"
 # Subscription fetching. rustls-tls (no system OpenSSL); portable to Android.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
 
@@ -44,7 +47,6 @@ directories = "5"
 # connect/dial failures are diagnosable on-device.
 [target.'cfg(target_os = "android")'.dependencies]
 leshiy-tun = { path = "../../../crates/leshiy-tun" }
-tracing = "0.1"
 tracing-subscriber = "0.3"
 paranoid-android = "0.2"
 # Camera QR scanning (mobile-only plugin).

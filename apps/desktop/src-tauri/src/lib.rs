@@ -548,9 +548,17 @@ async fn refresh_subs(state: &AppState, only_id: Option<&str>) -> Result<(), Str
         }
         let prev = cache.get(&sub.id).cloned();
         match fetch_one(&client, sub, prev.as_ref()).await {
-            Ok(Some(entry)) => cache.insert(sub.id.clone(), entry),
-            Ok(None) => {}
-            Err(e) => eprintln!("subscription {} fetch failed: {e}", sub.id),
+            Ok(Some(entry)) => {
+                tracing::info!(
+                    sub = %sub.id,
+                    cidrs = entry.rules.cidrs.len(),
+                    domains = entry.rules.domains.len(),
+                    "subscription fetched"
+                );
+                cache.insert(sub.id.clone(), entry);
+            }
+            Ok(None) => tracing::info!(sub = %sub.id, "subscription not modified (304)"),
+            Err(e) => tracing::warn!(sub = %sub.id, "subscription fetch failed: {e}"),
         }
     }
     *state.sub_cache.lock().unwrap() = cache;

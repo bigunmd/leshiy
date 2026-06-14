@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { setLanguage } from "./i18n";
 import { api } from "@/lib/api";
+import { defaultConfigName } from "@/lib/uri";
 import { isVpn, isActiveState, needsHelper } from "@/lib/mode";
 import { Atmosphere } from "@/components/Atmosphere";
 import { ConnectScreen } from "@/components/ConnectScreen";
@@ -18,6 +21,7 @@ import { useSettings } from "@/state/useSettings";
 type SheetId = null | "config" | "settings" | "language" | "split";
 
 export default function App() {
+  const { t } = useTranslation();
   const { state, rates } = useTunnel();
   const profiles = useProfiles();
   const { settings, update } = useSettings();
@@ -32,6 +36,7 @@ export default function App() {
   const [installError, setInstallError] = useState<string | null>(null);
   const [helperInstalled, setHelperInstalled] = useState(false);
   const [platform, setPlatform] = useState("");
+  const [scanning, setScanning] = useState(false);
   const close = (o: boolean) => { if (!o) setSheet(null); };
 
   useEffect(() => { void api.helperInstalled().then(setHelperInstalled).catch(() => setHelperInstalled(false)); }, []);
@@ -106,6 +111,33 @@ export default function App() {
     void api.removeHelper().then(() => setHelperInstalled(false)).catch(() => {});
   };
 
+  // Camera QR scan (Android). Owned here, not in ConfigSheet, so we can CLOSE the config sheet
+  // first — otherwise the Radix sheet's focus-trap neutralizes the cancel overlay. The
+  // barcode-scanner renders the camera behind a transparent webview, so `body.qr-scanning` hides
+  // the app and the body-portaled `.qr-overlay` (the Cancel button) shows over the live camera.
+  const onScanCamera = async () => {
+    setSheet(null);
+    const bc = await import("@tauri-apps/plugin-barcode-scanner");
+    try {
+      let perm = await bc.checkPermissions();
+      if (perm !== "granted") perm = await bc.requestPermissions();
+      if (perm !== "granted") return;
+      document.body.classList.add("qr-scanning");
+      setScanning(true);
+      const res = await bc.scan({ formats: [bc.Format.QRCode], windowed: true });
+      const v = res.content?.trim();
+      if (v) await profiles.importProfile(v, defaultConfigName(v) || "config");
+    } catch {
+      /* cancelled or no code */
+    } finally {
+      document.body.classList.remove("qr-scanning");
+      setScanning(false);
+    }
+  };
+  const cancelScan = async () => {
+    try { const bc = await import("@tauri-apps/plugin-barcode-scanner"); await bc.cancel(); } catch { /* ignore */ }
+  };
+
   return (
     <>
       <Atmosphere />
@@ -115,10 +147,11 @@ export default function App() {
         onOpenConfigs={() => setSheet("config")} onOpenSettings={() => setSheet("settings")} onOpenLanguage={() => setSheet("language")}
       />
       <ConfigSheet open={sheet === "config"} onOpenChange={close}
-        profiles={profiles.profiles} activeId={profiles.activeId} canScanCamera={platform === "android"}
+        profiles={profiles.profiles} activeId={profiles.activeId} canScanCamera={platform === "android"} onScanCamera={onScanCamera}
         onImport={profiles.importProfile} onSelect={profiles.select} onRemove={profiles.remove} onRename={profiles.rename} />
       <SettingsSheet open={sheet === "settings"} onOpenChange={close} settings={settings} onChange={update}
         helperInstalled={helperInstalled && !onDemand} onRemoveHelper={onRemoveHelper}
+        isAndroid={platform === "android"}
         onOpenSplit={() => setSheet("split")}
         onLanguageChange={(lng) => { setLanguage(lng); void update({ language: lng }); }} />
       <SplitTunnelSheet open={sheet === "split"} onOpenChange={close} value={settings.split_tunnel} subscriptions={settings.rule_subscriptions} onChange={update} />
@@ -129,6 +162,18 @@ export default function App() {
         onNotNow={() => setInstallOpen(false)} onInstall={onInstall} />
       <CloseWindowDialog open={closeOpen} onOpenChange={setCloseOpen}
         onQuit={onCloseQuit} onMinimize={onCloseMinimize} />
+      {scanning &&
+        createPortal(
+          <div className="qr-overlay">
+            <button
+              onClick={cancelScan}
+              className="rounded-full border border-wisp/60 bg-panel px-6 py-3 font-mono text-sm text-foreground shadow-lg"
+            >
+              {t("config.cancelScan")}
+            </button>
+          </div>,
+          document.body,
+        )}
     </>
   );
 }
