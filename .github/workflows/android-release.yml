@@ -29,9 +29,9 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+          cache-dependency-path: apps/gui/pnpm-lock.yaml
       - name: Install JS deps
-        working-directory: apps/desktop
+        working-directory: apps/gui
         run: pnpm install --frozen-lockfile
       - name: Decode release keystore
         env:
@@ -45,7 +45,7 @@ jobs:
             echo "No ANDROID_KEYSTORE_B64 secret — building an UNSIGNED release APK."
           fi
       - name: Build APK(s)
-        working-directory: apps/desktop
+        working-directory: apps/gui
         run: |
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
@@ -53,7 +53,7 @@ jobs:
       - name: Collect APKs + checksums
         run: |
           mkdir -p dist
-          find apps/desktop/src-tauri/gen/android/app/build/outputs/apk -name "*.apk" -exec cp {} dist/ \;
+          find apps/gui/src-tauri/gen/android/app/build/outputs/apk -name "*.apk" -exec cp {} dist/ \;
           ( cd dist && sha256sum *.apk > SHA256SUMS )
           ls -la dist
       - name: Publish draft release
