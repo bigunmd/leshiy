@@ -7,10 +7,12 @@ designed to resist modern Deep Packet Inspection (DPI) — with Russia / TSPU as
 primary target threat model. You run your own server(s); clients connect with a
 single `leshiy://` URI.
 
-> ⚠️ **Maturity:** Leshiy is **new and has not been independently security-audited
-> or field-tested against a live censor.** The design is built on published,
-> peer-reviewed anti-censorship research, but treat it as **alpha** software — use
-> it at your own risk and prefer mature, vetted tools for high-stakes situations.
+> **Maturity: beta.** The protocol and the **Linux, Windows, and Android** clients
+> work reliably in day-to-day use; the apps may still have occasional edge-case bugs.
+> Leshiy has **not yet had an independent security audit** and hasn't been formally
+> field-tested against a live censor — so for genuinely high-stakes situations, prefer
+> tools that have been audited and battle-proven. The design follows published,
+> peer-reviewed anti-censorship research.
 
 ---
 
@@ -75,8 +77,8 @@ connect in one tap — paste a `leshiy://` link (or scan its QR) and go.
 
 **Platforms:** desktop apps for **Linux, Windows, and macOS**, plus an **Android**
 app. Download the latest build from the
-[Releases page](https://github.com/bigunmd/leshiy/releases). (Linux and Windows are
-the most tested; macOS and Android are newer. No iOS app.)
+[Releases page](https://github.com/bigunmd/leshiy/releases). (Linux, Windows, and
+Android are tested and working; macOS builds are provided but less exercised. No iOS app.)
 
 **Two modes:**
 
@@ -118,13 +120,14 @@ deployed, Leshiy is new):
 | Per-user caps / rate / expiry | ✅ built-in (+sqlite) | via panels (3x-ui/Marzban) | external tooling | partial |
 | Entry/Exit relay chaining | ✅ **built-in, chainable** | manual (`dialerProxy`) | ❌ | ❌ |
 | Implementation | **pure Rust** | Go | Go | Go |
-| Maturity | **alpha / unaudited** | mature | mature | mature |
+| Maturity | **beta / unaudited** | mature | mature | mature |
 
 **Where Leshiy aims to differ:** one tool that runs *both* a REALITY/TCP and a QUIC/HTTP-3
 transport with automatic fallback, ships a built-in **entry/exit connector with relay
 chaining**, includes **multi-user management** without a separate panel, and is **pure
-Rust** (no BoringSSL/C dependency). The trade-off is maturity — Xray, AmneziaWG, and
-Hysteria2 are battle-tested; Leshiy is not yet.
+Rust** (no BoringSSL/C dependency). The trade-off is track record — Xray, AmneziaWG, and
+Hysteria2 are battle-tested and audited over years; Leshiy works well today but is newer
+and not yet independently audited.
 
 ---
 
