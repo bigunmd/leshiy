@@ -48,6 +48,10 @@ struct RunArgs {
     /// Serve one session then exit (the on-demand GUI model). Default: persistent (daemon).
     #[arg(long)]
     ephemeral: bool,
+    /// Unix: confirm that granting control to uid 0 (root-only) is intentional.
+    /// Required when `--allow-uid 0` so it can't happen by accident. (M6)
+    #[arg(long)]
+    allow_root: bool,
 }
 
 #[tokio::main]
@@ -69,12 +73,12 @@ async fn main() -> Result<()> {
         raw
     };
     let args = RunArgs::parse_from(run_args);
-    let (endpoint, auth) = resolve(&args)?;
     let mode = if args.ephemeral {
         ServeMode::Ephemeral
     } else {
         ServeMode::Persistent
     };
+    let (endpoint, auth) = resolve(&args, mode)?;
 
     let runner = Arc::new(EngineRunner::new());
     tracing::info!(?mode, "leshiy-helper listening");
@@ -125,16 +129,34 @@ fn init_tracing() {
 
 /// Resolve the run flags into an endpoint + authorization, per OS.
 #[cfg(unix)]
-fn resolve(args: &RunArgs) -> Result<(Endpoint, Auth)> {
+fn resolve(args: &RunArgs, mode: ServeMode) -> Result<(Endpoint, Auth)> {
     let path = args.socket.clone().unwrap_or_else(default_socket_path);
-    let uid = args
-        .allow_uid
-        .unwrap_or_else(|| nix::unistd::getuid().as_raw());
+    // M6: the long-lived daemon must NOT silently default the allowed uid to the
+    // launching uid — an operator widening socket perms to "fix" connectivity is
+    // a foot-gun. Require an explicit --allow-uid in persistent mode.
+    let uid = match args.allow_uid {
+        Some(u) => u,
+        None => {
+            if matches!(mode, ServeMode::Persistent) {
+                anyhow::bail!(
+                    "--allow-uid is required in persistent mode (the uid permitted to drive the helper)"
+                );
+            }
+            nix::unistd::getuid().as_raw()
+        }
+    };
+    // M6: granting control to uid 0 means "root only"; require explicit confirmation
+    // so it can't be selected by accident.
+    if uid == 0 && !args.allow_root {
+        anyhow::bail!(
+            "--allow-uid 0 grants control to root only; pass --allow-root to confirm this is intended"
+        );
+    }
     Ok((Endpoint::Socket(path), Auth { uid, sid: None }))
 }
 
 #[cfg(windows)]
-fn resolve(args: &RunArgs) -> Result<(Endpoint, Auth)> {
+fn resolve(args: &RunArgs, _mode: ServeMode) -> Result<(Endpoint, Auth)> {
     let name = args
         .pipe
         .clone()
@@ -227,5 +249,40 @@ mod tests {
         assert_eq!(parse_subcommand(Some("run")), Sub::Run);
         assert_eq!(parse_subcommand(None), Sub::Run);
         assert_eq!(parse_subcommand(Some("--socket")), Sub::Run);
+    }
+
+    #[cfg(unix)]
+    fn args(extra: &[&str]) -> RunArgs {
+        let mut v = vec!["leshiy-helper"];
+        v.extend_from_slice(extra);
+        RunArgs::parse_from(v)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistent_requires_explicit_allow_uid() {
+        // No --allow-uid in persistent mode is a foot-gun (silent getuid default). (M6)
+        assert!(resolve(&args(&[]), ServeMode::Persistent).is_err());
+        let (_, auth) = resolve(&args(&["--allow-uid", "1000"]), ServeMode::Persistent).unwrap();
+        assert_eq!(auth.uid, 1000);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ephemeral_defaults_allow_uid() {
+        // Ephemeral may default to the launching uid (the on-demand GUI passes it explicitly).
+        assert!(resolve(&args(&[]), ServeMode::Ephemeral).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uid_zero_requires_allow_root() {
+        assert!(resolve(&args(&["--allow-uid", "0"]), ServeMode::Persistent).is_err());
+        let (_, auth) = resolve(
+            &args(&["--allow-uid", "0", "--allow-root"]),
+            ServeMode::Persistent,
+        )
+        .unwrap();
+        assert_eq!(auth.uid, 0);
     }
 }

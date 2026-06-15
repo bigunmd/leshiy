@@ -6,7 +6,46 @@
 //! Kept in `leshiy-helper` (not the Tauri crate) so the Windows path is covered by the
 //! `x86_64-pc-windows-gnu` cross-check. Runtime behavior (the actual prompt) is verified on
 //! real hardware — a USER TODO.
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Validate the helper binary before running it with elevated privileges (H6).
+///
+/// `bin` is chosen by the unprivileged GUI; if an attacker can influence which
+/// file we launch — a relative path resolved against a writable CWD, or a binary
+/// sitting in a directory another unprivileged user can write to — they get
+/// root/Admin code execution via binary planting. We canonicalize (resolving
+/// symlinks and requiring existence), require an absolute path, and on Unix
+/// refuse to elevate a binary whose file or parent directory is group/other
+/// writable.
+fn validate_helper_binary(bin: &Path) -> std::io::Result<PathBuf> {
+    let canon = bin.canonicalize()?;
+    if !canon.is_absolute() {
+        return Err(std::io::Error::other(
+            "refusing to elevate: helper binary path is not absolute",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let check = |p: &Path| -> std::io::Result<()> {
+            let mode = std::fs::metadata(p)?.permissions().mode();
+            if mode & 0o022 != 0 {
+                return Err(std::io::Error::other(format!(
+                    "refusing to elevate: {} is group/other-writable (mode {:o}) — \
+                     a non-owner could plant a malicious binary",
+                    p.display(),
+                    mode & 0o7777
+                )));
+            }
+            Ok(())
+        };
+        check(&canon)?;
+        if let Some(parent) = canon.parent() {
+            check(parent)?;
+        }
+    }
+    Ok(canon)
+}
 
 /// Ensure a helper is answering the default endpoint: if one already is, return; otherwise
 /// elevate + launch an ephemeral helper and poll the endpoint (up to ~5s) until it's ready.
@@ -14,7 +53,9 @@ pub async fn ensure_running(bin: &Path) -> std::io::Result<()> {
     if helper_responds().await {
         return Ok(());
     }
-    spawn_ephemeral_helper(bin)?;
+    // Validate the binary path BEFORE elevating it (H6).
+    let bin = validate_helper_binary(bin)?;
+    spawn_ephemeral_helper(&bin)?;
     for _ in 0..100 {
         if helper_responds().await {
             return Ok(());
@@ -85,6 +126,11 @@ mod linux {
             .arg(&sock)
             .arg("--allow-uid")
             .arg(uid.to_string());
+        // If the GUI is itself root, the allowed uid is 0; confirm it explicitly
+        // so the helper's accidental-root guard accepts it (M6).
+        if uid == 0 {
+            cmd.arg("--allow-root");
+        }
         // CRITICAL for AppImage: it exports LD_LIBRARY_PATH/LD_PRELOAD pointing at its bundled
         // (often mismatched) libs. If pkexec or the helper inherits them, system libraries
         // (libpolkit/glib) load the wrong versions and fail (undefined symbol). Run the child
@@ -109,11 +155,15 @@ mod macos {
         // attack on a root-written file). Each interpolated value is POSIX single-quoted
         // (`sh_squote`) so a path containing `'` can't break out / inject; the whole shell
         // command is then escaped for the AppleScript double-quoted string layer.
+        // If the GUI is itself root (uid 0), confirm it for the helper's
+        // accidental-root guard (M6).
+        let allow_root = if uid == 0 { " --allow-root" } else { "" };
         let inner = format!(
-            "{} run --ephemeral --socket {} --allow-uid {} >/dev/null 2>&1 &",
+            "{} run --ephemeral --socket {} --allow-uid {}{} >/dev/null 2>&1 &",
             sh_squote(&bin.display().to_string()),
             sh_squote(&sock.display().to_string()),
-            uid
+            uid,
+            allow_root
         );
         let script = format!(
             "do shell script \"{}\" with administrator privileges",
@@ -194,5 +244,57 @@ mod windows {
     /// PowerShell single-quote a string: wrap in `'…'`, replacing each `'` with `''`.
     fn ps_squote(s: &str) -> String {
         format!("'{}'", s.replace('\'', "''"))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn unique_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("leshiy-elev-{}-{}", std::process::id(), tag));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        d
+    }
+
+    fn write_exe(dir: &Path, mode: u32) -> PathBuf {
+        let p = dir.join("leshiy-helper");
+        std::fs::write(&p, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        p
+    }
+
+    #[test]
+    fn accepts_owner_only_writable_binary() {
+        let dir = unique_dir("ok");
+        let exe = write_exe(&dir, 0o755);
+        let got = validate_helper_binary(&exe).unwrap();
+        assert!(got.is_absolute());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rejects_world_writable_binary() {
+        let dir = unique_dir("ww");
+        let exe = write_exe(&dir, 0o757); // other-writable → plantable
+        assert!(validate_helper_binary(&exe).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rejects_world_writable_parent_dir() {
+        let dir = unique_dir("wwdir");
+        let exe = write_exe(&dir, 0o755);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(validate_helper_binary(&exe).is_err());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rejects_nonexistent_path() {
+        assert!(validate_helper_binary(Path::new("/nonexistent/leshiy-helper-xyz")).is_err());
     }
 }
