@@ -24,7 +24,9 @@ pub fn seal_record(
     inner_type: u8,
     plaintext: &[u8],
 ) -> Result<Vec<u8>> {
-    let mut inner = Vec::with_capacity(plaintext.len() + 1);
+    // Reserve room for the tag up front so the in-place seal appends it without a
+    // realloc, eliminating the separate ciphertext allocation of the old path.
+    let mut inner = Vec::with_capacity(plaintext.len() + 1 + suite.tag_len());
     inner.extend_from_slice(plaintext);
     inner.push(inner_type);
     let ct_len = inner.len() + suite.tag_len();
@@ -34,15 +36,15 @@ pub fn seal_record(
     })?;
     let header = [APPLICATION_DATA, 0x03, 0x03, (len >> 8) as u8, len as u8];
     let n = nonce(iv, seq);
-    let ct = suite
-        .aead_seal(key, &n, &header, &inner)
+    suite
+        .aead_seal_in_place(key, &n, &header, &mut inner)
         .ok_or(TlsError::Malformed {
             what: "record",
             detail: "seal".into(),
-        })?;
-    let mut out = Vec::with_capacity(5 + ct.len());
+        })?; // `inner` is now ciphertext||tag
+    let mut out = Vec::with_capacity(5 + inner.len());
     out.extend_from_slice(&header);
-    out.extend_from_slice(&ct);
+    out.append(&mut inner);
     Ok(out)
 }
 
@@ -60,11 +62,24 @@ pub fn open_record(
             have: record.len(),
         });
     }
-    let header = &record[0..5];
-    let body = &record[5..];
+    open_record_parts(suite, key, iv, seq, &record[0..5], &record[5..])
+}
+
+/// Like [`open_record`] but takes the 5-byte header (AAD) and body separately, so a
+/// caller that already holds the parsed parts (e.g. a `Record` off the wire) need
+/// not rebuild the full record buffer just to decrypt it.
+pub fn open_record_parts(
+    suite: CipherSuite,
+    key: &[u8],
+    iv: &[u8; 12],
+    seq: u64,
+    header: &[u8],
+    body: &[u8],
+) -> Result<(u8, Vec<u8>)> {
     let n = nonce(iv, seq);
-    let mut inner = suite
-        .aead_open(key, &n, header, body)
+    let mut inner = body.to_vec();
+    suite
+        .aead_open_in_place(key, &n, header, &mut inner)
         .ok_or(TlsError::Malformed {
             what: "record",
             detail: "open/tag".into(),
