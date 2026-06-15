@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod client;
 pub mod config;
+pub mod connlimit;
 // The control socket is a Unix-domain-socket server feature (live user management).
 // Gate it to Unix so the client embed (e.g. the desktop app) compiles on Windows.
 #[cfg(unix)]

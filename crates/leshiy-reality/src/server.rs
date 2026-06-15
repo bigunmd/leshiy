@@ -123,7 +123,17 @@ where
     let first = read_record(&mut client).await?; // Err here = bare/garbage TCP open → drop
     let first_bytes = first.encode();
     // 2. dial dest, forward the first record
-    let mut dest = TcpStream::connect(&cfg.dest).await?;
+    let mut dest = match TcpStream::connect(&cfg.dest).await {
+        Ok(d) => d,
+        Err(_) => {
+            // H4: a dest-dial failure must NOT produce an instant zero-byte close
+            // — that is an active-probe distinguisher from a genuine TLS site.
+            // Absorb client bytes for a bounded, per-connection-jittered period so
+            // the failure resembles a stalled/overloaded server.
+            stall_then_drop(&mut client, &first_bytes).await;
+            return Ok(());
+        }
+    };
     dest.set_nodelay(true).ok();
     dest.write_all(&first_bytes).await?;
     dest.flush().await?;
@@ -209,6 +219,33 @@ where
     }
 }
 
+/// Absorb client bytes for a bounded, per-connection-jittered period, then drop.
+/// Used when dest is unreachable so we don't emit a tell-tale instant close (H4).
+/// The jitter is derived from the client's first record so it varies per peer
+/// without needing an RNG, and is bounded to a few seconds.
+async fn stall_then_drop<S>(client: &mut S, seed: &[u8])
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    use tokio::io::AsyncReadExt;
+    let h = seed
+        .iter()
+        .fold(0u64, |a, &b| a.wrapping_mul(31).wrapping_add(b as u64));
+    let secs = 1 + (h % 8); // 1..=8 seconds
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(secs));
+    tokio::pin!(deadline);
+    let mut buf = [0u8; 1024];
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            r = client.read(&mut buf) => match r {
+                Ok(0) | Err(_) => break, // peer gave up
+                Ok(_) => {}              // discard and keep absorbing
+            }
+        }
+    }
+}
+
 /// Open an egress connection to the stream's target and relay bytes both ways.
 /// Throttles via per-user TokenBuckets (None = unlimited, skips consume entirely).
 /// Reports usage every ~64 KB (atomic-only, ADR-0019 hot-path discipline).
@@ -226,8 +263,16 @@ async fn relay_stream(
     let mut acc_up: u64 = 0;
     let mut acc_down: u64 = 0;
     const FLUSH: u64 = 64 * 1024; // report usage every ~64 KB (ADR-0019: atomic-only)
+    // M4: re-check authorization on a timer too, so revocation / expiry / data-cap
+    // bounds a *live* session within ~1s instead of waiting for the next 64 KB flush
+    // (which a trickle of small streams may never reach).
+    let mut revoke_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    revoke_tick.tick().await; // consume the immediate first tick
     loop {
         tokio::select! {
+            _ = revoke_tick.tick() => {
+                if !store.still_allowed(&short_id, now_secs()) { break; }
+            }
             inbound = stream.recv() => match inbound {           // client → target = UP
                 Ok(b) => {
                     if let Some(tb) = &limits.up { tb.consume(b.len() as u64).await; }
@@ -285,8 +330,16 @@ async fn relay_datagram(
         .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
     const IDLE: std::time::Duration = std::time::Duration::from_secs(60);
     let mut buf = vec![0u8; 65535];
+    // M4: the UDP relay previously never re-checked authorization at all, so a
+    // revoked/expired/over-cap user kept flowing until the idle timeout. Re-check
+    // on a 1s timer.
+    let mut revoke_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    revoke_tick.tick().await; // consume the immediate first tick
     loop {
         tokio::select! {
+            _ = revoke_tick.tick() => {
+                if !store.still_allowed(&short_id, now_secs()) { break; }
+            }
             inbound = stream.recv() => match inbound {       // client → target = UP
                 Ok(b) => {
                     if let Some(tb) = &limits.up { tb.consume(b.len() as u64).await; }
@@ -333,8 +386,17 @@ pub async fn run_reality_server(
     let replay = Arc::new(crate::replay::ReplayGuard::new(
         cfg.max_time_diff.saturating_mul(2),
     ));
+    // Pre-auth admission control (H3): bound total + per-IP concurrent
+    // connections so an unauthenticated flood can neither exhaust the server
+    // nor reflect onto dest.
+    let limiter = crate::connlimit::ConnLimiter::new(MAX_TOTAL_CONNS, MAX_CONNS_PER_IP);
     loop {
-        let (sock, _) = listener.accept().await?;
+        let (sock, peer) = listener.accept().await?;
+        // Admit before doing any work (including the dial to dest). On rejection
+        // the socket is dropped immediately.
+        let Some(guard) = limiter.try_acquire(peer.ip()) else {
+            continue;
+        };
         sock.set_nodelay(true).ok();
         let (c, st, eg, ce, rp) = (
             cfg.clone(),
@@ -344,6 +406,7 @@ pub async fn run_reality_server(
             replay.clone(),
         );
         tokio::spawn(async move {
+            let _guard = guard; // released when the connection finishes
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as u32)
@@ -352,6 +415,11 @@ pub async fn run_reality_server(
         });
     }
 }
+
+/// Total concurrent connections the listener will service at once (H3).
+const MAX_TOTAL_CONNS: usize = 4096;
+/// Concurrent connections allowed from a single source IP (H3).
+const MAX_CONNS_PER_IP: usize = 64;
 
 #[cfg(test)]
 mod tests {
