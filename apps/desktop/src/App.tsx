@@ -51,6 +51,32 @@ export default function App() {
     return () => document.removeEventListener("visibilitychange", report);
   }, []);
 
+  // Report network connectivity so the supervisor parks reconnect backoff while
+  // offline (battery). Sources: the webview's online/offline events (cross-platform)
+  // and — authoritatively on Android — the VpnPlugin's ConnectivityManager event.
+  useEffect(() => {
+    const setOnline = (online: boolean) => void api.setOnline(online).catch(() => {});
+    setOnline(navigator.onLine);
+    const onOnline = () => setOnline(true);
+    const onOffline = () => setOnline(false);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/core")
+      .then(({ addPluginListener }) =>
+        addPluginListener("leshiy-vpn", "connectivity", (e: { online: boolean }) =>
+          setOnline(e.online),
+        ),
+      )
+      .then((h) => { unlisten = () => void h.unregister(); })
+      .catch(() => {}); // desktop / plugin absent: navigator.onLine still drives it
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+      unlisten?.();
+    };
+  }, []);
+
   // Intercept the window close: honor a remembered preference, otherwise prompt.
   // The frontend is the sole owner of close handling (the Rust side no longer hides).
   // Desktop-only: Android has no window close button / system tray (OS-managed lifecycle).

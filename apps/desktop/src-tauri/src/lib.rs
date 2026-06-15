@@ -40,6 +40,14 @@ fn set_foreground(visible: bool) {
     let _ = foreground_tx().send(visible);
 }
 
+/// Network connectivity change reported by the platform (Android `ConnectivityManager`
+/// via the VPN plugin, or the webview `navigator.onLine`). While offline the supervisor
+/// parks its reconnect backoff instead of spinning failing dials (battery).
+#[tauri::command]
+fn set_online(state: State<'_, AppState>, online: bool) {
+    state.supervisor.set_online(online);
+}
+
 /// Application state managed by Tauri.
 struct AppState {
     supervisor: SupervisorHandle,
@@ -884,7 +892,8 @@ pub fn run() {
             platform,
             quit_app,
             hide_window,
-            set_foreground
+            set_foreground,
+            set_online
         ])
         .setup(|app| {
             // Build + manage state here (not before the builder) so the Tauri path API is

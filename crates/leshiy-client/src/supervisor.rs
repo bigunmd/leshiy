@@ -27,6 +27,10 @@ pub enum Input {
     TunnelDropped,
     /// A scheduled backoff timer elapsed.
     BackoffElapsed,
+    /// Network connectivity changed (`true` = online). Reported by the platform
+    /// (Android `ConnectivityManager`); lets reconnect park while offline instead
+    /// of spinning retries that can only fail (battery).
+    Connectivity(bool),
 }
 
 /// Side effects the shell must perform, in order.
@@ -63,6 +67,9 @@ pub struct Machine {
     attempt: u32,
     base: Duration,
     max: Duration,
+    /// Last-known network connectivity (default online). When false, reconnect
+    /// parks instead of dialing.
+    online: bool,
 }
 
 impl Machine {
@@ -74,6 +81,7 @@ impl Machine {
             attempt: 0,
             base,
             max,
+            online: true,
         }
     }
 
@@ -141,7 +149,28 @@ impl Machine {
             }
 
             // --- reconnecting ---
-            (Reconnecting, BackoffElapsed) => vec![Dial],
+            // While offline, a backoff timer firing must NOT dial (it can only
+            // fail and waste a wakeup). Park; a `Connectivity(true)` resumes us.
+            (Reconnecting, BackoffElapsed) => {
+                if self.online {
+                    vec![Dial]
+                } else {
+                    vec![]
+                }
+            }
+            // Connectivity returned while reconnecting → dial immediately (reset
+            // the backoff). If we were already online, a timer is pending — no-op
+            // to avoid a duplicate dial.
+            (Reconnecting, Connectivity(o)) => {
+                let was_offline = !self.online;
+                self.online = o;
+                if o && was_offline {
+                    self.attempt = 0;
+                    vec![Dial]
+                } else {
+                    vec![]
+                }
+            }
             (Reconnecting, DialSucceeded) => {
                 self.state = Connected;
                 self.attempt = 0;
@@ -173,6 +202,12 @@ impl Machine {
                 a
             }
 
+            // Connectivity in any other state just records the flag.
+            (_, Connectivity(o)) => {
+                self.online = o;
+                vec![]
+            }
+
             // --- everything else is a no-op ---
             _ => vec![],
         }
@@ -201,6 +236,43 @@ mod tests {
         assert_eq!(backoff_delay(2, base, max), Duration::from_secs(2));
         assert_eq!(backoff_delay(10, base, max), max); // capped
         assert_eq!(backoff_delay(u32::MAX, base, max), max); // no overflow
+    }
+
+    #[test]
+    fn offline_backoff_parks_then_dials_when_online_returns() {
+        let mut m = machine(true);
+        m.handle(Input::Connect);
+        m.handle(Input::DialSucceeded); // Connected
+        m.handle(Input::TunnelDropped); // Reconnecting + ScheduleBackoff
+        // Go offline: the next backoff tick must NOT dial.
+        assert_eq!(m.handle(Input::Connectivity(false)), vec![]);
+        assert_eq!(
+            m.handle(Input::BackoffElapsed),
+            vec![],
+            "must park while offline (no dial)"
+        );
+        // Connectivity returns → dial immediately.
+        assert_eq!(m.handle(Input::Connectivity(true)), vec![Dial]);
+    }
+
+    #[test]
+    fn online_backoff_dials_as_before() {
+        let mut m = machine(true);
+        m.handle(Input::Connect);
+        m.handle(Input::DialSucceeded);
+        m.handle(Input::TunnelDropped);
+        // Default online: a backoff tick dials.
+        assert_eq!(m.handle(Input::BackoffElapsed), vec![Dial]);
+    }
+
+    #[test]
+    fn redundant_online_signal_does_not_double_dial() {
+        let mut m = machine(true);
+        m.handle(Input::Connect);
+        m.handle(Input::DialSucceeded);
+        m.handle(Input::TunnelDropped); // Reconnecting, online, timer pending
+        // Already online → a Connectivity(true) must not inject a second Dial.
+        assert_eq!(m.handle(Input::Connectivity(true)), vec![]);
     }
 
     #[test]
