@@ -87,7 +87,7 @@ async fn run(suite_u16: u16) {
     // boundary — a full-size frame must still fit one app-data record (regression for the
     // chunk-size overflow fix).
     let payload = vec![7u8; 65513];
-    s.send(payload.clone()).await.unwrap();
+    s.send(payload.clone().into()).await.unwrap();
     let got = s.recv().await.unwrap();
     assert_eq!(got, payload);
     srv.await.unwrap();

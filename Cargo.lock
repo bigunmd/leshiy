@@ -1331,6 +1331,7 @@ dependencies = [
 name = "leshiy-core"
 version = "1.2.0"
 dependencies = [
+ "bytes",
  "proptest",
  "snow",
  "thiserror 2.0.18",
@@ -1389,6 +1390,7 @@ dependencies = [
  "aes-gcm",
  "async-trait",
  "base64",
+ "bytes",
  "ed25519-dalek",
  "hex",
  "hkdf",
@@ -1438,6 +1440,7 @@ name = "leshiy-tun"
 version = "1.2.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "ipstack",
  "leshiy-client",
  "net-route",

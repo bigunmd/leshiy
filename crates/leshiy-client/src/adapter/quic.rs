@@ -14,26 +14,22 @@ struct QuicProxyStream {
 
 #[async_trait]
 impl ProxyStream for QuicProxyStream {
-    async fn send(&mut self, data: Vec<u8>) -> Result<()> {
+    async fn send(&mut self, data: Bytes) -> Result<()> {
         self.send
-            .send_data(Bytes::from(data))
+            .send_data(data)
             .await
             .map_err(|_| ClientError::ConnectFailed)
     }
 
-    async fn recv(&mut self) -> Result<Vec<u8>> {
+    async fn recv(&mut self) -> Result<Bytes> {
         match self.recv.recv_data().await {
             Ok(Some(mut chunk)) => {
-                let mut out = Vec::with_capacity(chunk.remaining());
-                while chunk.has_remaining() {
-                    let c = chunk.chunk();
-                    out.extend_from_slice(c);
-                    let n = c.len();
-                    chunk.advance(n);
-                }
-                Ok(out)
+                // h3 yields a `Buf`; the common single-chunk case returns its
+                // backing `Bytes` without an extra copy.
+                let n = chunk.remaining();
+                Ok(chunk.copy_to_bytes(n))
             }
-            Ok(None) => Ok(Vec::new()), // graceful EOF
+            Ok(None) => Ok(Bytes::new()), // graceful EOF
             Err(_) => Err(ClientError::ConnectFailed),
         }
     }

@@ -1,5 +1,6 @@
 //! Plaintext frame (de)serialization. Pure, no I/O, no crypto.
 use crate::error::{Error, Result};
+use bytes::Bytes;
 
 /// Max plaintext per frame: Noise message max (65535) minus the 16-byte AEAD tag.
 pub const MAX_PLAINTEXT: usize = 65535 - 16;
@@ -29,7 +30,8 @@ pub fn base_type(ftype: u8) -> u8 {
 pub struct Frame {
     pub stream_id: u32,
     pub ftype: u8, // base type, optionally OR'd with CRITICAL_BIT
-    pub payload: Vec<u8>,
+    /// Reference-counted payload so it can be sliced/forwarded without copying.
+    pub payload: Bytes,
 }
 
 impl Frame {
@@ -47,7 +49,14 @@ impl Frame {
         out
     }
 
+    /// Decode from a borrowed slice (copies the payload). Prefer
+    /// [`decode_from_bytes`](Self::decode_from_bytes) on the hot path.
     pub fn decode(buf: &[u8]) -> Result<Frame> {
+        Self::decode_from_bytes(Bytes::copy_from_slice(buf))
+    }
+
+    /// Decode from an owned [`Bytes`]; the payload is a zero-copy slice of `buf`.
+    pub fn decode_from_bytes(buf: Bytes) -> Result<Frame> {
         if buf.len() < HEADER_LEN {
             return Err(Error::Protocol("frame shorter than header".into()));
         }
@@ -56,7 +65,7 @@ impl Frame {
         Ok(Frame {
             stream_id,
             ftype,
-            payload: buf[HEADER_LEN..].to_vec(),
+            payload: buf.slice(HEADER_LEN..),
         })
     }
 }
@@ -70,13 +79,25 @@ mod tests {
         let f = Frame {
             stream_id: 7,
             ftype: FrameType::Data as u8,
-            payload: b"hello".to_vec(),
+            payload: Bytes::from_static(b"hello"),
         };
         let bytes = f.encode();
         let got = Frame::decode(&bytes).unwrap();
         assert_eq!(got.stream_id, 7);
         assert_eq!(got.ftype, FrameType::Data as u8);
-        assert_eq!(got.payload, b"hello");
+        assert_eq!(got.payload.as_ref(), b"hello");
+    }
+
+    #[test]
+    fn decode_from_bytes_is_zero_copy_slice() {
+        let f = Frame {
+            stream_id: 7,
+            ftype: FrameType::Data as u8,
+            payload: Bytes::from_static(b"hello"),
+        };
+        let got = Frame::decode_from_bytes(Bytes::from(f.encode())).unwrap();
+        assert_eq!(got.stream_id, 7);
+        assert_eq!(got.payload.as_ref(), b"hello");
     }
 
     #[test]
@@ -105,19 +126,19 @@ mod tests {
         let f = Frame {
             stream_id: 9,
             ftype: FrameType::Datagram as u8,
-            payload: b"udp-payload".to_vec(),
+            payload: Bytes::from_static(b"udp-payload"),
         };
         let got = Frame::decode(&f.encode()).unwrap();
         assert_eq!(got.stream_id, 9);
         assert_eq!(got.ftype, FrameType::Datagram as u8);
-        assert_eq!(got.payload, b"udp-payload");
+        assert_eq!(got.payload.as_ref(), b"udp-payload");
     }
 
     use proptest::prelude::*;
     proptest! {
         #[test]
         fn prop_roundtrip(stream_id in any::<u32>(), ftype in any::<u8>(), payload in proptest::collection::vec(any::<u8>(), 0..1000)) {
-            let f = Frame { stream_id, ftype, payload: payload.clone() };
+            let f = Frame { stream_id, ftype, payload: Bytes::from(payload.clone()) };
             let got = Frame::decode(&f.encode()).unwrap();
             prop_assert_eq!(got.stream_id, stream_id);
             prop_assert_eq!(got.ftype, ftype);

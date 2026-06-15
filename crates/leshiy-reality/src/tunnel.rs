@@ -60,7 +60,9 @@ impl<R: AsyncRead + Unpin + Send> TlsFrameReader<R> {
         if inner_type != APPLICATION_DATA {
             return Err(Error::Protocol("unexpected inner content type".into()));
         }
-        Frame::decode(&pt)
+        // Zero-copy: the decrypted plaintext Vec becomes Bytes and the frame payload
+        // is a refcounted slice of it (no extra copy of the payload).
+        Frame::decode_from_bytes(bytes::Bytes::from(pt))
     }
 }
 
@@ -249,7 +251,7 @@ mod tests {
                 .write_frame(&Frame {
                     stream_id: 1,
                     ftype: FrameType::Data as u8,
-                    payload: vec![i; 10],
+                    payload: bytes::Bytes::from(vec![i; 10]),
                 })
                 .await
                 .unwrap();
@@ -278,7 +280,7 @@ mod tests {
             .write_frame(&Frame {
                 stream_id: 1,
                 ftype: FrameType::Data as u8,
-                payload: vec![0; 4],
+                payload: bytes::Bytes::from(vec![0u8; 4]),
             })
             .await;
         assert!(res.is_err(), "sequence exhaustion must error, not wrap");
@@ -308,7 +310,7 @@ mod tests {
             .write_frame(&Frame {
                 stream_id: 1,
                 ftype: FrameType::Data as u8,
-                payload: vec![5; 4],
+                payload: bytes::Bytes::from(vec![5u8; 4]),
             })
             .await
             .unwrap();

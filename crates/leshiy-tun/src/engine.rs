@@ -267,7 +267,10 @@ where
                 let n = r?;
                 if n == 0 { break; }
                 counters.add_up(n as u64);
-                stream.send(buf[..n].to_vec()).await.map_err(to_io)?;
+                stream
+                    .send(bytes::Bytes::copy_from_slice(&buf[..n]))
+                    .await
+                    .map_err(to_io)?;
             }
         }
     }
@@ -297,7 +300,10 @@ async fn pump_udp(
                 let n = r?;
                 if n == 0 { break; }
                 counters.add_up(n as u64);
-                assoc.send(buf[..n].to_vec()).await.map_err(to_io)?;
+                assoc
+                    .send(bytes::Bytes::copy_from_slice(&buf[..n]))
+                    .await
+                    .map_err(to_io)?;
             }
             _ = tokio::time::sleep(UDP_IDLE) => break,
         }
@@ -358,21 +364,21 @@ mod tests {
 
     /// Fake tunnel stream: `recv` yields `to_return` once (then EOF), `send` is discarded.
     struct FakeStream {
-        to_return: Option<Vec<u8>>,
+        to_return: Option<bytes::Bytes>,
         /// When true, `recv` never resolves — used to isolate the upload direction.
         recv_pends: bool,
     }
 
     #[async_trait]
     impl ProxyStream for FakeStream {
-        async fn send(&mut self, _data: Vec<u8>) -> ClientResult<()> {
+        async fn send(&mut self, _data: bytes::Bytes) -> ClientResult<()> {
             Ok(())
         }
-        async fn recv(&mut self) -> ClientResult<Vec<u8>> {
+        async fn recv(&mut self) -> ClientResult<bytes::Bytes> {
             if self.recv_pends {
                 std::future::pending::<()>().await;
             }
-            // Some(bytes) once, then an empty Vec which callers treat as EOF.
+            // Some(bytes) once, then an empty chunk which callers treat as EOF.
             Ok(self.to_return.take().unwrap_or_default())
         }
         async fn close(&mut self) -> ClientResult<()> {
@@ -403,7 +409,7 @@ mod tests {
         // when the fake stream returns its one chunk and then an empty (EOF) Vec.
         let (_near, far) = tokio::io::duplex(64);
         let stream = Box::new(FakeStream {
-            to_return: Some(b"world!".to_vec()), // 6 bytes tunnel→device (down)
+            to_return: Some(bytes::Bytes::from_static(b"world!")), // 6 bytes tunnel→device (down)
             recv_pends: false,
         });
         relay_tcp(far, stream, &counters).await.unwrap();

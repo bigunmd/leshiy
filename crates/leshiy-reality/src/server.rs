@@ -297,7 +297,7 @@ async fn relay_stream(
                 if b.is_empty() { break; }
                 let blen = b.len() as u64;
                 if let Some(tb) = &limits.down { tb.consume(blen).await; }  // target → client = DOWN
-                stream.send(b).await.map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
+                stream.send(b.into()).await.map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
                 acc_down += blen;
                 if acc_down >= FLUSH {
                     store.add_usage(&short_id, 0, acc_down);
@@ -352,7 +352,7 @@ async fn relay_datagram(
                 Ok(n) => {
                     if let Some(tb) = &limits.down { tb.consume(n as u64).await; }
                     stream
-                        .send(buf[..n].to_vec())
+                        .send(buf[..n].to_vec().into())
                         .await
                         .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
                     store.add_usage(&short_id, 0, n as u64);

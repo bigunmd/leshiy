@@ -185,11 +185,11 @@ mod tests {
                 .await
                 .unwrap();
             let f = sess.read_frame().await.unwrap();
-            assert_eq!(f.payload, b"hi");
+            assert_eq!(f.payload.as_ref(), b"hi");
             sess.write_frame(&Frame {
                 stream_id: f.stream_id,
                 ftype: FrameType::Data as u8,
-                payload: b"yo".to_vec(),
+                payload: bytes::Bytes::from_static(b"yo"),
             })
             .await
             .unwrap();
@@ -202,12 +202,12 @@ mod tests {
         sess.write_frame(&Frame {
             stream_id: 1,
             ftype: FrameType::Data as u8,
-            payload: b"hi".to_vec(),
+            payload: bytes::Bytes::from_static(b"hi"),
         })
         .await
         .unwrap();
         let reply = sess.read_frame().await.unwrap();
-        assert_eq!(reply.payload, b"yo");
+        assert_eq!(reply.payload.as_ref(), b"yo");
         srv.await.unwrap();
     }
 

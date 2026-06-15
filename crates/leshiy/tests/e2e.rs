@@ -89,7 +89,7 @@ async fn end_to_end_socks5_echo() {
                     b
                 } => {
                     if r.is_empty() { break; }
-                    stream.send(r).await.unwrap();
+                    stream.send(r.into()).await.unwrap();
                 }
             }
         }
@@ -121,10 +121,10 @@ async fn end_to_end_socks5_echo() {
     .unwrap();
 
     let mut s = mux.open(&echo).await.unwrap();
-    s.send(b"leshiy-roundtrip".to_vec()).await.unwrap();
+    s.send(b"leshiy-roundtrip".to_vec().into()).await.unwrap();
     let got = tokio::time::timeout(Duration::from_secs(5), s.recv())
         .await
         .expect("timed out waiting for echo")
         .expect("stream closed before echo");
-    assert_eq!(got, b"leshiy-roundtrip");
+    assert_eq!(got.as_ref(), b"leshiy-roundtrip");
 }

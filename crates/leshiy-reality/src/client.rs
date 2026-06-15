@@ -320,7 +320,7 @@ async fn pipe(cli: TcpStream, mut stream: leshiy_core::mux::Stream) -> crate::Re
             } => {
                 let b = res?;
                 if b.is_empty() { break; }
-                stream.send(b).await.map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
+                stream.send(b.into()).await.map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
             }
         }
     }
