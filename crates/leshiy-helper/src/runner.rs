@@ -23,6 +23,29 @@ const DIAL_TIMEOUT: Duration = Duration::from_secs(20);
 const STOP_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Zeroed rates — the resting value published before connecting and after disconnect.
+/// Validate a client-supplied TUN interface name before it reaches privileged
+/// command construction (H5).
+///
+/// `tun_name` flows from the unprivileged caller into root-run network tooling:
+/// on Linux it is *text-templated* into an `ip -batch` script, and on Windows
+/// into `netsh`/`route` argv. An unvalidated value (newline, leading `-`, `=`,
+/// spaces, shell/option metacharacters) can inject extra commands or options
+/// run as root. We accept only a conservative interface-name charset within the
+/// Linux IFNAMSIZ limit.
+fn validate_tun_name(name: &str) -> Result<(), HelperError> {
+    if name.is_empty() || name.len() > 15 {
+        return Err(HelperError::Engine(
+            "invalid tun name: length must be 1..=15".into(),
+        ));
+    }
+    if !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return Err(HelperError::Engine(
+            "invalid tun name: only [A-Za-z0-9_] allowed".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn zero_rates() -> Rates {
     Rates {
         up_bps: 0,
@@ -104,6 +127,9 @@ impl EngineRunner {
     /// Kept separate so `start` can uniformly reset the published state to `Disconnected` if any
     /// of these steps fails (rather than leaving the GUI wedged on "Connecting").
     async fn start_session(&self, params: &StartParams) -> Result<(), HelperError> {
+        // Validate the client-supplied interface name before it can reach any
+        // privileged command construction (H5).
+        validate_tun_name(&params.tun_name)?;
         let parsed = RealityUri::parse(&params.uri)
             .map_err(|e| HelperError::Engine(format!("bad uri: {e}")))?;
         let server_ip = tokio::net::lookup_host(&parsed.server_addr)
@@ -286,6 +312,24 @@ mod tests {
             dns: "1.1.1.1".into(),
             split_tunnel: Default::default(),
         }
+    }
+
+    #[test]
+    fn validate_tun_name_accepts_valid() {
+        assert!(validate_tun_name("leshiy0").is_ok());
+        assert!(validate_tun_name("utun5").is_ok());
+        assert!(validate_tun_name("tun_1").is_ok());
+    }
+
+    #[test]
+    fn validate_tun_name_rejects_injection_and_bad_length() {
+        assert!(validate_tun_name("").is_err());
+        assert!(validate_tun_name("waytoolonginterface").is_err()); // >15
+        assert!(validate_tun_name("leshiy0\nroute add 0.0.0.0/0").is_err()); // newline → ip -batch injection
+        assert!(validate_tun_name("-rf").is_err()); // leading dash → option injection
+        assert!(validate_tun_name("name=x").is_err()); // '=' → netsh option confusion
+        assert!(validate_tun_name("a b").is_err()); // space
+        assert!(validate_tun_name("a;b").is_err()); // metachar
     }
 
     #[tokio::test]

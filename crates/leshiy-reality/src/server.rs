@@ -106,12 +106,14 @@ fn server_hello() -> Hello {
 
 /// Handle one client connection: mirror the first record to dest, then relay (prober/garbage)
 /// or take over (authed) and tunnel the mux streams to their targets.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_connection<S>(
     mut client: S,
     cfg: Arc<ServerAuthConfig>,
     store: Arc<dyn UserStore>,
     egress: Arc<dyn Egress>,
     cert: Arc<ServerCert>,
+    replay: Arc<crate::replay::ReplayGuard>,
     now_secs: u32,
 ) -> crate::Result<()>
 where
@@ -121,13 +123,23 @@ where
     let first = read_record(&mut client).await?; // Err here = bare/garbage TCP open → drop
     let first_bytes = first.encode();
     // 2. dial dest, forward the first record
-    let mut dest = TcpStream::connect(&cfg.dest).await?;
+    let mut dest = match TcpStream::connect(&cfg.dest).await {
+        Ok(d) => d,
+        Err(_) => {
+            // H4: a dest-dial failure must NOT produce an instant zero-byte close
+            // — that is an active-probe distinguisher from a genuine TLS site.
+            // Absorb client bytes for a bounded, per-connection-jittered period so
+            // the failure resembles a stalled/overloaded server.
+            stall_then_drop(&mut client, &first_bytes).await;
+            return Ok(());
+        }
+    };
     dest.set_nodelay(true).ok();
     dest.write_all(&first_bytes).await?;
     dest.flush().await?;
     // 3. decide
-    let is_clienthello = leshiy_tls::ja::extract_client_hello_fields(&first.payload).is_ok();
-    if !is_clienthello {
+    let fields = leshiy_tls::ja::extract_client_hello_fields(&first.payload);
+    if fields.is_err() {
         // garbage that still framed as a record → just relay to dest
         let _ = tokio::io::copy_bidirectional(&mut client, &mut dest).await;
         return Ok(());
@@ -140,6 +152,18 @@ where
         ClassificationFull::Authed {
             auth_key, short_id, ..
         } => {
+            // Anti-replay: an exact replay of a previously-seen authenticated
+            // ClientHello must NOT trigger the takeover behavior (which would be
+            // a confirmation oracle for the censor). Downgrade to a genuine dest
+            // relay — byte-identical to the Unauthed path. Legitimate clients use
+            // a fresh random per connection, so they never collide.
+            if let Ok(f) = &fields
+                && let Some(key) = crate::replay::replay_key(&f.random, &f.session_id)
+                && replay.check_and_record(key, now_secs as u64)
+            {
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut dest).await;
+                return Ok(());
+            }
             // Consult the UserStore: unknown/disabled/expired/over-cap → genuine dest session
             // (anti-probe: a rejected user gets a real dest session, indistinguishable from a prober).
             let now64 = now_secs as u64;
@@ -195,6 +219,33 @@ where
     }
 }
 
+/// Absorb client bytes for a bounded, per-connection-jittered period, then drop.
+/// Used when dest is unreachable so we don't emit a tell-tale instant close (H4).
+/// The jitter is derived from the client's first record so it varies per peer
+/// without needing an RNG, and is bounded to a few seconds.
+async fn stall_then_drop<S>(client: &mut S, seed: &[u8])
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    use tokio::io::AsyncReadExt;
+    let h = seed
+        .iter()
+        .fold(0u64, |a, &b| a.wrapping_mul(31).wrapping_add(b as u64));
+    let secs = 1 + (h % 8); // 1..=8 seconds
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(secs));
+    tokio::pin!(deadline);
+    let mut buf = [0u8; 1024];
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            r = client.read(&mut buf) => match r {
+                Ok(0) | Err(_) => break, // peer gave up
+                Ok(_) => {}              // discard and keep absorbing
+            }
+        }
+    }
+}
+
 /// Open an egress connection to the stream's target and relay bytes both ways.
 /// Throttles via per-user TokenBuckets (None = unlimited, skips consume entirely).
 /// Reports usage every ~64 KB (atomic-only, ADR-0019 hot-path discipline).
@@ -212,8 +263,16 @@ async fn relay_stream(
     let mut acc_up: u64 = 0;
     let mut acc_down: u64 = 0;
     const FLUSH: u64 = 64 * 1024; // report usage every ~64 KB (ADR-0019: atomic-only)
+    // M4: re-check authorization on a timer too, so revocation / expiry / data-cap
+    // bounds a *live* session within ~1s instead of waiting for the next 64 KB flush
+    // (which a trickle of small streams may never reach).
+    let mut revoke_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    revoke_tick.tick().await; // consume the immediate first tick
     loop {
         tokio::select! {
+            _ = revoke_tick.tick() => {
+                if !store.still_allowed(&short_id, now_secs()) { break; }
+            }
             inbound = stream.recv() => match inbound {           // client → target = UP
                 Ok(b) => {
                     if let Some(tb) = &limits.up { tb.consume(b.len() as u64).await; }
@@ -271,8 +330,16 @@ async fn relay_datagram(
         .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
     const IDLE: std::time::Duration = std::time::Duration::from_secs(60);
     let mut buf = vec![0u8; 65535];
+    // M4: the UDP relay previously never re-checked authorization at all, so a
+    // revoked/expired/over-cap user kept flowing until the idle timeout. Re-check
+    // on a 1s timer.
+    let mut revoke_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    revoke_tick.tick().await; // consume the immediate first tick
     loop {
         tokio::select! {
+            _ = revoke_tick.tick() => {
+                if !store.still_allowed(&short_id, now_secs()) { break; }
+            }
             inbound = stream.recv() => match inbound {       // client → target = UP
                 Ok(b) => {
                     if let Some(tb) = &limits.up { tb.consume(b.len() as u64).await; }
@@ -313,19 +380,46 @@ pub async fn run_reality_server(
     egress: Arc<dyn Egress>,
     cert: Arc<ServerCert>,
 ) -> crate::Result<()> {
+    // One replay guard for the whole listener; TTL covers the full acceptance
+    // window (±max_time_diff each side) so a replayed authed CH is caught for as
+    // long as it would still classify as Authed.
+    let replay = Arc::new(crate::replay::ReplayGuard::new(
+        cfg.max_time_diff.saturating_mul(2),
+    ));
+    // Pre-auth admission control (H3): bound total + per-IP concurrent
+    // connections so an unauthenticated flood can neither exhaust the server
+    // nor reflect onto dest.
+    let limiter = crate::connlimit::ConnLimiter::new(MAX_TOTAL_CONNS, MAX_CONNS_PER_IP);
     loop {
-        let (sock, _) = listener.accept().await?;
+        let (sock, peer) = listener.accept().await?;
+        // Admit before doing any work (including the dial to dest). On rejection
+        // the socket is dropped immediately.
+        let Some(guard) = limiter.try_acquire(peer.ip()) else {
+            continue;
+        };
         sock.set_nodelay(true).ok();
-        let (c, st, eg, ce) = (cfg.clone(), store.clone(), egress.clone(), cert.clone());
+        let (c, st, eg, ce, rp) = (
+            cfg.clone(),
+            store.clone(),
+            egress.clone(),
+            cert.clone(),
+            replay.clone(),
+        );
         tokio::spawn(async move {
+            let _guard = guard; // released when the connection finishes
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as u32)
                 .unwrap_or(0);
-            let _ = serve_connection(sock, c, st, eg, ce, now).await;
+            let _ = serve_connection(sock, c, st, eg, ce, rp, now).await;
         });
     }
 }
+
+/// Total concurrent connections the listener will service at once (H3).
+const MAX_TOTAL_CONNS: usize = 4096;
+/// Concurrent connections allowed from a single source IP (H3).
+const MAX_CONNS_PER_IP: usize = 64;
 
 #[cfg(test)]
 mod tests {
@@ -416,6 +510,30 @@ mod tests {
                 panic!("classify_full should return Authed for crypto-valid client")
             }
         }
+    }
+
+    #[test]
+    fn replay_of_authed_clienthello_is_detected() {
+        // Mirrors serve_connection's anti-replay path: extract the CH fields,
+        // derive the replay key, and confirm the guard flags an exact replay.
+        use crate::replay::{ReplayGuard, replay_key};
+        let ch = authed_ch(
+            [0x55; 32],
+            [1, 2, 3, 4, 0, 0, 0, 0],
+            "www.example.com",
+            1000,
+        );
+        let f = leshiy_tls::ja::extract_client_hello_fields(&ch).unwrap();
+        let key = replay_key(&f.random, &f.session_id).expect("32-byte fields");
+        let guard = ReplayGuard::new(Duration::from_secs(240));
+        assert!(
+            !guard.check_and_record(key, 1000),
+            "first sight is not a replay"
+        );
+        assert!(
+            guard.check_and_record(key, 1001),
+            "identical CH within window is a replay"
+        );
     }
 
     #[test]

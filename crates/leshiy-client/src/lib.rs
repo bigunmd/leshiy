@@ -35,6 +35,7 @@ pub use stats::{ByteCounters, Rates, Throughput};
 pub use stream::{DatagramFlow, ProxyStream};
 pub use subscription::{
     SubFormat, Subscription, SubscriptionCache, SubscriptionCacheEntry, parse_subscription,
+    validate_subscription_url,
 };
 pub use supervisor::{Action, Input, Machine, State, backoff_delay};
 pub use sysproxy::{NoopProxy, SystemProxy, system_proxy};

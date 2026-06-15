@@ -1,0 +1,26 @@
+# cargo-deny configuration — supply-chain & advisory gate (L7).
+#
+# Run locally with: cargo deny check advisories bans sources
+# CI runs the same via .github/workflows/ci.yml (audit job).
+#
+# Note: `md-5` (used in leshiy-tls/src/ja.rs) is the canonical JA3 fingerprint
+# hash mandated by the JA3 spec — DPI mimicry, NOT a security/integrity use.
+
+[advisories]
+# Fail the build on any RustSec advisory affecting the dependency tree. Watch
+# the young QUIC/HTTP3 stack (quinn, h3, h3-quinn) and rusqlite in particular.
+yanked = "deny"
+ignore = []
+
+[bans]
+# Pre-1.0 crates move fast; multiple versions are common in the tree and not a
+# security issue by themselves. Wildcard version requirements are flagged.
+multiple-versions = "allow"
+wildcards = "warn"
+
+[sources]
+# All dependencies must come from crates.io — no git/unknown sources (verified:
+# the workspace has no git deps).
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

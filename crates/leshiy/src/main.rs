@@ -22,9 +22,22 @@ async fn main() -> anyhow::Result<()> {
     match cli::Cli::parse().cmd {
         cli::Cmd::Keygen => {
             use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+            use std::io::IsTerminal;
             let kp = leshiy_core::handshake::generate_keypair()?;
             println!("public:  {}", URL_SAFE_NO_PAD.encode(&kp.public));
             println!("private: {}", URL_SAFE_NO_PAD.encode(&*kp.private));
+            // M5: the private line is secret key material. Warn on stderr so that
+            // capturing it (scrollback, shell history, CI logs, a redirected file)
+            // is a conscious choice rather than a silent leak.
+            if std::io::stdout().is_terminal() {
+                eprintln!(
+                    "warning: the 'private' line is SECRET — do not share, log, screenshot, or commit it."
+                );
+            } else {
+                eprintln!(
+                    "warning: a SECRET private key was written to the redirected output — restrict it (chmod 600)."
+                );
+            }
         }
         cli::Cmd::ServerInit {
             host,

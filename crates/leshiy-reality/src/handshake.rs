@@ -137,19 +137,21 @@ const CV_CONTEXT: &[u8] = b"TLS 1.3, server CertificateVerify\x00";
 
 pub struct TlsSession {
     pub suite: CipherSuite,
-    pub client_key: Vec<u8>,
+    // AEAD traffic keys are secret and live for the whole connection — wipe on
+    // drop. The IVs are public nonces, not secret. (M1)
+    pub client_key: Zeroizing<Vec<u8>>,
     pub client_iv: [u8; 12],
-    pub server_key: Vec<u8>,
+    pub server_key: Zeroizing<Vec<u8>>,
     pub server_iv: [u8; 12],
 }
 
 pub struct ServerHandshake {
     suite: CipherSuite,
-    client_hs_key: Vec<u8>,
+    client_hs_key: Zeroizing<Vec<u8>>,
     client_hs_iv: [u8; 12],
     /// client_handshake_traffic_secret (base for client Finished)
-    client_finished_secret: Vec<u8>,
-    /// hash snapshot through server Finished (for client Finished verify)
+    client_finished_secret: Zeroizing<Vec<u8>>,
+    /// hash snapshot through server Finished (for client Finished verify) — not secret
     transcript_through_server_fin: Vec<u8>,
     session: TlsSession,
 }
@@ -269,15 +271,15 @@ pub fn server_handshake(
 
     let sh_state = ServerHandshake {
         suite,
-        client_hs_key: c_hs_key,
+        client_hs_key: Zeroizing::new(c_hs_key),
         client_hs_iv: c_hs_iv,
-        client_finished_secret: c_hs,
+        client_finished_secret: Zeroizing::new(c_hs),
         transcript_through_server_fin: th_sfin,
         session: TlsSession {
             suite,
-            client_key,
+            client_key: Zeroizing::new(client_key),
             client_iv,
-            server_key,
+            server_key: Zeroizing::new(server_key),
             server_iv,
         },
     };
@@ -464,9 +466,9 @@ pub fn client_handshake(
     Ok(ClientHandshakeOut {
         session: TlsSession {
             suite,
-            client_key,
+            client_key: Zeroizing::new(client_key),
             client_iv,
-            server_key,
+            server_key: Zeroizing::new(server_key),
             server_iv,
         },
         client_finished_record: c_fin_rec,

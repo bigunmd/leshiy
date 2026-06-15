@@ -4,7 +4,11 @@ use hkdf::Hkdf;
 use sha2::{Sha256, Sha384};
 
 /// HKDF-Extract(salt, ikm) using the suite's hash.
-pub fn hkdf_extract(suite: CipherSuite, salt: &[u8], ikm: &[u8]) -> Vec<u8> {
+///
+/// Crate-internal: callers within the key schedule always pass correctly-sized
+/// inputs. Not exposed publicly so external code cannot reach the `expect`s in
+/// [`hkdf_expand_label`] with attacker-derived lengths.
+pub(crate) fn hkdf_extract(suite: CipherSuite, salt: &[u8], ikm: &[u8]) -> Vec<u8> {
     match suite {
         CipherSuite::Aes256GcmSha384 => Hkdf::<Sha384>::extract(Some(salt), ikm).0.to_vec(),
         _ => Hkdf::<Sha256>::extract(Some(salt), ikm).0.to_vec(),
@@ -12,13 +16,27 @@ pub fn hkdf_extract(suite: CipherSuite, salt: &[u8], ikm: &[u8]) -> Vec<u8> {
 }
 
 /// HKDF-Expand-Label(secret, label, context, length) per RFC 8446 §7.1.
-pub fn hkdf_expand_label(
+///
+/// PRECONDITION: `secret` MUST be exactly the suite hash length (`from_prk`
+/// rejects a shorter PRK) and `length` MUST be ≤ `255 * hash_len` (the HKDF
+/// expand bound). Both hold for every internal key-schedule call. The function
+/// is `pub(crate)` so this precondition cannot be violated by external callers;
+/// a violation is a programming error and is debug-asserted below.
+pub(crate) fn hkdf_expand_label(
     suite: CipherSuite,
     secret: &[u8],
     label: &str,
     context: &[u8],
     length: usize,
 ) -> Vec<u8> {
+    debug_assert!(
+        secret.len() >= suite.hash_len(),
+        "hkdf_expand_label: PRK shorter than hash length"
+    );
+    debug_assert!(
+        length <= 255 * suite.hash_len(),
+        "hkdf_expand_label: output length exceeds HKDF bound"
+    );
     // HkdfLabel = u16(length) | u8(len("tls13 "+label)) | "tls13 "+label | u8(len(context)) | context
     let full_label = format!("tls13 {label}");
     let mut info = Vec::with_capacity(4 + full_label.len() + context.len());
@@ -47,7 +65,7 @@ pub fn hkdf_expand_label(
 }
 
 /// Derive-Secret(secret, label, transcript_hash) = HKDF-Expand-Label(secret, label, th, hash_len).
-pub fn derive_secret(
+pub(crate) fn derive_secret(
     suite: CipherSuite,
     secret: &[u8],
     label: &str,
