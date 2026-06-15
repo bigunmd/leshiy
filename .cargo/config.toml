@@ -1,0 +1,27 @@
+# ARMv8 hardware AES/GHASH for the REALITY data-plane AEAD (Phase 2).
+#
+# The TCP data plane uses the RustCrypto `aes-gcm`/`ghash` crates (see
+# leshiy-tls/src/tls13/suite.rs). On aarch64 these ship a constant-time SOFTWARE
+# implementation by default; the ARMv8 crypto-extension backends (AES, PMULL) are
+# opt-in at COMPILE time via these cfgs. Once enabled, the crates still do RUNTIME
+# detection (via `cpufeatures`) and fall back to software on the rare arm64 device
+# without crypto extensions — so this is safe (no SIGILL), unlike forcing
+# `-C target-feature=+aes`.
+#
+# Effect: when the masqueraded destination negotiates AES-128/256-GCM (the common
+# case — we cannot choose the suite, it's the dest's pick, and the ClientHello
+# cipher order is a fixed DPI fingerprint), encryption/decryption drops from
+# software constant-time to single-digit cycles/byte. Big CPU/battery win on phones.
+#
+# Verify on-device with the bench example:
+#   cargo run --release --example bench_aead -p leshiy-tls   (cross-built for the device)
+# Scope is target-specific, so x86 desktop/server builds are unaffected.
+
+[target.aarch64-linux-android]
+rustflags = ["--cfg", "aes_armv8", "--cfg", "polyval_armv8"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["--cfg", "aes_armv8", "--cfg", "polyval_armv8"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["--cfg", "aes_armv8", "--cfg", "polyval_armv8"]
