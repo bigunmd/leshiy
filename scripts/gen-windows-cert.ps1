@@ -13,7 +13,7 @@
   NOTE: a self-signed cert is trusted ONLY on machines where its public cert is imported
   (use -TrustLocally for this machine). Other users still see SmartScreen / "Unknown
   publisher". For public distribution use a CA-issued cert — see
-  apps/desktop/WINDOWS-SIGNING.md.
+  apps/gui/WINDOWS-SIGNING.md.
 
 .EXAMPLE
   pwsh ./scripts/gen-windows-cert.ps1 -PfxPassword 'S0me-Strong-Pass' -TrustLocally
@@ -102,9 +102,9 @@ Write-Host '  Then push a desktop-v* tag. .github/workflows/desktop-release.yml 
 Write-Host '  PFX and signs the build automatically (thumbprint is derived in CI).'
 Write-Host ''
 Write-Host 'Local signed build (cert already in your store): re-run with -WriteLocalOverlay'
-Write-Host '  (or create apps/desktop/src-tauri/tauri.windows.conf.json with:'
+Write-Host '  (or create apps/gui/src-tauri/tauri.windows.conf.json with:'
 Write-Host "     $overlayJson )"
-Write-Host '  then, from apps/desktop:  pnpm tauri build'
+Write-Host '  then, from apps/gui:  pnpm tauri build'
 Write-Host ''
 Write-Host 'SECURITY: leshiy-codesign.pfx and the .base64.txt hold the PRIVATE KEY. They are'
 Write-Host 'git-ignored; delete them once the secrets are set:'
