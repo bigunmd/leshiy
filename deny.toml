@@ -19,10 +19,6 @@ ignore = [
     # Used only on the desktop route-table path; unavoidable without dropping
     # net-route, and the advisory has no fixed version.
     "RUSTSEC-2024-0436",
-    # rustls-pemfile 2.2.0 — our direct PEM parser in leshiy/src/server.rs. The crate
-    # is now a thin wrapper around rustls-pki-types' PemObject (same code), unmaintained
-    # but not vulnerable. TODO: migrate to rustls_pki_types::pem::PemObject and drop this.
-    "RUSTSEC-2025-0134",
 ]
 
 [bans]

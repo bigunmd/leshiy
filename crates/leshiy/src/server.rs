@@ -10,6 +10,8 @@ use leshiy_reality::server::run_reality_server;
 use leshiy_reality::sqlite_store::SqliteUserStore;
 use leshiy_reality::user::{InMemoryUserStore, User, UserAdmin, UserStore};
 use rand::RngCore;
+use rustls_pki_types::pem::PemObject;
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -126,8 +128,7 @@ pub fn init(opts: InitOptions<'_>) -> Result<InitOutput> {
             if let (Some(cp), Some(kp)) = (quic_cert, quic_key) {
                 // Operator-provided cert/key: compute the fingerprint from the PEM.
                 let cert_pem = std::fs::read(cp).with_context(|| format!("read quic cert {cp}"))?;
-                let mut reader = std::io::BufReader::new(cert_pem.as_slice());
-                let der = rustls_pemfile::certs(&mut reader)
+                let der = CertificateDer::pem_slice_iter(&cert_pem)
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("no cert in {cp}"))?
                     .with_context(|| format!("parse cert {cp}"))?;
@@ -366,19 +367,15 @@ pub async fn run(config: &str) -> Result<()> {
         // Parse PEM cert chain.
         let cert_pem =
             std::fs::read(cert_path).with_context(|| format!("read quic cert {cert_path}"))?;
-        let mut cert_reader = std::io::BufReader::new(cert_pem.as_slice());
-        let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-            rustls_pemfile::certs(&mut cert_reader)
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .with_context(|| format!("parse quic cert PEM {cert_path}"))?;
+        let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .with_context(|| format!("parse quic cert PEM {cert_path}"))?;
 
-        // Parse PEM private key.
+        // Parse PEM private key (first key of any supported kind).
         let key_pem =
             std::fs::read(key_path).with_context(|| format!("read quic key {key_path}"))?;
-        let mut key_reader = std::io::BufReader::new(key_pem.as_slice());
-        let key = rustls_pemfile::private_key(&mut key_reader)
-            .with_context(|| format!("parse quic key PEM {key_path}"))?
-            .ok_or_else(|| anyhow::anyhow!("no private key found in {key_path}"))?;
+        let key = PrivateKeyDer::from_pem_slice(&key_pem)
+            .with_context(|| format!("parse quic key PEM {key_path}"))?;
 
         let domain = cfg
             .quic_domain

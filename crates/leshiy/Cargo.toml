@@ -17,7 +17,7 @@ leshiy-tun = { path = "../leshiy-tun" }
 leshiy-helper = { path = "../leshiy-helper" }
 rcgen.workspace = true
 rustls.workspace = true
-rustls-pemfile.workspace = true
+rustls-pki-types.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["full"] }
 clap.workspace = true
