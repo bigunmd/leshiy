@@ -10,11 +10,28 @@
 # Fail the build on any RustSec advisory affecting the dependency tree. Watch
 # the young QUIC/HTTP3 stack (quinn, h3, h3-quinn) and rusqlite in particular.
 yanked = "deny"
-ignore = []
+# Reviewed exceptions. These are `unmaintained` advisories (NOT vulnerabilities)
+# with no safe upgrade available; each is an explicit, auditable decision rather
+# than disabling unmaintained detection wholesale (so a future unmaintained dep
+# still trips the gate).
+ignore = [
+    # paste 1.0.15 — deep transitive: net-route -> netlink-packet-{core,route,utils}.
+    # Used only on the desktop route-table path; unavoidable without dropping
+    # net-route, and the advisory has no fixed version.
+    "RUSTSEC-2024-0436",
+    # rustls-pemfile 2.2.0 — our direct PEM parser in leshiy/src/server.rs. The crate
+    # is now a thin wrapper around rustls-pki-types' PemObject (same code), unmaintained
+    # but not vulnerable. TODO: migrate to rustls_pki_types::pem::PemObject and drop this.
+    "RUSTSEC-2025-0134",
+]
 
 [bans]
 # Pre-1.0 crates move fast; multiple versions are common in the tree and not a
-# security issue by themselves. Wildcard version requirements are flagged.
+# security issue by themselves. Wildcard version requirements are flagged (a guard
+# against accidental `foo = "*"` on an external crate). The internal workspace
+# path deps (`leshiy-* = { path = ... }`) surface as benign wildcard *warnings* —
+# they don't fail the gate, and we keep version-less path deps so internal crate
+# versions don't need lockstep bumps every release.
 multiple-versions = "allow"
 wildcards = "warn"
 
