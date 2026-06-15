@@ -157,8 +157,16 @@ fn routes_for_builder(split: &SplitPlan) -> (Vec<RouteArg>, Vec<RouteArg>) {
 async fn sample_throughput(app: tauri::AppHandle, counters: Arc<ByteCounters>) {
     let mut tput = Throughput::new();
     let mut last = std::time::Instant::now();
-    loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
+    let mut fg = crate::foreground_rx();
+    // Park (no 1 Hz wakeups) whenever the app is backgrounded — the webview reports
+    // visibility via `set_foreground`. This is the main idle-battery win on Android.
+    while leshiy_client::await_next_sample(&mut fg, Duration::from_secs(1)).await {
+        if !*fg.borrow() {
+            // Resumed-to-background race or an early foreground change: don't emit;
+            // reset the baseline so the next real sample isn't a giant delta.
+            last = std::time::Instant::now();
+            continue;
+        }
         let (up, down) = counters.totals();
         let now = std::time::Instant::now();
         let rates = tput.sample(up, down, now.duration_since(last));

@@ -42,6 +42,15 @@ export default function App() {
   useEffect(() => { void api.helperInstalled().then(setHelperInstalled).catch(() => setHelperInstalled(false)); }, []);
   useEffect(() => { void api.platform().then(setPlatform).catch(() => setPlatform("")); }, []);
 
+  // Report webview visibility to the backend so the ~1 Hz stats sampler parks when
+  // the app is backgrounded (battery, especially Android). Fires on background/foreground.
+  useEffect(() => {
+    const report = () => void api.setForeground(!document.hidden).catch(() => {});
+    report();
+    document.addEventListener("visibilitychange", report);
+    return () => document.removeEventListener("visibilitychange", report);
+  }, []);
+
   // Intercept the window close: honor a remembered preference, otherwise prompt.
   // The frontend is the sole owner of close handling (the Rust side no longer hides).
   // Desktop-only: Android has no window close button / system tray (OS-managed lifecycle).

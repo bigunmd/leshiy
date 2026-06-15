@@ -69,8 +69,10 @@ pub(crate) fn target_of(dst: SocketAddr) -> String {
     }
 }
 
-/// Idle timeout for a UDP association (no teardown signal on UDP).
-const UDP_IDLE: Duration = Duration::from_secs(60);
+/// Idle timeout for a UDP association (no teardown signal on UDP). Kept short so an
+/// idle device (e.g. after a DNS burst) lets the tunnel quiesce sooner, which matters
+/// for battery on mobile.
+const UDP_IDLE: Duration = Duration::from_secs(30);
 
 /// Above this many installed routes, warn about routing-table bloat / slow per-OS install.
 const ROUTE_WARN_THRESHOLD: usize = 5000;

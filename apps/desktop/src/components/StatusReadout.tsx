@@ -25,11 +25,25 @@ export function StatusReadout({ state, rates, mode, vpnDns, vpnMtu }: Props) {
   useEffect(() => {
     if (!live) { setLatency(null); return; }
     let active = true;
+    let id: ReturnType<typeof setInterval> | undefined;
     const poll = () =>
       api.measureLatency().then((ms) => active && setLatency(ms)).catch(() => active && setLatency(null));
-    void poll();
-    const id = setInterval(() => void poll(), 5000);
-    return () => { active = false; clearInterval(id); };
+    // Only poll while the page is visible — no wasted IPC/TCP wakeups when the app
+    // is backgrounded (battery, especially on Android).
+    const start = () => {
+      if (id !== undefined) return;
+      void poll();
+      id = setInterval(() => void poll(), 5000);
+    };
+    const stop = () => { if (id !== undefined) { clearInterval(id); id = undefined; } };
+    const onVisibility = () => (document.hidden ? stop() : start());
+    if (!document.hidden) start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      active = false;
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [live]);
 
   const speeds = (

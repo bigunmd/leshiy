@@ -27,6 +27,9 @@ export const api = {
   platform: () => invoke<string>("platform"),
   quit: () => invoke<void>("quit_app"),
   hideToTray: () => invoke<void>("hide_window"),
+  // Report webview visibility so the backend can park the ~1 Hz stats sampler
+  // when the app is backgrounded (battery). Fires on Android background/foreground.
+  setForeground: (visible: boolean) => invoke<void>("set_foreground", { visible }),
 };
 export const onState = (cb: (s: TunnelState) => void): Promise<UnlistenFn> =>
   listen<TunnelState>("tunnel:state", (e) => cb(e.payload));
