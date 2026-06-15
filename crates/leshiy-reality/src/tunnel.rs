@@ -11,6 +11,7 @@ use leshiy_tls::tls13::mlkem::MlKemDecapKey;
 use leshiy_tls::tls13::record::{open_record, seal_record};
 use leshiy_tls::tls13::suite::CipherSuite;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use zeroize::Zeroizing;
 
 const APPLICATION_DATA: u8 = 0x17;
 /// Max `frame.encode()` length that still fits one TLS record: u16 max - inner-type(1) - AEAD tag(16).
@@ -19,14 +20,14 @@ const MAX_TLS_FRAME_ENCODE: usize = 65535 - 1 - 16;
 pub struct TlsFrameReader<R> {
     pub(crate) inner: R,
     pub(crate) suite: CipherSuite,
-    pub(crate) key: Vec<u8>,
+    pub(crate) key: Zeroizing<Vec<u8>>,
     pub(crate) iv: [u8; 12],
     pub(crate) seq: u64,
 }
 pub struct TlsFrameWriter<W> {
     pub(crate) inner: W,
     pub(crate) suite: CipherSuite,
-    pub(crate) key: Vec<u8>,
+    pub(crate) key: Zeroizing<Vec<u8>>,
     pub(crate) iv: [u8; 12],
     pub(crate) seq: u64,
 }
@@ -41,7 +42,12 @@ impl<R: AsyncRead + Unpin + Send> TlsFrameReader<R> {
         let full = rec.encode();
         let (inner_type, pt) = open_record(self.suite, &self.key, &self.iv, self.seq, &full)
             .map_err(|_| Error::Protocol("tls record open".into()))?;
-        self.seq += 1;
+        // Never let the record sequence wrap: a reused (key, nonce) pair would
+        // catastrophically break AEAD. Close the connection at exhaustion. (L2)
+        self.seq = self
+            .seq
+            .checked_add(1)
+            .ok_or_else(|| Error::Protocol("tls record sequence exhausted".into()))?;
         if inner_type != APPLICATION_DATA {
             return Err(Error::Protocol("unexpected inner content type".into()));
         }
@@ -70,7 +76,11 @@ impl<W: AsyncWrite + Unpin + Send> TlsFrameWriter<W> {
             &bytes,
         )
         .map_err(|_| Error::Protocol("tls record seal".into()))?;
-        self.seq += 1;
+        // See the reader: never let the sequence wrap (nonce reuse). (L2)
+        self.seq = self
+            .seq
+            .checked_add(1)
+            .ok_or_else(|| Error::Protocol("tls record sequence exhausted".into()))?;
         self.inner.write_all(&rec).await.map_err(Error::Io)?;
         self.inner.flush().await.map_err(Error::Io)?;
         Ok(())
@@ -212,14 +222,14 @@ mod tests {
         let mut writer = TlsFrameWriter {
             inner: aw,
             suite,
-            key: s_key.clone(),
+            key: Zeroizing::new(s_key.clone()),
             iv: s_iv,
             seq: 0,
         };
         let mut reader = TlsFrameReader {
             inner: br,
             suite,
-            key: s_key.clone(),
+            key: Zeroizing::new(s_key.clone()),
             iv: s_iv,
             seq: 0,
         };
@@ -242,6 +252,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn writer_errors_on_sequence_exhaustion() {
+        // At seq == u64::MAX the next increment would wrap to 0 and reuse a
+        // nonce. The writer must error instead of wrapping. (L2)
+        let suite = CipherSuite::Aes128GcmSha256;
+        let (a, _b) = tokio::io::duplex(8192);
+        let (_ar, aw) = tokio::io::split(a);
+        let mut writer = TlsFrameWriter {
+            inner: aw,
+            suite,
+            key: Zeroizing::new(vec![1u8; 16]),
+            iv: [2u8; 12],
+            seq: u64::MAX,
+        };
+        let res = writer
+            .write_frame(&Frame {
+                stream_id: 1,
+                ftype: FrameType::Data as u8,
+                payload: vec![0; 4],
+            })
+            .await;
+        assert!(res.is_err(), "sequence exhaustion must error, not wrap");
+    }
+
+    #[tokio::test]
     async fn wrong_key_fails_to_read() {
         let suite = CipherSuite::Aes128GcmSha256;
         let (a, b) = tokio::io::duplex(8192);
@@ -250,14 +284,14 @@ mod tests {
         let mut writer = TlsFrameWriter {
             inner: aw,
             suite,
-            key: vec![1u8; 16],
+            key: Zeroizing::new(vec![1u8; 16]),
             iv: [2u8; 12],
             seq: 0,
         };
         let mut reader = TlsFrameReader {
             inner: br,
             suite,
-            key: vec![9u8; 16],
+            key: Zeroizing::new(vec![9u8; 16]),
             iv: [2u8; 12],
             seq: 0,
         };
