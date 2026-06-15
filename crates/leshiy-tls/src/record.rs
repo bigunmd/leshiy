@@ -7,8 +7,15 @@ pub const HANDSHAKE: u8 = 0x16;
 pub const ALERT: u8 = 0x15;
 pub const APPLICATION_DATA: u8 = 0x17;
 const HEADER_LEN: usize = 5;
-/// TLS record payload hard cap (RFC 8446 §5.1): 2^14 + small slack handled by caller.
+/// TLS record plaintext hard cap (RFC 8446 §5.1): 2^14.
 pub const MAX_RECORD_PAYLOAD: usize = 16384;
+/// AEAD/content-type/padding expansion allowed on the wire (RFC 8446 §5.2):
+/// a TLSCiphertext may exceed the plaintext cap by at most 256 bytes.
+const MAX_RECORD_SLACK: usize = 256;
+/// Largest on-wire record length we will accept. Anything larger is malformed —
+/// a genuine TLS peer never emits it, and accepting it both diverges from real
+/// TLS behavior (DPI distinguisher) and invites memory amplification.
+pub const MAX_RECORD_ON_WIRE: usize = MAX_RECORD_PAYLOAD + MAX_RECORD_SLACK;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
@@ -36,6 +43,12 @@ impl Record {
             });
         }
         let len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
+        if len > MAX_RECORD_ON_WIRE {
+            return Err(TlsError::Malformed {
+                what: "record",
+                detail: format!("payload {len} exceeds max {MAX_RECORD_ON_WIRE}"),
+            });
+        }
         let total = HEADER_LEN + len;
         if buf.len() < total {
             return Err(TlsError::Truncated {
@@ -63,6 +76,12 @@ pub async fn read_record<R: AsyncRead + Unpin>(r: &mut R) -> Result<Record> {
     let mut hdr = [0u8; HEADER_LEN];
     r.read_exact(&mut hdr).await?;
     let len = u16::from_be_bytes([hdr[3], hdr[4]]) as usize;
+    if len > MAX_RECORD_ON_WIRE {
+        return Err(TlsError::Malformed {
+            what: "record",
+            detail: format!("payload {len} exceeds max {MAX_RECORD_ON_WIRE}"),
+        });
+    }
     let mut payload = vec![0u8; len];
     r.read_exact(&mut payload).await?;
     Ok(Record {
@@ -94,6 +113,33 @@ mod tests {
     #[test]
     fn decode_truncated_is_err() {
         assert!(Record::decode(&[HANDSHAKE, 0x03, 0x03, 0x00]).is_err());
+    }
+
+    #[test]
+    fn decode_oversized_is_err() {
+        // A record claiming more than 2^14 + 256 payload bytes is malformed
+        // (a genuine TLS peer never emits one) — reject before allocating.
+        let len = (MAX_RECORD_PAYLOAD + 256 + 1) as u16;
+        let mut buf = vec![HANDSHAKE, 0x03, 0x03];
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend(std::iter::repeat_n(0u8, len as usize));
+        assert!(matches!(
+            Record::decode(&buf),
+            Err(TlsError::Malformed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_record_oversized_is_err() {
+        let len = (MAX_RECORD_PAYLOAD + 256 + 1) as u16;
+        let mut buf = vec![HANDSHAKE, 0x03, 0x03];
+        buf.extend_from_slice(&len.to_be_bytes());
+        // No need to provide the payload — the length is rejected first.
+        let mut cur = std::io::Cursor::new(buf);
+        assert!(matches!(
+            read_record(&mut cur).await,
+            Err(TlsError::Malformed { .. })
+        ));
     }
 
     use proptest::prelude::*;
