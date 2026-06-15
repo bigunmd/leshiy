@@ -89,7 +89,7 @@ async fn unauthed_is_relayed_to_dest() {
             sock,
             cfg2,
             store,
-            std::sync::Arc::new(DirectEgress),
+            std::sync::Arc::new(DirectEgress::allowing_private()),
             cert2,
             1000,
         )

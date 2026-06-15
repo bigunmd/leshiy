@@ -52,7 +52,14 @@ async fn authed_datagram_echo() {
             let store = Arc::new(InMemoryUserStore::from_short_ids(
                 scfg.short_ids.iter().copied(),
             ));
-            let _ = run_reality_server(sl, scfg, store, Arc::new(DirectEgress), cert).await;
+            let _ = run_reality_server(
+                sl,
+                scfg,
+                store,
+                Arc::new(DirectEgress::allowing_private()),
+                cert,
+            )
+            .await;
         });
     }
 

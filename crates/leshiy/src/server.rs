@@ -214,6 +214,7 @@ pub fn init(opts: InitOptions<'_>) -> Result<InitOutput> {
             .as_ref()
             .and_then(|q| q.cert_sha256.as_ref().map(hex::encode)),
         connector: connector.map(|s| s.to_string()),
+        allow_private_egress: false,
     };
     let uri = format_reality_uri_full(&pk, host, &sni, &short_id, quic_endpoint.as_ref());
     write_secret_file(out, &toml::to_string_pretty(&cfg)?)?;
@@ -339,7 +340,13 @@ pub async fn run(config: &str) -> Result<()> {
                 .context("connect to exit")?,
             ) as Arc<dyn Egress>
         }
-        None => Arc::new(DirectEgress),
+        None => {
+            if cfg.allow_private_egress {
+                Arc::new(DirectEgress::allowing_private())
+            } else {
+                Arc::new(DirectEgress::new())
+            }
+        }
     };
 
     // --- Optional QUIC server (shares the SAME UserStore) ---

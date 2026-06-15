@@ -45,6 +45,12 @@ pub struct RealityServerConfig {
     /// (`DirectEgress`).
     #[serde(default)]
     pub connector: Option<String>,
+    /// Allow direct egress to loopback / RFC 1918 / IPv6 unique-local targets.
+    /// Off by default: an authenticated client must not be able to reach the
+    /// exit's own host or internal LAN (SSRF). Enable only when the exit is
+    /// deliberately run to reach an internal network.
+    #[serde(default)]
+    pub allow_private_egress: bool,
 }
 
 impl RealityServerConfig {
@@ -98,6 +104,7 @@ mod tests {
             quic_domain: None,
             quic_cert_sha256: None,
             connector: None,
+            allow_private_egress: false,
         };
         let ac = c.to_auth_config().unwrap();
         assert_eq!(ac.dest, "www.microsoft.com:443");

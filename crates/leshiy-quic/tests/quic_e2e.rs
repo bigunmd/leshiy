@@ -75,8 +75,13 @@ async fn start_server(store: Arc<dyn UserStore>) -> (std::net::SocketAddr, [u8; 
         server_endpoint("127.0.0.1:0".parse().unwrap(), certs, key).expect("bind quic endpoint");
     let bound = ep.local_addr().expect("local_addr");
     tokio::spawn(async move {
-        let _ =
-            serve_quic_on_endpoint(ep, store, Masquerade::default(), Arc::new(DirectEgress)).await;
+        let _ = serve_quic_on_endpoint(
+            ep,
+            store,
+            Masquerade::default(),
+            Arc::new(DirectEgress::allowing_private()),
+        )
+        .await;
     });
     (bound, pin)
 }

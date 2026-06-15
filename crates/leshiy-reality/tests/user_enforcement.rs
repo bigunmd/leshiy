@@ -152,9 +152,14 @@ impl Harness {
             let cert = cert.clone();
             let store = store.clone();
             tokio::spawn(async move {
-                let _ =
-                    run_reality_server(sl, scfg, store, std::sync::Arc::new(DirectEgress), cert)
-                        .await;
+                let _ = run_reality_server(
+                    sl,
+                    scfg,
+                    store,
+                    std::sync::Arc::new(DirectEgress::allowing_private()),
+                    cert,
+                )
+                .await;
             })
         };
 
@@ -387,8 +392,14 @@ async fn data_cap_disconnects() {
         let cert = cert.clone();
         let store = store.clone();
         tokio::spawn(async move {
-            let _ =
-                run_reality_server(sl, scfg, store, std::sync::Arc::new(DirectEgress), cert).await;
+            let _ = run_reality_server(
+                sl,
+                scfg,
+                store,
+                std::sync::Arc::new(DirectEgress::allowing_private()),
+                cert,
+            )
+            .await;
         });
     }
 

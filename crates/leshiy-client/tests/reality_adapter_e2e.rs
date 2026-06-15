@@ -129,7 +129,14 @@ async fn reality_adapter_round_trip() {
             let store = Arc::new(InMemoryUserStore::from_short_ids(
                 scfg.short_ids.iter().copied(),
             ));
-            let _ = run_reality_server(sl, scfg, store, Arc::new(DirectEgress), cert).await;
+            let _ = run_reality_server(
+                sl,
+                scfg,
+                store,
+                Arc::new(DirectEgress::allowing_private()),
+                cert,
+            )
+            .await;
         });
     }
 
@@ -206,7 +213,14 @@ async fn start_reality_server() -> (String, String) {
             let store = Arc::new(InMemoryUserStore::from_short_ids(
                 scfg.short_ids.iter().copied(),
             ));
-            let _ = run_reality_server(sl, scfg, store, Arc::new(DirectEgress), cert).await;
+            let _ = run_reality_server(
+                sl,
+                scfg,
+                store,
+                Arc::new(DirectEgress::allowing_private()),
+                cert,
+            )
+            .await;
         });
     }
     let uri = format_reality_uri(&server_public, &saddr, "www.example.com", &short_id);

@@ -39,12 +39,42 @@ pub trait Egress: Send + Sync {
 }
 
 /// Dial the target directly (the exit / today's behavior), netguard-gated.
-pub struct DirectEgress;
+///
+/// By default loopback / private targets are refused (SSRF guard). Construct
+/// with [`DirectEgress::allowing_private`] to permit them — used by in-process
+/// tests (which dial loopback echo servers) and by operators who deliberately
+/// run an exit on an internal network.
+#[derive(Debug, Clone, Copy)]
+pub struct DirectEgress {
+    allow_private: bool,
+}
+
+impl DirectEgress {
+    /// Secure default: refuse loopback / RFC 1918 / unique-local targets.
+    pub fn new() -> Self {
+        Self {
+            allow_private: false,
+        }
+    }
+
+    /// Permit loopback / private targets (explicit opt-in).
+    pub fn allowing_private() -> Self {
+        Self {
+            allow_private: true,
+        }
+    }
+}
+
+impl Default for DirectEgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait::async_trait]
 impl Egress for DirectEgress {
     async fn open(&self, target: &str) -> Result<(Box<dyn EgressRead>, Box<dyn EgressWrite>)> {
-        let addr = crate::netguard::resolve_checked(target).await?;
+        let addr = crate::netguard::resolve_checked(target, self.allow_private).await?;
         let s = tokio::net::TcpStream::connect(addr)
             .await
             .map_err(crate::RealityError::Io)?;
@@ -54,7 +84,7 @@ impl Egress for DirectEgress {
     }
 
     async fn open_udp(&self, target: &str) -> Result<Box<dyn UdpEgress>> {
-        let addr = crate::netguard::resolve_checked(target).await?;
+        let addr = crate::netguard::resolve_checked(target, self.allow_private).await?;
         let sock = tokio::net::UdpSocket::bind(("0.0.0.0", 0))
             .await
             .map_err(crate::RealityError::Io)?;
@@ -114,7 +144,10 @@ mod tests {
             s.read_exact(&mut b).await.unwrap();
             s.write_all(&b).await.unwrap();
         });
-        let (mut er, mut ew) = DirectEgress.open(&addr.to_string()).await.unwrap();
+        let (mut er, mut ew) = DirectEgress::allowing_private()
+            .open(&addr.to_string())
+            .await
+            .unwrap();
         ew.write_all(b"hello").await.unwrap();
         let mut got = [0u8; 5];
         let mut n = 0;
@@ -126,7 +159,21 @@ mod tests {
 
     #[tokio::test]
     async fn direct_egress_blocks_metadata() {
-        assert!(DirectEgress.open("169.254.169.254:80").await.is_err()); // netguard
+        // Blocked even with the private opt-in (link-local is always forbidden).
+        assert!(
+            DirectEgress::allowing_private()
+                .open("169.254.169.254:80")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_egress_blocks_loopback_by_default() {
+        // Default (secure) policy refuses loopback — SSRF guard.
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        assert!(DirectEgress::new().open(&addr.to_string()).await.is_err());
     }
 
     #[tokio::test]
@@ -139,7 +186,10 @@ mod tests {
             let (n, from) = server.recv_from(&mut b).await.unwrap();
             server.send_to(&b[..n], from).await.unwrap(); // echo
         });
-        let mut eg = DirectEgress.open_udp(&saddr.to_string()).await.unwrap();
+        let mut eg = DirectEgress::allowing_private()
+            .open_udp(&saddr.to_string())
+            .await
+            .unwrap();
         eg.send(b"ping-udp").await.unwrap();
         let mut buf = [0u8; 64];
         let n = eg.recv(&mut buf).await.unwrap();
@@ -148,6 +198,11 @@ mod tests {
 
     #[tokio::test]
     async fn udp_egress_blocks_metadata() {
-        assert!(DirectEgress.open_udp("169.254.169.254:53").await.is_err()); // netguard
+        assert!(
+            DirectEgress::allowing_private()
+                .open_udp("169.254.169.254:53")
+                .await
+                .is_err()
+        ); // netguard: link-local always blocked
     }
 }

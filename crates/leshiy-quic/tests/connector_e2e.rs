@@ -201,7 +201,12 @@ async fn spawn_exit_b() -> (std::net::SocketAddr, [u8; 32]) {
         rate_up: None,
         rate_down: None,
     }]));
-    let b_addr = spawn_quic_node(b_certs, b_key, b_store, Arc::new(DirectEgress));
+    let b_addr = spawn_quic_node(
+        b_certs,
+        b_key,
+        b_store,
+        Arc::new(DirectEgress::allowing_private()),
+    );
     // Give B a moment to start listening before callers try to connect.
     tokio::time::sleep(Duration::from_millis(50)).await;
     (b_addr, b_pin)
@@ -586,7 +591,12 @@ async fn connector_chain_three_hops() {
     let (c_certs, c_key) = self_signed();
     let c_pin = cert_sha256(c_certs[0].as_ref());
     let c_store = single_user_store(EXIT_SID);
-    let c_addr = spawn_quic_node(c_certs, c_key, c_store, Arc::new(DirectEgress));
+    let c_addr = spawn_quic_node(
+        c_certs,
+        c_key,
+        c_store,
+        Arc::new(DirectEgress::allowing_private()),
+    );
     wait_udp(c_addr).await;
 
     // --- B: mid-hop (ConnectorEgress→C). Accepts CONNECTOR_SID=[2;8]. ---
@@ -701,7 +711,7 @@ async fn connector_reconnects_after_exit_restart() {
                 ep,
                 s,
                 Masquerade::default(),
-                Arc::new(DirectEgress),
+                Arc::new(DirectEgress::allowing_private()),
             )
             .await;
         }
@@ -740,7 +750,7 @@ async fn connector_reconnects_after_exit_restart() {
                 ep,
                 s,
                 Masquerade::default(),
-                Arc::new(DirectEgress),
+                Arc::new(DirectEgress::allowing_private()),
             )
             .await;
         }
