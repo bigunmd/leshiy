@@ -72,6 +72,21 @@ impl SubscriptionCache {
     }
 }
 
+/// Validate a subscription URL before it is fetched (M3).
+///
+/// Only `https://` is permitted. A cleartext `http://` fetch lets an on-path
+/// adversary — the exact threat this tool defends against — serve a malicious
+/// rule list and force chosen traffic out of (or into) the tunnel. The scheme
+/// check is case-insensitive and ignores surrounding whitespace.
+pub fn validate_subscription_url(url: &str) -> Result<(), &'static str> {
+    let u = url.trim();
+    if u.len() >= 8 && u[..8].eq_ignore_ascii_case("https://") && u.len() > 8 {
+        Ok(())
+    } else {
+        Err("subscription URL must use https://")
+    }
+}
+
 /// Parse fetched subscription text into a [`RuleSet`] according to `format`. The mode is
 /// irrelevant here (the subscription carries its own direction), so a placeholder is used.
 pub fn parse_subscription(format: SubFormat, text: &str) -> Result<RuleSet, SplitParseError> {
@@ -89,6 +104,18 @@ pub fn parse_subscription(format: SubFormat, text: &str) -> Result<RuleSet, Spli
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_non_https_subscription_urls() {
+        assert!(validate_subscription_url("https://example.com/list.txt").is_ok());
+        assert!(validate_subscription_url("HTTPS://EXAMPLE.com/x").is_ok());
+        assert!(validate_subscription_url("  https://example.com/x  ").is_ok());
+        assert!(validate_subscription_url("http://example.com/list.txt").is_err());
+        assert!(validate_subscription_url("ftp://example.com/x").is_err());
+        assert!(validate_subscription_url("file:///etc/passwd").is_err());
+        assert!(validate_subscription_url("https://").is_err()); // scheme only, no host
+        assert!(validate_subscription_url("example.com").is_err());
+    }
 
     #[test]
     fn parse_subscription_dispatches_by_format() {

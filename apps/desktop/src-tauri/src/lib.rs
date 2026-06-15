@@ -560,6 +560,9 @@ async fn fetch_one(
     sub: &leshiy_client::Subscription,
     prev: Option<&leshiy_client::SubscriptionCacheEntry>,
 ) -> Result<Option<leshiy_client::SubscriptionCacheEntry>, String> {
+    // M3: only fetch over HTTPS — a cleartext fetch lets an on-path adversary
+    // inject malicious split-tunnel rules.
+    leshiy_client::validate_subscription_url(&sub.url)?;
     let mut req = client.get(&sub.url);
     if let Some(p) = prev {
         if let Some(etag) = &p.etag {
