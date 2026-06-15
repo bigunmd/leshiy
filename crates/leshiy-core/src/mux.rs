@@ -7,6 +7,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, watch};
 
+/// Upper bound on concurrently-open peer-initiated streams. A peer that exceeds
+/// it is aborting the session via resource exhaustion, so we tear the session
+/// down rather than grow the stream map without bound. (L3)
+const MAX_CONCURRENT_PEER_STREAMS: usize = 1024;
+
 /// Which side of the connection owns this mux.
 /// Clients allocate odd stream ids; servers allocate even ids.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -196,7 +201,13 @@ impl Mux {
                     let bt = base_type(f.ftype);
                     if bt == FrameType::Open as u8 {
                         let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(64);
-                        r_streams.lock().unwrap().insert(f.stream_id, data_tx);
+                        {
+                            let mut map = r_streams.lock().unwrap();
+                            if map.len() >= MAX_CONCURRENT_PEER_STREAMS {
+                                break; // peer opened too many concurrent streams → abort (L3)
+                            }
+                            map.insert(f.stream_id, data_tx);
+                        }
                         // Parse the optional scheme prefix: `udp:` → datagram, `tcp:`/bare → stream.
                         let raw = String::from_utf8_lossy(&f.payload).into_owned();
                         let (kind, target) = match raw.strip_prefix("udp:") {
@@ -440,6 +451,66 @@ mod tests {
 
         // The state is latched: a freshly-cloned receiver also observes `true`.
         assert!(*mux.closed_receiver().borrow());
+    }
+
+    #[tokio::test]
+    async fn aborts_when_peer_opens_too_many_streams() {
+        use crate::frame::{Frame, FrameType};
+        use crate::transport::{FrameRead, FrameWrite};
+        use core::future::Future;
+
+        // Reader: HELLO, then an unbounded stream of OPEN frames with fresh ids
+        // (never closed), then pends forever. A correct mux must abort the
+        // session once the concurrent-stream cap is exceeded rather than grow
+        // its stream map without bound. (L3)
+        struct FloodReader {
+            next: u32,
+        }
+        impl FrameRead for FloodReader {
+            fn read_frame(&mut self) -> impl Future<Output = crate::Result<Frame>> + Send {
+                let id = self.next;
+                self.next += 1;
+                async move {
+                    if id == 0 {
+                        Ok(Frame {
+                            stream_id: 0,
+                            ftype: FrameType::Hello as u8,
+                            payload: hello().encode(),
+                        })
+                    } else if id <= (MAX_CONCURRENT_PEER_STREAMS as u32 + 1) {
+                        Ok(Frame {
+                            stream_id: id,
+                            ftype: FrameType::Open as u8,
+                            payload: b"echo:0".to_vec(),
+                        })
+                    } else {
+                        std::future::pending::<()>().await;
+                        unreachable!()
+                    }
+                }
+            }
+        }
+        struct SinkWriter;
+        impl FrameWrite for SinkWriter {
+            async fn write_frame(&mut self, _frame: &Frame) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut mux = Mux::start(FloodReader { next: 0 }, SinkWriter, hello(), Role::Server)
+            .await
+            .unwrap();
+
+        // Drain accepted streams (dropping them, so the map keeps growing) until
+        // the session is torn down.
+        let mut closed = mux.closed_receiver();
+        let drain = tokio::spawn(async move { while mux.accept().await.is_ok() {} });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), closed.wait_for(|v| *v))
+            .await
+            .expect("session must abort once the peer exceeds the stream cap")
+            .unwrap();
+        drain.abort();
     }
 
     #[tokio::test]
