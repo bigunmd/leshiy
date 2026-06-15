@@ -65,9 +65,16 @@ async fn connect_quic_from(
     q: &QuicEndpoint,
     short_id: [u8; 8],
 ) -> Result<leshiy_quic::client::QuicConn> {
+    // M2: refuse to fall back to public-CA validation — the cert pin (qcert=) is
+    // the QUIC transport's only strong server binding. Without it, surface a clear
+    // error instead of silently downgrading.
     let verification = match q.cert_sha256 {
         Some(p) => leshiy_quic::endpoint::CertVerification::Pinned(p),
-        None => leshiy_quic::endpoint::CertVerification::Roots,
+        None => {
+            return Err(anyhow!(
+                "QUIC endpoint has no qcert= pin; refusing public-CA fallback (add qcert= or use the REALITY transport)"
+            ));
+        }
     };
     let addr = tokio::net::lookup_host(&q.addr)
         .await?

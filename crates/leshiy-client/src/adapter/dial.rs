@@ -71,10 +71,16 @@ async fn dial_auto(parsed: &RealityUri) -> Result<Box<dyn Tunnel>> {
 }
 
 async fn connect_quic_from(q: &QuicEndpoint, short_id: [u8; 8]) -> Result<QuicConn> {
-    let verification = match q.cert_sha256 {
-        Some(p) => CertVerification::Pinned(p),
-        None => CertVerification::Roots,
+    // M2: never silently fall back to public-CA validation. The QUIC transport's
+    // only strong server binding is the cert pin (qcert=); without it, anyone who
+    // can present a publicly-trusted cert for the SNI could terminate the tunnel.
+    // Refuse the unpinned QUIC path so dial() falls back to the pinned REALITY
+    // transport instead of downgrading.
+    let Some(pin) = q.cert_sha256 else {
+        // No qcert= pin → skip QUIC entirely; dial() falls back to REALITY.
+        return Err(ClientError::ConnectFailed);
     };
+    let verification = CertVerification::Pinned(pin);
     let addr = tokio::net::lookup_host(&q.addr)
         .await
         .map_err(|_| ClientError::ConnectFailed)?
@@ -83,4 +89,21 @@ async fn connect_quic_from(q: &QuicEndpoint, short_id: [u8; 8]) -> Result<QuicCo
     connect_quic(addr, &q.sni, short_id, verification)
         .await
         .map_err(|_| ClientError::ConnectFailed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn quic_without_pin_is_refused() {
+        // No qcert= pin must NOT silently downgrade to public-CA validation (M2):
+        // connect_quic_from returns an error so dial() falls back to REALITY.
+        let q = QuicEndpoint {
+            addr: "127.0.0.1:1".into(),
+            sni: "example.com".into(),
+            cert_sha256: None,
+        };
+        assert!(connect_quic_from(&q, [0u8; 8]).await.is_err());
+    }
 }
