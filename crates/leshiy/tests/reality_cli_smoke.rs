@@ -123,6 +123,25 @@ async fn spawn_echo() -> String {
     addr
 }
 
+/// These e2e tests relay through a real `leshiy server` to a loopback echo/dest.
+/// Since H1, direct egress to loopback/RFC1918 is refused by default (SSRF guard),
+/// so the test server config must opt in. Appended after `server-init` writes the
+/// config and before the server is launched.
+fn append_allow_private_egress(cfg_path: &str) {
+    // server-init writes `allow_private_egress = false`; flip it to true. If the
+    // key is somehow absent, append it. Avoids a duplicate-key TOML parse error.
+    let text = std::fs::read_to_string(cfg_path).expect("read server config");
+    let patched = if text.contains("allow_private_egress") {
+        text.replace(
+            "allow_private_egress = false",
+            "allow_private_egress = true",
+        )
+    } else {
+        format!("{}\nallow_private_egress = true\n", text.trim_end())
+    };
+    std::fs::write(cfg_path, patched).expect("write patched server config");
+}
+
 /// Attempt a SOCKS5 CONNECT (domain ATYP) through `socks` to `echo`,
 /// write a fixed payload, and assert the echo comes back.
 async fn try_socks(socks: &str, echo: &str) -> Result<(), String> {
@@ -214,6 +233,7 @@ async fn reality_cli_end_to_end() {
 
     // ── 4. Spawn server subprocess (release its port immediately before) ──
     drop(server_l);
+    append_allow_private_egress(cfg_str); // H1: e2e relays to a loopback echo
     let _server = Kill(
         std::process::Command::new(bin)
             .args(["server", "--config", cfg_str])
@@ -331,6 +351,7 @@ async fn reality_cli_user_add_then_tunnel() {
 
     // ── 4. Spawn the server ───────────────────────────────────────────────
     drop(server_l);
+    append_allow_private_egress(cfg_str); // H1: e2e relays to a loopback echo
     let _server = Kill(
         std::process::Command::new(bin)
             .args(["server", "--config", cfg_str])
@@ -483,6 +504,7 @@ async fn reality_cli_user_survives_restart() {
     drop(server_l);
     let server_addr = format!("127.0.0.1:{server_port}");
     {
+        append_allow_private_egress(cfg_str); // H1: e2e relays to a loopback echo
         let mut server1 = Kill(
             std::process::Command::new(bin)
                 .args(["server", "--config", cfg_str])
@@ -558,6 +580,7 @@ async fn reality_cli_user_survives_restart() {
     // ── 5. Second server run (same config + same DB) ──────────────────────
     // 200 ms lets the OS release the listen port after server1 exits; the startup
     // retry loop below absorbs any residual delay on slow CI.
+    append_allow_private_egress(cfg_str); // H1: e2e relays to a loopback echo
     let _server2 = Kill(
         std::process::Command::new(bin)
             .args(["server", "--config", cfg_str])
@@ -691,6 +714,7 @@ async fn reality_cli_quic_end_to_end() {
 
     // ── 4. Spawn server (REALITY + QUIC) ──────────────────────────────────
     drop(server_l);
+    append_allow_private_egress(cfg_str); // H1: e2e relays to a loopback echo
     let _server = Kill(
         std::process::Command::new(bin)
             .args(["server", "--config", cfg_str])
@@ -819,6 +843,7 @@ async fn reality_cli_auto_uses_quic() {
 
     // ── 4. Spawn server (REALITY + QUIC) ──────────────────────────────────
     drop(server_l);
+    append_allow_private_egress(cfg_str); // H1: e2e relays to a loopback echo
     let _server = Kill(
         std::process::Command::new(bin)
             .args(["server", "--config", cfg_str])
@@ -944,6 +969,7 @@ async fn reality_cli_auto_falls_back() {
 
     // ── 4. Spawn REALITY-only server ──────────────────────────────────────
     drop(server_l);
+    append_allow_private_egress(cfg_str); // H1: e2e relays to a loopback echo
     let _server = Kill(
         std::process::Command::new(bin)
             .args(["server", "--config", cfg_str])
@@ -1170,6 +1196,7 @@ async fn connector_cli_end_to_end() {
 
     // ── 3b. Start Exit server ─────────────────────────────────────────────
     drop(exit_tcp_l);
+    append_allow_private_egress(exit_cfg_str); // H1: e2e relays to a loopback echo
     let _exit_server = Kill(
         std::process::Command::new(bin)
             .args(["server", "--config", exit_cfg_str])
@@ -1234,6 +1261,7 @@ async fn connector_cli_end_to_end() {
 
     // ── 5. Start Entry server (eagerly connects to Exit via ConnectorEgress) ─
     drop(entry_tcp_l);
+    append_allow_private_egress(entry_cfg_str); // H1: e2e relays to a loopback echo
     let _entry_server = Kill(
         std::process::Command::new(bin)
             .args(["server", "--config", entry_cfg_str])
@@ -1347,6 +1375,7 @@ async fn reality_cli_user_add_qr_flag() {
 
     // ── 4. Spawn the server ───────────────────────────────────────────────
     drop(server_l);
+    append_allow_private_egress(cfg_str); // H1: e2e relays to a loopback echo
     let _server = Kill(
         std::process::Command::new(bin)
             .args(["server", "--config", cfg_str])
