@@ -220,12 +220,16 @@ async fn prober_gets_real_dest() {
         let store = std::sync::Arc::new(InMemoryUserStore::from_short_ids(
             scfg.short_ids.iter().copied(),
         ));
+        let replay = std::sync::Arc::new(leshiy_reality::replay::ReplayGuard::new(
+            std::time::Duration::from_secs(240),
+        ));
         let _ = leshiy_reality::server::serve_connection(
             s,
             scfg,
             store,
             std::sync::Arc::new(DirectEgress::allowing_private()),
             cert,
+            replay,
             now,
         )
         .await;
@@ -282,12 +286,16 @@ async fn garbage_is_relayed_to_dest() {
         let store = std::sync::Arc::new(InMemoryUserStore::from_short_ids(
             scfg.short_ids.iter().copied(),
         ));
+        let replay = std::sync::Arc::new(leshiy_reality::replay::ReplayGuard::new(
+            std::time::Duration::from_secs(240),
+        ));
         let _ = leshiy_reality::server::serve_connection(
             s,
             scfg,
             store,
             std::sync::Arc::new(DirectEgress::allowing_private()),
             cert,
+            replay,
             now,
         )
         .await;

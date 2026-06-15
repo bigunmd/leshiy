@@ -85,12 +85,16 @@ async fn unauthed_is_relayed_to_dest() {
         let store = std::sync::Arc::new(InMemoryUserStore::from_short_ids(
             cfg2.short_ids.iter().copied(),
         ));
+        let replay = std::sync::Arc::new(leshiy_reality::replay::ReplayGuard::new(
+            std::time::Duration::from_secs(240),
+        ));
         let _ = serve_connection(
             sock,
             cfg2,
             store,
             std::sync::Arc::new(DirectEgress::allowing_private()),
             cert2,
+            replay,
             1000,
         )
         .await;

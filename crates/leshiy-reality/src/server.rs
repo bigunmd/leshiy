@@ -106,12 +106,14 @@ fn server_hello() -> Hello {
 
 /// Handle one client connection: mirror the first record to dest, then relay (prober/garbage)
 /// or take over (authed) and tunnel the mux streams to their targets.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_connection<S>(
     mut client: S,
     cfg: Arc<ServerAuthConfig>,
     store: Arc<dyn UserStore>,
     egress: Arc<dyn Egress>,
     cert: Arc<ServerCert>,
+    replay: Arc<crate::replay::ReplayGuard>,
     now_secs: u32,
 ) -> crate::Result<()>
 where
@@ -126,8 +128,8 @@ where
     dest.write_all(&first_bytes).await?;
     dest.flush().await?;
     // 3. decide
-    let is_clienthello = leshiy_tls::ja::extract_client_hello_fields(&first.payload).is_ok();
-    if !is_clienthello {
+    let fields = leshiy_tls::ja::extract_client_hello_fields(&first.payload);
+    if fields.is_err() {
         // garbage that still framed as a record → just relay to dest
         let _ = tokio::io::copy_bidirectional(&mut client, &mut dest).await;
         return Ok(());
@@ -140,6 +142,18 @@ where
         ClassificationFull::Authed {
             auth_key, short_id, ..
         } => {
+            // Anti-replay: an exact replay of a previously-seen authenticated
+            // ClientHello must NOT trigger the takeover behavior (which would be
+            // a confirmation oracle for the censor). Downgrade to a genuine dest
+            // relay — byte-identical to the Unauthed path. Legitimate clients use
+            // a fresh random per connection, so they never collide.
+            if let Ok(f) = &fields
+                && let Some(key) = crate::replay::replay_key(&f.random, &f.session_id)
+                && replay.check_and_record(key, now_secs as u64)
+            {
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut dest).await;
+                return Ok(());
+            }
             // Consult the UserStore: unknown/disabled/expired/over-cap → genuine dest session
             // (anti-probe: a rejected user gets a real dest session, indistinguishable from a prober).
             let now64 = now_secs as u64;
@@ -313,16 +327,28 @@ pub async fn run_reality_server(
     egress: Arc<dyn Egress>,
     cert: Arc<ServerCert>,
 ) -> crate::Result<()> {
+    // One replay guard for the whole listener; TTL covers the full acceptance
+    // window (±max_time_diff each side) so a replayed authed CH is caught for as
+    // long as it would still classify as Authed.
+    let replay = Arc::new(crate::replay::ReplayGuard::new(
+        cfg.max_time_diff.saturating_mul(2),
+    ));
     loop {
         let (sock, _) = listener.accept().await?;
         sock.set_nodelay(true).ok();
-        let (c, st, eg, ce) = (cfg.clone(), store.clone(), egress.clone(), cert.clone());
+        let (c, st, eg, ce, rp) = (
+            cfg.clone(),
+            store.clone(),
+            egress.clone(),
+            cert.clone(),
+            replay.clone(),
+        );
         tokio::spawn(async move {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as u32)
                 .unwrap_or(0);
-            let _ = serve_connection(sock, c, st, eg, ce, now).await;
+            let _ = serve_connection(sock, c, st, eg, ce, rp, now).await;
         });
     }
 }
@@ -416,6 +442,30 @@ mod tests {
                 panic!("classify_full should return Authed for crypto-valid client")
             }
         }
+    }
+
+    #[test]
+    fn replay_of_authed_clienthello_is_detected() {
+        // Mirrors serve_connection's anti-replay path: extract the CH fields,
+        // derive the replay key, and confirm the guard flags an exact replay.
+        use crate::replay::{ReplayGuard, replay_key};
+        let ch = authed_ch(
+            [0x55; 32],
+            [1, 2, 3, 4, 0, 0, 0, 0],
+            "www.example.com",
+            1000,
+        );
+        let f = leshiy_tls::ja::extract_client_hello_fields(&ch).unwrap();
+        let key = replay_key(&f.random, &f.session_id).expect("32-byte fields");
+        let guard = ReplayGuard::new(Duration::from_secs(240));
+        assert!(
+            !guard.check_and_record(key, 1000),
+            "first sight is not a replay"
+        );
+        assert!(
+            guard.check_and_record(key, 1001),
+            "identical CH within window is a replay"
+        );
     }
 
     #[test]

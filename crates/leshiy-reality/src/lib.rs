@@ -12,6 +12,7 @@ pub mod error;
 pub mod handshake;
 pub mod netguard;
 pub mod ratelimit;
+pub mod replay;
 pub mod server;
 pub mod sqlite_store;
 pub mod tunnel;
