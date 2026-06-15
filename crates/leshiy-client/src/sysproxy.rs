@@ -77,15 +77,33 @@ pub(crate) fn linux_set_invocations(host: &str, port: u16) -> Vec<Vec<String>> {
     ]
 }
 
-/// Linux GNOME `gsettings` invocation to disable the proxy.
+/// Linux GNOME `gsettings` invocations to disable the proxy.
+///
+/// L6: in addition to switching the mode off, reset the stale `socks.host`/`port`
+/// so no leftover manual-proxy values remain that could send traffic to a dead
+/// local port if the mode were ever flipped back to manual.
 #[cfg(any(target_os = "linux", test))]
 pub(crate) fn linux_clear_invocations() -> Vec<Vec<String>> {
-    vec![vec![
-        "set".to_string(),
-        "org.gnome.system.proxy".to_string(),
-        "mode".to_string(),
-        "none".to_string(),
-    ]]
+    vec![
+        vec![
+            "set".to_string(),
+            "org.gnome.system.proxy".to_string(),
+            "mode".to_string(),
+            "none".to_string(),
+        ],
+        vec![
+            "set".to_string(),
+            "org.gnome.system.proxy.socks".to_string(),
+            "host".to_string(),
+            "".to_string(),
+        ],
+        vec![
+            "set".to_string(),
+            "org.gnome.system.proxy.socks".to_string(),
+            "port".to_string(),
+            "0".to_string(),
+        ],
+    ]
 }
 
 /// Windows WinINET `ProxyServer` value pointing traffic at a local SOCKS proxy.
@@ -149,8 +167,14 @@ pub struct MacosProxy;
 impl SystemProxy for MacosProxy {
     fn set(&self, socks: SocketAddr) -> Result<()> {
         let host = socks.ip().to_string();
+        // L6: make `set` transactional — if any service fails to configure, roll
+        // back the ones already set so we don't leave a half-configured proxy that
+        // sends some apps' traffic to a (possibly dead) port.
         for svc in macos_services()? {
-            run_networksetup(macos_set_args(&svc, &host, socks.port()))?;
+            if let Err(e) = run_networksetup(macos_set_args(&svc, &host, socks.port())) {
+                let _ = self.clear();
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -297,6 +321,15 @@ mod tests {
         let clear = linux_clear_invocations();
         let cv: Vec<&str> = clear[0].iter().map(|s| s.as_str()).collect();
         assert_eq!(cv, ["set", "org.gnome.system.proxy", "mode", "none"]);
+        // L6: clear must also reset the stale socks host/port, not just the mode.
+        assert!(clear.iter().any(|c| {
+            let v: Vec<&str> = c.iter().map(|s| s.as_str()).collect();
+            v == ["set", "org.gnome.system.proxy.socks", "host", ""]
+        }));
+        assert!(clear.iter().any(|c| {
+            let v: Vec<&str> = c.iter().map(|s| s.as_str()).collect();
+            v == ["set", "org.gnome.system.proxy.socks", "port", "0"]
+        }));
     }
 
     #[test]

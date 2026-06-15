@@ -216,7 +216,13 @@ async fn connect(state: State<'_, AppState>) -> Result<(), String> {
             mobile::connect(state.inner(), uri, settings).await?;
         }
     } else {
-        // Proxy mode: unchanged from today (no system proxy on Android, so effectively a no-op).
+        // Proxy mode (no system proxy on Android, so effectively a no-op there).
+        // L5: drop a marker so a crash that leaves the OS proxy set can be
+        // self-healed on next launch. Removed again on clean disconnect.
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        {
+            let _ = std::fs::write(state.settings_path.with_file_name(".proxy-active"), b"");
+        }
         state.supervisor.connect(uri);
     }
     Ok(())
@@ -257,6 +263,11 @@ async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
         }
     } else {
         state.supervisor.disconnect();
+        // L5: clean disconnect — remove the proxy-active marker.
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        {
+            let _ = std::fs::remove_file(state.settings_path.with_file_name(".proxy-active"));
+        }
     }
     Ok(())
 }
@@ -740,6 +751,20 @@ fn build_app_state(cfg_dir: PathBuf) -> AppState {
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
+
+    // L5: self-heal a stale OS proxy left set by a previously crashed session.
+    // The marker is written on proxy-mode connect and removed on clean disconnect;
+    // if it survives to startup, the app didn't exit cleanly — clear the proxy so
+    // it doesn't point at a now-dead local SOCKS port. In-session fail-closed
+    // (kill switch) behavior is unchanged.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    {
+        let marker = cfg_dir.join(".proxy-active");
+        if marker.exists() {
+            let _ = system_proxy().clear();
+            let _ = std::fs::remove_file(&marker);
+        }
+    }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
