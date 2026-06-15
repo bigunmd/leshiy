@@ -766,7 +766,14 @@ fn build_app_state(cfg_dir: PathBuf) -> AppState {
         }
     }
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    // Phase 1b: on Android the supervisor is bursty and I/O-bound; one worker
+    // thread avoids the per-core idle wakeups that cost battery. Desktop keeps the
+    // default multi-threaded runtime. (current_thread is unsuitable — it only
+    // drives tasks during block_on, but the supervisor is spawn-and-forget.)
+    let mut rt_builder = tokio::runtime::Builder::new_multi_thread();
+    #[cfg(target_os = "android")]
+    rt_builder.worker_threads(1);
+    let runtime = rt_builder
         .enable_all()
         .build()
         .expect("failed to build tokio runtime");

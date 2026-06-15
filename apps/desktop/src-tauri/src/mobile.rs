@@ -32,7 +32,13 @@ static ENGINE_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 fn engine_runtime() -> &'static tokio::runtime::Runtime {
     ENGINE_RT.get_or_init(|| {
+        // Phase 1b: cap the engine runtime to a single worker thread on the phone.
+        // The data plane is I/O-bound and bursty, not CPU-parallel, so the default
+        // (one worker per core) only adds idle wakeups and context switches that
+        // cost battery. `worker_threads(1)` keeps the spawn-and-forget model (a
+        // current_thread runtime would only drive tasks during block_on).
         tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
             .enable_all()
             .build()
             .expect("failed to build the engine runtime")
