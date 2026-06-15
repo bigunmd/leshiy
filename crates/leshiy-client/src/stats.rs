@@ -5,6 +5,31 @@
 //! deterministic, so they unit-test cleanly.
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use tokio::sync::watch;
+
+/// Wait for the next throughput-sampling instant, **parking** (no periodic wakeups)
+/// while the app is backgrounded — the key battery optimization for the ~1 Hz stats
+/// sampler on Android. `fg` carries the foreground state (`true` = visible).
+///
+/// - While backgrounded, this awaits a foreground change instead of ticking, so the
+///   CPU is not woken once per second when nobody is watching the stats.
+/// - While foregrounded, it returns after `period` (or early if the app goes
+///   background, so the caller re-evaluates and parks promptly).
+///
+/// Returns `false` if the foreground sender was dropped (sampler should stop).
+pub async fn await_next_sample(fg: &mut watch::Receiver<bool>, period: Duration) -> bool {
+    // Park while backgrounded — no wakeups until foreground returns.
+    while !*fg.borrow_and_update() {
+        if fg.changed().await.is_err() {
+            return false;
+        }
+    }
+    // Foregrounded: tick after `period`, or wake early on a foreground change.
+    tokio::select! {
+        _ = tokio::time::sleep(period) => true,
+        r = fg.changed() => r.is_ok(),
+    }
+}
 
 /// Cumulative byte counters for one tunnel session.
 #[derive(Debug, Default)]
@@ -108,6 +133,36 @@ mod tests {
         let r = t.sample(50, 50, Duration::from_secs(1));
         assert_eq!(r.up_bps, 0);
         assert_eq!(r.down_bps, 0);
+    }
+
+    #[tokio::test]
+    async fn sampler_ticks_when_foreground() {
+        let (_tx, mut rx) = watch::channel(true);
+        assert!(await_next_sample(&mut rx, Duration::from_millis(10)).await);
+    }
+
+    #[tokio::test]
+    async fn sampler_parks_when_background_then_resumes() {
+        let (tx, mut rx) = watch::channel(false); // start backgrounded
+        // Parked: must NOT tick even though the period is tiny — it awaits a change.
+        let parked = tokio::time::timeout(
+            Duration::from_millis(200),
+            await_next_sample(&mut rx, Duration::from_millis(10)),
+        )
+        .await;
+        assert!(parked.is_err(), "must park (no tick) while backgrounded");
+
+        // Foreground again → the next call ticks.
+        tx.send(true).unwrap();
+        assert!(await_next_sample(&mut rx, Duration::from_millis(10)).await);
+    }
+
+    #[tokio::test]
+    async fn sampler_stops_when_sender_dropped_while_parked() {
+        let (tx, mut rx) = watch::channel(false);
+        drop(tx);
+        // Sender gone while backgrounded → stop sampling.
+        assert!(!await_next_sample(&mut rx, Duration::from_millis(10)).await);
     }
 
     #[test]

@@ -2,6 +2,8 @@ package app.leshiy.desktop
 
 import android.app.Activity
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.VpnService
 import androidx.activity.result.ActivityResult
 import androidx.core.content.ContextCompat
@@ -39,6 +41,41 @@ class EstablishArgs {
  */
 @TauriPlugin
 class VpnPlugin(private val activity: Activity) : Plugin(activity) {
+
+    private var connectivityManager: ConnectivityManager? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    /**
+     * Register a ConnectivityManager callback so the app learns about network
+     * online/offline transitions authoritatively (more reliable than the webview's
+     * `navigator.onLine`). Each change is forwarded to JS via the `connectivity`
+     * event; the frontend calls the `set_online` command so the supervisor parks
+     * its reconnect backoff while offline instead of spinning failing dials (battery).
+     */
+    override fun load(webView: android.webkit.WebView) {
+        super.load(webView)
+        val cm = activity.getSystemService(android.content.Context.CONNECTIVITY_SERVICE)
+            as? ConnectivityManager ?: return
+        connectivityManager = cm
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = emitConnectivity(true)
+            override fun onLost(network: Network) = emitConnectivity(false)
+            override fun onUnavailable() = emitConnectivity(false)
+        }
+        networkCallback = cb
+        try {
+            cm.registerDefaultNetworkCallback(cb)
+        } catch (_: Exception) {
+            // Best-effort: if registration fails, the webview navigator.onLine path
+            // still drives connectivity.
+        }
+    }
+
+    private fun emitConnectivity(online: Boolean) {
+        val o = JSObject()
+        o.put("online", online)
+        trigger("connectivity", o)
+    }
 
     /** Ask for VPN consent. Resolves `{ granted: Boolean }`. */
     @Command

@@ -18,6 +18,36 @@ use tauri::{Emitter, Manager, State};
 #[cfg(target_os = "android")]
 mod mobile;
 
+/// Foreground/visibility state for battery management. The webview reports it via the
+/// `set_foreground` command (Page Visibility API; fires when the Android app is
+/// backgrounded), and the ~1 Hz stats sampler parks on it instead of waking every
+/// second while nobody is watching. Defaults to `true` (visible).
+static FOREGROUND: OnceLock<tokio::sync::watch::Sender<bool>> = OnceLock::new();
+
+fn foreground_tx() -> &'static tokio::sync::watch::Sender<bool> {
+    FOREGROUND.get_or_init(|| tokio::sync::watch::channel(true).0)
+}
+
+/// A receiver the stats sampler parks on (see [`leshiy_client::await_next_sample`]).
+#[cfg(target_os = "android")]
+pub(crate) fn foreground_rx() -> tokio::sync::watch::Receiver<bool> {
+    foreground_tx().subscribe()
+}
+
+/// Webview-reported visibility. `visible = false` parks the stats sampler.
+#[tauri::command]
+fn set_foreground(visible: bool) {
+    let _ = foreground_tx().send(visible);
+}
+
+/// Network connectivity change reported by the platform (Android `ConnectivityManager`
+/// via the VPN plugin, or the webview `navigator.onLine`). While offline the supervisor
+/// parks its reconnect backoff instead of spinning failing dials (battery).
+#[tauri::command]
+fn set_online(state: State<'_, AppState>, online: bool) {
+    state.supervisor.set_online(online);
+}
+
 /// Application state managed by Tauri.
 struct AppState {
     supervisor: SupervisorHandle,
@@ -766,7 +796,14 @@ fn build_app_state(cfg_dir: PathBuf) -> AppState {
         }
     }
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    // Phase 1b: on Android the supervisor is bursty and I/O-bound; one worker
+    // thread avoids the per-core idle wakeups that cost battery. Desktop keeps the
+    // default multi-threaded runtime. (current_thread is unsuitable — it only
+    // drives tasks during block_on, but the supervisor is spawn-and-forget.)
+    let mut rt_builder = tokio::runtime::Builder::new_multi_thread();
+    #[cfg(target_os = "android")]
+    rt_builder.worker_threads(1);
+    let runtime = rt_builder
         .enable_all()
         .build()
         .expect("failed to build tokio runtime");
@@ -854,7 +891,9 @@ pub fn run() {
             remove_helper,
             platform,
             quit_app,
-            hide_window
+            hide_window,
+            set_foreground,
+            set_online
         ])
         .setup(|app| {
             // Build + manage state here (not before the builder) so the Tauri path API is

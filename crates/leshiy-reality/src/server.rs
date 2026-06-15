@@ -266,7 +266,7 @@ async fn relay_stream(
     // M4: re-check authorization on a timer too, so revocation / expiry / data-cap
     // bounds a *live* session within ~1s instead of waiting for the next 64 KB flush
     // (which a trickle of small streams may never reach).
-    let mut revoke_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut revoke_tick = tokio::time::interval(std::time::Duration::from_secs(2));
     revoke_tick.tick().await; // consume the immediate first tick
     loop {
         tokio::select! {
@@ -297,7 +297,7 @@ async fn relay_stream(
                 if b.is_empty() { break; }
                 let blen = b.len() as u64;
                 if let Some(tb) = &limits.down { tb.consume(blen).await; }  // target → client = DOWN
-                stream.send(b).await.map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
+                stream.send(b.into()).await.map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
                 acc_down += blen;
                 if acc_down >= FLUSH {
                     store.add_usage(&short_id, 0, acc_down);
@@ -333,7 +333,7 @@ async fn relay_datagram(
     // M4: the UDP relay previously never re-checked authorization at all, so a
     // revoked/expired/over-cap user kept flowing until the idle timeout. Re-check
     // on a 1s timer.
-    let mut revoke_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut revoke_tick = tokio::time::interval(std::time::Duration::from_secs(2));
     revoke_tick.tick().await; // consume the immediate first tick
     loop {
         tokio::select! {
@@ -352,7 +352,7 @@ async fn relay_datagram(
                 Ok(n) => {
                     if let Some(tb) = &limits.down { tb.consume(n as u64).await; }
                     stream
-                        .send(buf[..n].to_vec())
+                        .send(buf[..n].to_vec().into())
                         .await
                         .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
                     store.add_usage(&short_id, 0, n as u64);

@@ -8,7 +8,7 @@ use leshiy_core::transport::{FrameRead, FrameWrite};
 use leshiy_core::{Error, Result};
 use leshiy_tls::record::read_record;
 use leshiy_tls::tls13::mlkem::MlKemDecapKey;
-use leshiy_tls::tls13::record::{open_record, seal_record};
+use leshiy_tls::tls13::record::{open_record_parts, seal_record};
 use leshiy_tls::tls13::suite::CipherSuite;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use zeroize::Zeroizing;
@@ -38,10 +38,19 @@ impl<R: AsyncRead + Unpin + Send> TlsFrameReader<R> {
         let rec = read_record(&mut self.inner)
             .await
             .map_err(|_| Error::Closed)?;
-        // reconstruct the full record bytes for open_record (it expects header+body)
-        let full = rec.encode();
-        let (inner_type, pt) = open_record(self.suite, &self.key, &self.iv, self.seq, &full)
-            .map_err(|_| Error::Protocol("tls record open".into()))?;
+        // Reconstruct the 5-byte header (AAD) from the parsed parts and decrypt the
+        // body in place — avoids re-encoding the whole record just to open it.
+        let len = rec.payload.len() as u16;
+        let header = [rec.content_type, 0x03, 0x03, (len >> 8) as u8, len as u8];
+        let (inner_type, pt) = open_record_parts(
+            self.suite,
+            &self.key,
+            &self.iv,
+            self.seq,
+            &header,
+            &rec.payload,
+        )
+        .map_err(|_| Error::Protocol("tls record open".into()))?;
         // Never let the record sequence wrap: a reused (key, nonce) pair would
         // catastrophically break AEAD. Close the connection at exhaustion. (L2)
         self.seq = self
@@ -51,7 +60,9 @@ impl<R: AsyncRead + Unpin + Send> TlsFrameReader<R> {
         if inner_type != APPLICATION_DATA {
             return Err(Error::Protocol("unexpected inner content type".into()));
         }
-        Frame::decode(&pt)
+        // Zero-copy: the decrypted plaintext Vec becomes Bytes and the frame payload
+        // is a refcounted slice of it (no extra copy of the payload).
+        Frame::decode_from_bytes(bytes::Bytes::from(pt))
     }
 }
 
@@ -240,7 +251,7 @@ mod tests {
                 .write_frame(&Frame {
                     stream_id: 1,
                     ftype: FrameType::Data as u8,
-                    payload: vec![i; 10],
+                    payload: bytes::Bytes::from(vec![i; 10]),
                 })
                 .await
                 .unwrap();
@@ -269,7 +280,7 @@ mod tests {
             .write_frame(&Frame {
                 stream_id: 1,
                 ftype: FrameType::Data as u8,
-                payload: vec![0; 4],
+                payload: bytes::Bytes::from(vec![0u8; 4]),
             })
             .await;
         assert!(res.is_err(), "sequence exhaustion must error, not wrap");
@@ -299,7 +310,7 @@ mod tests {
             .write_frame(&Frame {
                 stream_id: 1,
                 ftype: FrameType::Data as u8,
-                payload: vec![5; 4],
+                payload: bytes::Bytes::from(vec![5u8; 4]),
             })
             .await
             .unwrap();

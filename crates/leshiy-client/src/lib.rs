@@ -31,7 +31,7 @@ pub use pump::pump;
 pub use runtime::{SupervisorConfig, SupervisorHandle, spawn_supervisor};
 pub use settings::{CloseBehavior, Mode, PerAppMode, PerAppRules, Settings, TransportPref};
 pub use split_tunnel::{RuleSet, SplitCidr, SplitMode, SplitParseError, SplitPlan, SplitTunnel};
-pub use stats::{ByteCounters, Rates, Throughput};
+pub use stats::{ByteCounters, Rates, Throughput, await_next_sample};
 pub use stream::{DatagramFlow, ProxyStream};
 pub use subscription::{
     SubFormat, Subscription, SubscriptionCache, SubscriptionCacheEntry, parse_subscription,

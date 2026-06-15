@@ -3,6 +3,7 @@ use crate::error::{Error, Result};
 use crate::frame::{Frame, FrameType, MAX_PLAINTEXT, base_type, is_critical};
 use crate::transport::{FrameRead, FrameWrite};
 use crate::version::{Hello, Negotiated, negotiate};
+use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, watch};
@@ -31,7 +32,7 @@ pub enum StreamKind {
 /// Internal commands sent from Stream/Mux to the writer task.
 enum Command {
     /// Register a new outgoing stream and send an OPEN frame.
-    Open(u32, String, mpsc::Sender<Vec<u8>>),
+    Open(u32, String, mpsc::Sender<Bytes>),
     /// Write an arbitrary frame (DATA, CLOSE, …).
     Write(Frame),
 }
@@ -44,7 +45,7 @@ pub struct Stream {
     pub kind: StreamKind,
     id: u32,
     tx: mpsc::Sender<Command>,
-    rx: mpsc::Receiver<Vec<u8>>,
+    rx: mpsc::Receiver<Bytes>,
 }
 
 impl Stream {
@@ -55,15 +56,20 @@ impl Stream {
     /// frame fits any transport's per-record overhead: Noise adds a 16-byte tag, the
     /// TLS app-data path adds a 1-byte inner-type + 16-byte tag (the larger). Leaving
     /// 6 bytes (header 5 + the extra inner-type byte) below MAX_PLAINTEXT is safe for both.
-    pub async fn send(&self, data: Vec<u8>) -> Result<()> {
+    pub async fn send(&self, data: Bytes) -> Result<()> {
         match self.kind {
             StreamKind::Tcp => {
-                for chunk in data.chunks(MAX_PLAINTEXT - 6) {
+                // Chunk via zero-copy `split_to` — each chunk is a refcounted slice
+                // of `data`, not a fresh copy.
+                let mut data = data;
+                while !data.is_empty() {
+                    let n = data.len().min(MAX_PLAINTEXT - 6);
+                    let chunk = data.split_to(n);
                     self.tx
                         .send(Command::Write(Frame {
                             stream_id: self.id,
                             ftype: FrameType::Data as u8,
-                            payload: chunk.to_vec(),
+                            payload: chunk,
                         }))
                         .await
                         .map_err(|_| Error::Closed)?;
@@ -87,7 +93,7 @@ impl Stream {
     }
 
     /// Receive the next payload chunk from the peer.
-    pub async fn recv(&mut self) -> Result<Vec<u8>> {
+    pub async fn recv(&mut self) -> Result<Bytes> {
         self.rx.recv().await.ok_or(Error::Closed)
     }
 
@@ -97,7 +103,7 @@ impl Stream {
             .send(Command::Write(Frame {
                 stream_id: self.id,
                 ftype: FrameType::Close as u8,
-                payload: vec![],
+                payload: Bytes::new(),
             }))
             .await
             .map_err(|_| Error::Closed)
@@ -105,7 +111,7 @@ impl Stream {
 }
 
 /// Shared map of active streams: stream_id → data sender.
-type Streams = Arc<Mutex<HashMap<u32, mpsc::Sender<Vec<u8>>>>>;
+type Streams = Arc<Mutex<HashMap<u32, mpsc::Sender<Bytes>>>>;
 
 /// Multiplexer: owns the background reader/writer tasks for one [`Session`].
 pub struct Mux {
@@ -136,7 +142,7 @@ impl Mux {
             .write_frame(&Frame {
                 stream_id: 0,
                 ftype: FrameType::Hello as u8,
-                payload: local_hello.encode(),
+                payload: Bytes::from(local_hello.encode()),
             })
             .await?;
 
@@ -165,7 +171,7 @@ impl Mux {
                                 .write_frame(&Frame {
                                     stream_id: id,
                                     ftype: FrameType::Open as u8,
-                                    payload: target.into_bytes(),
+                                    payload: Bytes::from(target.into_bytes()),
                                 })
                                 .await
                                 .is_err()
@@ -200,7 +206,7 @@ impl Mux {
                     };
                     let bt = base_type(f.ftype);
                     if bt == FrameType::Open as u8 {
-                        let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(64);
+                        let (data_tx, data_rx) = mpsc::channel::<Bytes>(64);
                         {
                             let mut map = r_streams.lock().unwrap();
                             if map.len() >= MAX_CONCURRENT_PEER_STREAMS {
@@ -263,7 +269,7 @@ impl Mux {
     pub async fn open(&mut self, target: &str) -> Result<Stream> {
         let id = self.next_id;
         self.next_id += 2;
-        let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(64);
+        let (data_tx, data_rx) = mpsc::channel::<Bytes>(64);
         self.cmd_tx
             .send(Command::Open(id, target.to_string(), data_tx))
             .await
@@ -286,7 +292,7 @@ impl Mux {
         }
         let id = self.next_id;
         self.next_id += 2;
-        let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(64);
+        let (data_tx, data_rx) = mpsc::channel::<Bytes>(64);
         self.cmd_tx
             .send(Command::Open(id, format!("udp:{target}"), data_tx))
             .await
@@ -365,9 +371,9 @@ mod tests {
         let mut mux = Mux::start(r, w, hello_dg(), Role::Client).await.unwrap();
         let mut s = mux.open_datagram("1.2.3.4:53").await.unwrap();
         assert_eq!(s.kind, StreamKind::Udp);
-        s.send(b"\x00\x01\x02".to_vec()).await.unwrap();
+        s.send(Bytes::from_static(b"\x00\x01\x02")).await.unwrap();
         let echoed = s.recv().await.unwrap();
-        assert_eq!(echoed, b"\x00\x01\x02");
+        assert_eq!(echoed.as_ref(), b"\x00\x01\x02");
         srv.await.unwrap();
     }
 
@@ -418,7 +424,7 @@ mod tests {
                         Ok(Frame {
                             stream_id: 0,
                             ftype: FrameType::Hello as u8,
-                            payload: hello().encode(),
+                            payload: Bytes::from(hello().encode()),
                         })
                     } else {
                         Err(Error::Closed)
@@ -475,13 +481,13 @@ mod tests {
                         Ok(Frame {
                             stream_id: 0,
                             ftype: FrameType::Hello as u8,
-                            payload: hello().encode(),
+                            payload: Bytes::from(hello().encode()),
                         })
                     } else if id <= (MAX_CONCURRENT_PEER_STREAMS as u32 + 1) {
                         Ok(Frame {
                             stream_id: id,
                             ftype: FrameType::Open as u8,
-                            payload: b"echo:0".to_vec(),
+                            payload: Bytes::from_static(b"echo:0"),
                         })
                     } else {
                         std::future::pending::<()>().await;
@@ -541,9 +547,9 @@ mod tests {
         let (r, w) = sess.into_halves();
         let mut mux = Mux::start(r, w, hello(), Role::Client).await.unwrap();
         let mut s = mux.open("echo:0").await.unwrap();
-        s.send(b"ping".to_vec()).await.unwrap();
+        s.send(Bytes::from_static(b"ping")).await.unwrap();
         let echoed = s.recv().await.unwrap();
-        assert_eq!(echoed, b"ping");
+        assert_eq!(echoed.as_ref(), b"ping");
         srv.await.unwrap();
     }
 }

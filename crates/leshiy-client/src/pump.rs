@@ -3,8 +3,12 @@
 use crate::error::Result;
 use crate::stats::ByteCounters;
 use crate::stream::ProxyStream;
+use bytes::BytesMut;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+/// Read-buffer size: refilled per read, handed downstream as a zero-copy `Bytes`.
+const READ_CHUNK: usize = 16384;
 
 /// Pump bytes between `client` and `stream` until either side ends, tallying
 /// upload (client→tunnel) and download (tunnel→client) bytes into `counters`.
@@ -14,6 +18,10 @@ where
     S: ProxyStream + ?Sized,
 {
     let (mut cr, mut cw) = tokio::io::split(client);
+    // Reused read buffer: `read_buf` fills its spare capacity, `split().freeze()`
+    // hands the bytes downstream zero-copy, and the allocation is reclaimed once
+    // the frozen chunk is consumed by the tunnel.
+    let mut rbuf = BytesMut::with_capacity(READ_CHUNK);
     loop {
         tokio::select! {
             inbound = stream.recv() => {
@@ -25,18 +33,15 @@ where
                     _ => break, // empty chunk or error => EOF
                 }
             }
-            res = async {
-                let mut buf = vec![0u8; 16384];
-                let n = cr.read(&mut buf).await?;
-                buf.truncate(n);
-                std::io::Result::Ok(buf)
-            } => {
-                let buf = res?;
-                if buf.is_empty() {
+            res = cr.read_buf(&mut rbuf) => {
+                let n = res?;
+                if n == 0 {
                     break; // client closed
                 }
-                counters.add_up(buf.len() as u64);
-                stream.send(buf).await?;
+                let chunk = rbuf.split().freeze();
+                counters.add_up(chunk.len() as u64);
+                stream.send(chunk).await?;
+                rbuf.reserve(READ_CHUNK);
             }
         }
     }
@@ -56,18 +61,18 @@ mod tests {
     /// `recv_pends` makes `recv` hang forever once the queue empties (so the upload
     /// direction can be tested in isolation without the recv arm ever firing).
     struct FakeStream {
-        incoming: VecDeque<Vec<u8>>,
+        incoming: VecDeque<bytes::Bytes>,
         recv_pends: bool,
         sent: Arc<Mutex<Vec<u8>>>,
     }
 
     #[async_trait]
     impl ProxyStream for FakeStream {
-        async fn send(&mut self, data: Vec<u8>) -> Result<()> {
+        async fn send(&mut self, data: bytes::Bytes) -> Result<()> {
             self.sent.lock().unwrap().extend_from_slice(&data);
             Ok(())
         }
-        async fn recv(&mut self) -> Result<Vec<u8>> {
+        async fn recv(&mut self) -> Result<bytes::Bytes> {
             if let Some(chunk) = self.incoming.pop_front() {
                 Ok(chunk)
             } else if self.recv_pends {
@@ -112,7 +117,7 @@ mod tests {
         let (client, _peer_keepalive) = tokio::io::duplex(1024);
         let sent = Arc::new(Mutex::new(Vec::new()));
         let mut incoming = VecDeque::new();
-        incoming.push_back(b"world!!".to_vec()); // 7 bytes
+        incoming.push_back(bytes::Bytes::from_static(b"world!!")); // 7 bytes
         let mut fake = FakeStream {
             incoming,
             recv_pends: false, // after the one chunk, recv errors => EOF

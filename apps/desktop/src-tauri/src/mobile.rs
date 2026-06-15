@@ -32,7 +32,13 @@ static ENGINE_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 fn engine_runtime() -> &'static tokio::runtime::Runtime {
     ENGINE_RT.get_or_init(|| {
+        // Phase 1b: cap the engine runtime to a single worker thread on the phone.
+        // The data plane is I/O-bound and bursty, not CPU-parallel, so the default
+        // (one worker per core) only adds idle wakeups and context switches that
+        // cost battery. `worker_threads(1)` keeps the spawn-and-forget model (a
+        // current_thread runtime would only drive tasks during block_on).
         tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
             .enable_all()
             .build()
             .expect("failed to build the engine runtime")
@@ -151,8 +157,16 @@ fn routes_for_builder(split: &SplitPlan) -> (Vec<RouteArg>, Vec<RouteArg>) {
 async fn sample_throughput(app: tauri::AppHandle, counters: Arc<ByteCounters>) {
     let mut tput = Throughput::new();
     let mut last = std::time::Instant::now();
-    loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
+    let mut fg = crate::foreground_rx();
+    // Park (no 1 Hz wakeups) whenever the app is backgrounded — the webview reports
+    // visibility via `set_foreground`. This is the main idle-battery win on Android.
+    while leshiy_client::await_next_sample(&mut fg, Duration::from_secs(1)).await {
+        if !*fg.borrow() {
+            // Resumed-to-background race or an early foreground change: don't emit;
+            // reset the baseline so the next real sample isn't a giant delta.
+            last = std::time::Instant::now();
+            continue;
+        }
         let (up, down) = counters.totals();
         let now = std::time::Instant::now();
         let rates = tput.sample(up, down, now.duration_since(last));

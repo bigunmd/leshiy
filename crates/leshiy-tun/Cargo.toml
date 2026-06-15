@@ -13,6 +13,7 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 tun = { workspace = true }
 ipstack = { workspace = true }
+bytes = { workspace = true }
 
 # Route-table manipulation + gateway discovery — desktop-only. On Android the routing is owned
 # by VpnService.Builder (and `net-route`/its `nix`/libc plumbing doesn't target the Android NDK),

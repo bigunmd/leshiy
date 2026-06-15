@@ -58,3 +58,13 @@ nix = { version = "0.29", features = ["socket", "user", "fs"] }
 tun = { version = "0.8", features = ["async"] }
 ipstack = "1"
 net-route = "0.4"
+
+# Release profile: tuned for throughput + smaller binary on the data plane and
+# on mobile. `panic` is left at the default "unwind" on purpose — a panicking
+# tokio task should unwind without taking down the whole server/helper process
+# (panic = "abort" would let one malformed-input panic drop all connected users).
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+opt-level = 3

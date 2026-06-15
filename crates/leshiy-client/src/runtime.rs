@@ -38,8 +38,12 @@ impl Default for SupervisorConfig {
 }
 
 enum Command {
-    Connect { uri: String },
+    Connect {
+        uri: String,
+    },
     Disconnect,
+    /// Network connectivity changed (`true` = online).
+    Connectivity(bool),
 }
 
 /// Handle to a running supervisor: send commands, observe state + throughput.
@@ -58,6 +62,11 @@ impl SupervisorHandle {
     /// Request disconnecting.
     pub fn disconnect(&self) {
         let _ = self.cmd_tx.try_send(Command::Disconnect);
+    }
+    /// Report a network connectivity change (`true` = online). While offline the
+    /// supervisor parks its reconnect backoff instead of spinning failing dials.
+    pub fn set_online(&self, online: bool) {
+        let _ = self.cmd_tx.try_send(Command::Connectivity(online));
     }
     /// The current observable state.
     pub fn state(&self) -> State {
@@ -211,6 +220,7 @@ impl<T: Transport + 'static, P: SystemProxy + 'static> Inner<T, P> {
                 self.feed(Input::Connect);
             }
             Command::Disconnect => self.feed(Input::Disconnect),
+            Command::Connectivity(online) => self.feed(Input::Connectivity(online)),
         }
     }
 
