@@ -14,11 +14,28 @@ single `leshiy://` URI.
 
 ---
 
+## Table of contents
+
+- [What it does](#what-it-does)
+- [Features](#features)
+- [Desktop and mobile apps](#desktop-and-mobile-apps)
+- [How it compares](#how-it-compares)
+- [Quick start (self-host a server)](#quick-start)
+  - [One-command install](#0-one-command-install-recommended)
+  - [Run a server](#1-run-a-server)
+  - [Connect a client (CLI)](#2-connect-a-client)
+  - [Manage users](#3-manage-users-optional)
+  - [Enable QUIC](#4-enable-the-quic-transport-optional)
+  - [Entry → Exit connector](#5-set-up-an-entry--exit-connector-optional-advanced)
+- [License](#license)
+
+---
+
 ## What it does
 
-Leshiy gives the client a local **SOCKS5 proxy**. Traffic sent through it is wrapped
-so that, to a censor on the wire, it looks like an ordinary visit to a real website —
-not a VPN.
+Leshiy gives the client a local **SOCKS5 proxy** (or, in the apps, a **full-device
+VPN**). Traffic sent through it is wrapped so that, to a censor on the wire, it looks
+like an ordinary visit to a real website — not a VPN.
 
 ```
                   censored network            │   open internet
@@ -50,6 +67,40 @@ not a VPN.
   only the entry, not your topology.
 - **Pure Rust, no C TLS stack** — easy to cross-compile and audit; `#![forbid(unsafe_code)]`
   in the core crates.
+
+## Desktop and mobile apps
+
+Besides the `leshiy` CLI, there are graphical clients so non-technical users can
+connect in one tap — paste a `leshiy://` link (or scan its QR) and go.
+
+**Platforms:** desktop apps for **Linux, Windows, and macOS**, plus an **Android**
+app. Download the latest build from the
+[Releases page](https://github.com/bigunmd/leshiy/releases). (Linux and Windows are
+the most tested; macOS and Android are newer. No iOS app.)
+
+**Two modes:**
+
+- **Proxy (SOCKS5)** — a local proxy you point apps at; no elevated privileges.
+- **VPN (full tunnel)** — routes the whole device. On desktop a small privileged
+  helper is launched on demand (one admin prompt); on Android the system VPN is used
+  (approve the on-screen consent the first time). On Android the VPN keeps running in
+  the background after you leave the app.
+
+**Add a server config** by pasting a `leshiy://` link, scanning a **QR code** (live
+camera on Android, or from an image file), or reading it from the clipboard.
+
+**Split tunnel — decide what actually goes through the tunnel:**
+
+- **By network / domain** — include or exclude specific IP ranges (CIDRs) and domains.
+- **Community rule lists** — subscribe to curated preset lists (e.g. route or bypass
+  whole regions); they refresh automatically.
+- **Per-app (Android)** — tunnel only the apps you choose, or everything *except* them.
+
+**Live status:** connection state, real-time throughput, and round-trip latency to
+your server.
+
+> The apps are clients — you still need a server to connect to. Self-host one with the
+> [Quick start](#quick-start) below, then share its `leshiy://` URI (or QR) with the app.
 
 ## How it compares
 
