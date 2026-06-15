@@ -40,12 +40,28 @@ fn set_foreground(visible: bool) {
     let _ = foreground_tx().send(visible);
 }
 
+/// Last-known network connectivity (default online). On Android the in-process VPN
+/// engine's reconnect loop parks on this so it doesn't spin re-dials while offline,
+/// and re-dials immediately when connectivity returns (e.g. Wi-Fi → LTE).
+static ONLINE: OnceLock<tokio::sync::watch::Sender<bool>> = OnceLock::new();
+
+fn online_tx() -> &'static tokio::sync::watch::Sender<bool> {
+    ONLINE.get_or_init(|| tokio::sync::watch::channel(true).0)
+}
+
+/// A receiver the Android VPN reconnect loop waits on.
+#[cfg(target_os = "android")]
+pub(crate) fn online_rx() -> tokio::sync::watch::Receiver<bool> {
+    online_tx().subscribe()
+}
+
 /// Network connectivity change reported by the platform (Android `ConnectivityManager`
-/// via the VPN plugin, or the webview `navigator.onLine`). While offline the supervisor
-/// parks its reconnect backoff instead of spinning failing dials (battery).
+/// via the VPN plugin, or the webview `navigator.onLine`). Drives the proxy
+/// supervisor's offline-aware backoff AND the Android VPN engine's reconnect loop.
 #[tauri::command]
 fn set_online(state: State<'_, AppState>, online: bool) {
     state.supervisor.set_online(online);
+    let _ = online_tx().send(online);
 }
 
 /// Application state managed by Tauri.

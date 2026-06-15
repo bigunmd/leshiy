@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
 import type { TunnelState } from "@/lib/types";
+import { haptic } from "@/lib/haptics";
 import { PowerIcon } from "./icons";
 
 interface Props { state: TunnelState; onToggle: () => void; disabled?: boolean; }
@@ -19,7 +20,8 @@ export function ConnectButton({ state, onToggle, disabled }: Props) {
   // Block the click during teardown so it can't interrupt the route/DNS restore.
   const blocked = disabled || state === "Disconnecting";
   return (
-    <button onClick={onToggle} disabled={blocked} aria-label="toggle connection" aria-busy={busy}
+    <button onClick={onToggle} onPointerDown={() => { if (!blocked) haptic(14); }}
+      disabled={blocked} aria-label="toggle connection" aria-busy={busy}
       className={cn(
         "group relative grid h-[168px] w-[168px] place-items-center transition-transform duration-100 ease-out",
         // Tactile press: the whole orb dips on press and springs back on release.

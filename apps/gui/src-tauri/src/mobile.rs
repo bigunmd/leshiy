@@ -48,7 +48,8 @@ fn engine_runtime() -> &'static tokio::runtime::Runtime {
 /// A running in-process VPN session: the cooperative-cancel signal for the engine (same graceful
 /// teardown contract as desktop — never abort) plus its task handle (on [`engine_runtime`]).
 pub struct VpnSession {
-    pub cancel: Arc<Notify>,
+    /// User-stop signal; the reconnect loop distinguishes this from a transient drop.
+    pub stop: tokio::sync::watch::Sender<bool>,
     pub task: tokio::task::JoinHandle<()>,
 }
 
@@ -239,20 +240,18 @@ pub async fn connect(state: &AppState, uri: String, settings: Settings) -> Resul
         PerAppMode::Include => ("include", settings.per_app.packages.clone()),
         PerAppMode::Exclude => ("exclude", settings.per_app.packages.clone()),
     };
+    let establish_args = EstablishArgs {
+        address: "10.71.0.2".into(),
+        prefix: 32,
+        mtu: settings.vpn_mtu,
+        dns: vec![settings.vpn_dns.clone()],
+        routes,
+        exclude_routes,
+        per_app_mode: per_app_mode.into(),
+        per_app_packages,
+    };
     let est: EstablishResp = plugin
-        .run_mobile_plugin(
-            "establish",
-            EstablishArgs {
-                address: "10.71.0.2".into(),
-                prefix: 32,
-                mtu: settings.vpn_mtu,
-                dns: vec![settings.vpn_dns.clone()],
-                routes,
-                exclude_routes,
-                per_app_mode: per_app_mode.into(),
-                per_app_packages,
-            },
-        )
+        .run_mobile_plugin("establish", &establish_args)
         .map_err(|e| {
             let _ = app.emit("tunnel:state", "Error");
             e.to_string()
@@ -274,33 +273,144 @@ pub async fn connect(state: &AppState, uri: String, settings: Settings) -> Resul
         split,
         ..TunConfig::default()
     };
-    let fd = est.fd;
-    let cancel = Arc::new(Notify::new());
-    let engine_cancel = cancel.clone();
+    // Stop signal: `disconnect` flips it to `true`. The reconnect loop uses it to tell a
+    // user-requested stop apart from a transient tunnel drop (network change).
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let app_task = app.clone();
+    let first_fd = est.fd;
     let task = engine_runtime().spawn(async move {
-        // Dial here (on the surviving runtime) so the tunnel's mux tasks live past app close.
+        run_session_with_reconnect(app_task, uri, cfg, establish_args, first_fd, stop_rx).await;
+    });
+
+    *state.android_vpn.lock().unwrap() = Some(VpnSession {
+        stop: stop_tx,
+        task,
+    });
+    Ok(())
+}
+
+/// Run the in-process VPN with automatic reconnection across tunnel drops (the common
+/// case being an Android network change, Wi-Fi ⇄ LTE, which kills the server socket but
+/// leaves the TUN interface valid). On a drop we re-establish the TUN interface (the
+/// engine closed the old fd on teardown) and re-dial, gated on connectivity + backoff,
+/// so the user never has to manually disconnect/reconnect. Exits only on an explicit
+/// user stop (`stop_rx == true`).
+async fn run_session_with_reconnect(
+    app: tauri::AppHandle,
+    uri: String,
+    cfg: TunConfig,
+    establish_args: EstablishArgs,
+    first_fd: i32,
+    mut stop_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    const BACKOFF_BASE: Duration = Duration::from_millis(500);
+    const BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+    let mut online = crate::online_rx();
+    let counters = Arc::new(ByteCounters::new());
+    let sampler = tokio::spawn(sample_throughput(app.clone(), counters.clone()));
+    let mut fd = first_fd; // first interface already established by `connect`
+    let mut need_establish = false; // re-establish only after a drop
+    let mut backoff = BACKOFF_BASE;
+
+    loop {
+        if *stop_rx.borrow() {
+            break;
+        }
+        // Don't burn cycles dialing while the device is offline; park until connectivity returns.
+        if !*online.borrow_and_update() {
+            let _ = app.emit("tunnel:state", "Reconnecting");
+            tokio::select! {
+                _ = online.wait_for(|v| *v) => {}
+                _ = stop_rx.wait_for(|v| *v) => break,
+            }
+        }
+        // After a drop the engine closed the old TUN fd, so re-establish to get a fresh interface.
+        if need_establish {
+            match establish_tun(&establish_args) {
+                Ok(new_fd) => fd = new_fd,
+                Err(e) => {
+                    tracing::warn!("android re-establish failed: {e}");
+                    let _ = app.emit("tunnel:state", "Reconnecting");
+                    if backoff_or_stop(backoff, &mut stop_rx).await {
+                        break;
+                    }
+                    backoff = (backoff * 2).min(BACKOFF_MAX);
+                    continue;
+                }
+            }
+        }
+
         let tunnel: Arc<dyn Tunnel> = match RealTransport.dial(&uri, TransportPref::Tcp).await {
             Ok(t) => Arc::from(t),
             Err(e) => {
                 tracing::warn!("android dial failed: {e}");
-                let _ = app_task.emit("tunnel:state", "Error");
-                return;
+                let _ = app.emit("tunnel:state", "Reconnecting");
+                // The fd from the (re-)establish above is still valid (engine never ran), so just
+                // back off and retry the dial without re-establishing.
+                if backoff_or_stop(backoff, &mut stop_rx).await {
+                    break;
+                }
+                backoff = (backoff * 2).min(BACKOFF_MAX);
+                continue;
             }
         };
+        backoff = BACKOFF_BASE;
         leshiy_tun::sys::set_tun_fd(fd);
-        let counters = Arc::new(ByteCounters::new());
-        let sampler = tokio::spawn(sample_throughput(app_task.clone(), counters.clone()));
-        let _ = app_task.emit("tunnel:state", State::Connected);
-        if let Err(e) = TunEngine::run(tunnel, cfg, counters, engine_cancel).await {
+        let _ = app.emit("tunnel:state", State::Connected);
+
+        // Run the engine until the tunnel dies OR the user stops. The bridge task fans either
+        // signal into the engine's cooperative-cancel `Notify`.
+        let eng_stop = Arc::new(Notify::new());
+        let bridge = {
+            let es = eng_stop.clone();
+            let t = tunnel.clone();
+            let mut stop_b = stop_rx.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = t.closed() => {}
+                    _ = stop_b.wait_for(|v| *v) => {}
+                }
+                es.notify_one();
+            })
+        };
+        if let Err(e) = TunEngine::run(tunnel, cfg.clone(), counters.clone(), eng_stop).await {
             tracing::warn!("android tun engine exited: {e}");
         }
-        sampler.abort();
-        let _ = app_task.emit("tunnel:state", State::Disconnected);
-    });
+        bridge.abort();
 
-    *state.android_vpn.lock().unwrap() = Some(VpnSession { cancel, task });
-    Ok(())
+        if *stop_rx.borrow() {
+            break; // user-requested disconnect
+        }
+        // Tunnel dropped (or engine errored) without a user stop → reconnect.
+        tracing::info!("android tunnel dropped; reconnecting");
+        let _ = app.emit("tunnel:state", "Reconnecting");
+        need_establish = true;
+    }
+
+    sampler.abort();
+    let _ = app.emit("tunnel:state", State::Disconnected);
+}
+
+/// Sleep for `d`, but return `true` early if a user stop is requested meanwhile.
+async fn backoff_or_stop(d: Duration, stop_rx: &mut tokio::sync::watch::Receiver<bool>) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(d) => false,
+        _ = stop_rx.wait_for(|v| *v) => true,
+    }
+}
+
+/// (Re-)establish the VpnService TUN interface via the Kotlin plugin, returning the new fd.
+/// Safe to call repeatedly on the running service — `establish()` atomically replaces the
+/// interface and no consent re-prompt is needed.
+fn establish_tun(args: &EstablishArgs) -> Result<i32, String> {
+    let plugin = VPN_PLUGIN
+        .get()
+        .ok_or_else(|| "VPN plugin not registered".to_string())?;
+    let est: EstablishResp = plugin
+        .run_mobile_plugin("establish", args)
+        .map_err(|e| e.to_string())?;
+    Ok(est.fd)
 }
 
 /// Stop the Android VPN: signal the engine to tear down gracefully, then stop the service.
@@ -311,7 +421,7 @@ pub async fn disconnect(state: &AppState) -> Result<(), String> {
     }
     let session = state.android_vpn.lock().unwrap().take();
     if let Some(session) = session {
-        session.cancel.notify_one();
+        let _ = session.stop.send(true);
         let _ = session.task.await;
     }
     if let Some(plugin) = VPN_PLUGIN.get() {

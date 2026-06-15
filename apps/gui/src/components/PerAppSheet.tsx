@@ -45,10 +45,17 @@ export function PerAppSheet(p: Props) {
 
   return (
     <Sheet open={p.open} onOpenChange={p.onOpenChange}>
-      <SheetContent side="bottom" className="bg-panel border-border max-h-[85%] overflow-y-auto rounded-t-2xl">
+      {/* Fixed-height flex column sized to the *dynamic* viewport (dvh tracks the soft
+          keyboard), so focusing the search shrinks only the scrollable app list below
+          instead of slamming the whole sheet up. The mode toggle + hint + search stay
+          pinned at the top and remain visible above the keyboard. */}
+      <SheetContent
+        side="bottom"
+        className="bg-panel border-border flex max-h-[85dvh] flex-col rounded-t-2xl"
+      >
         <SheetHeader><SheetTitle>{t("perApp.title")}</SheetTitle></SheetHeader>
-        <div className="px-4 pb-6">
-          <div className="flex items-center justify-between border-b border-border py-3">
+        <div className="flex min-h-0 flex-1 flex-col px-4 pb-6">
+          <div className="flex shrink-0 items-center justify-between border-b border-border py-3">
             <span className="text-[13px]">{t("perApp.mode")}</span>
             <div className="flex gap-1">
               {modes.map((m) => (
@@ -60,16 +67,16 @@ export function PerAppSheet(p: Props) {
               ))}
             </div>
           </div>
-          <p className="mt-2 font-mono text-[10px] uppercase leading-relaxed tracking-widest text-dim/70">
+          <p className="mt-2 shrink-0 font-mono text-[10px] uppercase leading-relaxed tracking-widest text-dim/70">
             {t(`perApp.${p.value.mode}Hint`)}
           </p>
           {active && (
             <>
-              <Input className="mt-3 bg-bg1" placeholder={t("perApp.search")} value={query} onChange={(e) => setQuery(e.target.value)} />
+              <Input className="mt-3 shrink-0 bg-bg1" placeholder={t("perApp.search")} value={query} onChange={(e) => setQuery(e.target.value)} />
               {loading ? (
                 <p className="mt-3 text-dim text-[13px]">{t("perApp.loading")}</p>
               ) : (
-                <div className="mt-2 flex flex-col">
+                <div className="mt-2 flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain">
                   {filtered.map((a) => {
                     const checked = p.value.packages.includes(a.package);
                     return (
