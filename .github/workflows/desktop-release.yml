@@ -82,7 +82,10 @@ jobs:
           prerelease: false
 
       - name: Keep this release off GitHub's shared "latest" pointer
-        if: steps.tauri.outputs.releaseId != ''
+        # One matrix job is enough (all upload to the same release by tag); pin to the Linux
+        # runner so the bash heredoc below isn't parsed by Windows PowerShell.
+        if: matrix.platform == 'ubuntu-22.04' && steps.tauri.outputs.releaseId != ''
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
