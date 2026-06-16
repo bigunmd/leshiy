@@ -288,7 +288,8 @@ async fn relay_stream(
                 Err(_) => break,
             },
             res = async {
-                let mut b = vec![0u8; 16384];
+                // Read at most one frame's worth so each read → one full TLS record.
+                let mut b = vec![0u8; leshiy_core::frame::MAX_FRAME_PAYLOAD];
                 let n = ur.read(&mut b).await.map_err(crate::RealityError::Io)?;
                 b.truncate(n);
                 crate::Result::Ok(b)

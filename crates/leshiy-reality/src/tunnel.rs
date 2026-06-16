@@ -6,7 +6,7 @@ use crate::handshake::{
 use leshiy_core::frame::Frame;
 use leshiy_core::transport::{FrameRead, FrameWrite};
 use leshiy_core::{Error, Result};
-use leshiy_tls::record::read_record;
+use leshiy_tls::record::{MAX_RECORD_PAYLOAD, read_record};
 use leshiy_tls::tls13::mlkem::MlKemDecapKey;
 use leshiy_tls::tls13::record::{open_record_parts, seal_record};
 use leshiy_tls::tls13::suite::CipherSuite;
@@ -14,8 +14,12 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use zeroize::Zeroizing;
 
 const APPLICATION_DATA: u8 = 0x17;
-/// Max `frame.encode()` length that still fits one TLS record: u16 max - inner-type(1) - AEAD tag(16).
-const MAX_TLS_FRAME_ENCODE: usize = 65535 - 1 - 16;
+/// Max `frame.encode()` that seals into one RFC 8446-compliant TLS record: the
+/// TLSInnerPlaintext (frame bytes + 1-byte inner content-type) must not exceed 2^14.
+/// The mux already chunks to [`leshiy_core::frame::MAX_FRAME_PAYLOAD`] so this never
+/// trips in practice; it's a defense-in-depth guard that turns an oversized frame into
+/// a clean error rather than an unreadable (record-cap-rejected) record on the wire.
+const MAX_TLS_FRAME_ENCODE: usize = MAX_RECORD_PAYLOAD - 1;
 
 pub struct TlsFrameReader<R> {
     pub(crate) inner: R,

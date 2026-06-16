@@ -1,6 +1,6 @@
 //! Stream multiplexer over one Session. OPEN carries the target as UTF-8 in its payload.
 use crate::error::{Error, Result};
-use crate::frame::{Frame, FrameType, MAX_PLAINTEXT, base_type, is_critical};
+use crate::frame::{Frame, FrameType, MAX_FRAME_PAYLOAD, base_type, is_critical};
 use crate::transport::{FrameRead, FrameWrite};
 use crate::version::{Hello, Negotiated, negotiate};
 use bytes::Bytes;
@@ -52,10 +52,10 @@ impl Stream {
     /// Send payload bytes. TCP streams chunk into `Data` frames; UDP streams send the
     /// whole datagram in one `Datagram` frame (oversized datagrams are rejected).
     ///
-    /// Each plaintext frame = 5-byte header + payload. Cap the payload so the encoded
-    /// frame fits any transport's per-record overhead: Noise adds a 16-byte tag, the
-    /// TLS app-data path adds a 1-byte inner-type + 16-byte tag (the larger). Leaving
-    /// 6 bytes (header 5 + the extra inner-type byte) below MAX_PLAINTEXT is safe for both.
+    /// Each plaintext frame = 5-byte header + payload. Cap the payload at
+    /// [`MAX_FRAME_PAYLOAD`] so the sealed frame fits ONE TLS 1.3 record on the
+    /// REALITY transport (the most size-restrictive path); larger frames are
+    /// writable but unreadable there, deadlocking the stream.
     pub async fn send(&self, data: Bytes) -> Result<()> {
         match self.kind {
             StreamKind::Tcp => {
@@ -63,7 +63,7 @@ impl Stream {
                 // of `data`, not a fresh copy.
                 let mut data = data;
                 while !data.is_empty() {
-                    let n = data.len().min(MAX_PLAINTEXT - 6);
+                    let n = data.len().min(MAX_FRAME_PAYLOAD);
                     let chunk = data.split_to(n);
                     self.tx
                         .send(Command::Write(Frame {
@@ -77,7 +77,8 @@ impl Stream {
                 Ok(())
             }
             StreamKind::Udp => {
-                if data.len() > MAX_PLAINTEXT - 6 {
+                // A datagram is one indivisible frame, so it must itself fit one record.
+                if data.len() > MAX_FRAME_PAYLOAD {
                     return Err(Error::Protocol("datagram exceeds max frame payload".into()));
                 }
                 self.tx
