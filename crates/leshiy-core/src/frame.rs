@@ -4,6 +4,17 @@ use bytes::Bytes;
 
 /// Max plaintext per frame: Noise message max (65535) minus the 16-byte AEAD tag.
 pub const MAX_PLAINTEXT: usize = 65535 - 16;
+/// Largest stream/datagram payload we put in a single frame.
+///
+/// The size-limiting transport is the REALITY app-data path, which must look like
+/// genuine TLS 1.3: each frame is sealed into ONE record whose TLSInnerPlaintext
+/// (RFC 8446 §5.2) — `frame.encode()` (5-byte header + payload) plus the 1-byte
+/// inner content-type — must not exceed 2^14. So payload ≤ 16384 − 5 − 1 = 16378.
+/// Chunking to this keeps every transport's records within the TLS cap; the Noise
+/// path's larger [`MAX_PLAINTEXT`] limit is a non-issue (smaller frames are always
+/// safe). A frame larger than one record is writable but UNREADABLE on the REALITY
+/// path (read_record rejects oversized records), which deadlocks the stream.
+pub const MAX_FRAME_PAYLOAD: usize = 16384 - HEADER_LEN - 1;
 /// High bit of the type byte marks a frame whose unknown type MUST abort the session.
 pub const CRITICAL_BIT: u8 = 0x80;
 const HEADER_LEN: usize = 5; // u32 stream_id + u8 type

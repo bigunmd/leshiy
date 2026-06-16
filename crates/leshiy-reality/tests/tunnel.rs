@@ -83,10 +83,11 @@ async fn run(suite_u16: u16) {
     let (tr, tw) = into_transport(&session, Role::Client, r, w);
     let mut mux = Mux::start(tr, tw, hello(), Role::Client).await.unwrap();
     let mut s = mux.open("echo").await.unwrap();
-    // max single mux chunk (MAX_PLAINTEXT-6 = 65513): exercises the TLS record-size
-    // boundary — a full-size frame must still fit one app-data record (regression for the
-    // chunk-size overflow fix).
-    let payload = vec![7u8; 65513];
+    // Largest payload the mux puts in ONE frame (MAX_FRAME_PAYLOAD): exercises the TLS
+    // record-size boundary — a max-size frame must seal into a single readable app-data
+    // record. A larger frame would be writable but rejected by read_record (>2^14+slack),
+    // deadlocking the stream — the regression this guards against.
+    let payload = vec![7u8; leshiy_core::frame::MAX_FRAME_PAYLOAD];
     s.send(payload.clone().into()).await.unwrap();
     let got = s.recv().await.unwrap();
     assert_eq!(got, payload);
