@@ -60,6 +60,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true
+          # Stay off GitHub's shared "latest" pointer — it must remain on the v* server/CLI train
+          # (the only one shipping install.sh/install-client.sh/leshiyctl), else the README's
+          # releases/latest install URLs 404 once an Android release is published.
+          make_latest: false
           name: Leshiy Android ${{ github.ref_name }}
           body: "Android APKs for ${{ github.ref_name }}. arm64-v8a / armeabi-v7a / x86_64."
           files: |

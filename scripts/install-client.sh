@@ -32,9 +32,14 @@ detect_target() {
 
 resolve_version() {
   if [ "$VERSION" = "latest" ]; then
-    v="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-      | grep -m1 '"tag_name"' | cut -d'"' -f4)"
-    [ -n "$v" ] || die "could not resolve latest release for $REPO (try --version vX.Y.Z)"
+    # The repo ships three release trains that all share GitHub's single "latest" pointer:
+    # the server/CLI train (vX.Y.Z, the only one carrying the Linux binary + these scripts),
+    # plus desktop-v* and android-v*. /releases/latest can therefore resolve to a desktop or
+    # android tag that has none of our assets. List releases (newest first) and pick the newest
+    # server-train tag instead — `^v[0-9]` matches vX.Y.Z but not desktop-v*/android-v*.
+    v="$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=100" \
+      | grep '"tag_name"' | cut -d'"' -f4 | grep -m1 '^v[0-9]')"
+    [ -n "$v" ] || die "could not resolve a server release (vX.Y.Z) for $REPO (try --version vX.Y.Z)"
     echo "$v"
   else
     echo "$VERSION"
