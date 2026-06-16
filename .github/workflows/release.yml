@@ -57,6 +57,10 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          # This (server/CLI) train owns GitHub's shared "latest" pointer, so that
+          # releases/latest/download/{install,install-client}.sh + leshiyctl always resolve here.
+          # desktop-v*/android-v* releases set make_latest:false to stay off it.
+          make_latest: true
           files: |
             leshiy-*.tar.gz
             SHA256SUMS

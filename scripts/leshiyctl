@@ -30,9 +30,12 @@ run_server_container() {  # (re)create the leshiy container from the recorded im
     "$img" server --config /etc/leshiy/server.toml
 }
 
-resolve_latest_tag() {  # $1 = owner/repo on GitHub → its latest release tag (e.g. v1.2.3)
-  curl -fsSL "https://api.github.com/repos/$1/releases/latest" 2>/dev/null \
-    | grep -m1 '"tag_name"' | cut -d'"' -f4
+resolve_latest_tag() {  # $1 = owner/repo on GitHub → its newest server-train tag (e.g. v1.2.3)
+  # The repo also publishes desktop-v*/android-v* releases that share GitHub's single "latest"
+  # pointer but carry no server binary/image. Filter to the v-prefixed server train (`^v[0-9]`)
+  # rather than trusting /releases/latest, which could resolve to a desktop/android tag.
+  curl -fsSL "https://api.github.com/repos/$1/releases?per_page=100" 2>/dev/null \
+    | grep '"tag_name"' | cut -d'"' -f4 | grep -m1 '^v[0-9]'
 }
 
 write_image() {  # $1 = image ref → record it as the docker install image
