@@ -715,6 +715,34 @@ async fn refresh_subscription(
     Ok(state.sub_cache.lock().unwrap().clone())
 }
 
+/// Run an optional startup subsystem, catching both a returned error and a panic so its failure
+/// can never abort launch. Returns whether `f` succeeded.
+///
+/// The Linux system tray (libappindicator/ayatana) is the motivating case: it is absent or
+/// ABI-incompatible on many hosts — an AppImage built against an older GLib loaded next to a
+/// host's newer ayatana stack panics with `undefined symbol: g_once_init_leave_pointer`, and
+/// WSLg / headless sessions often ship no StatusNotifier host at all. The tray is optional UX,
+/// so we degrade to "no tray" with a warning instead of crashing. (`panic = "unwind"` is kept
+/// in the release profile precisely so this catch works.)
+#[cfg(not(target_os = "android"))]
+fn run_optional<E, F>(what: &str, f: F) -> bool
+where
+    E: std::fmt::Display,
+    F: FnOnce() -> Result<(), E>,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            tracing::warn!("{what} unavailable: {e}");
+            false
+        }
+        Err(_) => {
+            tracing::warn!("{what} unavailable (init panicked); continuing without it");
+            false
+        }
+    }
+}
+
 #[cfg(not(target_os = "android"))]
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -953,8 +981,10 @@ pub fn run() {
                     tokio::time::sleep(SUB_REFRESH).await;
                 }
             });
+            // Best-effort: a missing/ABI-broken system tray (common on Linux/WSLg) must not
+            // crash startup. Degrade to "no tray icon" and keep the window working.
             #[cfg(not(target_os = "android"))]
-            build_tray(app)?;
+            run_optional("system tray", || build_tray(app));
             Ok(())
         })
         // The frontend owns the window-close decision (ask / quit / hide-to-tray):
@@ -1043,5 +1073,31 @@ mod tests {
         // The Include subscription's rules landed in the include direction.
         assert_eq!(params.split_tunnel.include.cidrs.len(), 1);
         assert_eq!(params.split_tunnel.include.domains, vec!["blocked.example"]);
+    }
+
+    // The Linux system tray (libappindicator/ayatana) is missing or ABI-incompatible on many
+    // hosts — an AppImage built against an older GLib next to a newer system ayatana stack
+    // panics with `undefined symbol: g_once_init_leave_pointer`. That must NOT abort launch.
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn optional_init_is_non_fatal_on_error_and_panic() {
+        // Success passes through.
+        assert!(super::run_optional("ok", || Ok::<(), String>(())));
+        // A returned error degrades to false, never propagates.
+        assert!(!super::run_optional("errs", || Err::<(), _>(
+            "boom".to_string()
+        )));
+        // A panic during init (as libappindicator does) is caught, not propagated. Silence the
+        // default hook so the deliberate panic's backtrace doesn't pollute test output.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let survived = super::run_optional("panics", || -> Result<(), String> {
+            panic!("tray dlopen failed")
+        });
+        std::panic::set_hook(prev);
+        assert!(
+            !survived,
+            "a panicking optional init must be caught, not propagated"
+        );
     }
 }
