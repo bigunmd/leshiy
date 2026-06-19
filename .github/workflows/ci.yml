@@ -14,6 +14,15 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all
 
+  # Shell unit tests (no network): the release-pointer invariant lives in pure sh logic,
+  # so guard it on every push/PR alongside the Rust suite.
+  scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh scripts/test/check_latest_pointer_test.sh
+
   # Supply-chain / advisory gate (L7): RustSec advisories, no git/unknown
   # sources. Config in deny.toml.
   audit:

@@ -1,0 +1,22 @@
+name: verify-release-pointer
+# Fail loudly if GitHub's shared "latest" pointer ever drifts off the v* server/CLI train,
+# which would 404 the README quick start (releases/latest/download/install.sh). Runs after any
+# release workflow finishes (catches a desktop/android release stealing "latest"), daily (catches
+# a manual un-draft / pointer change outside CI), and on demand.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * *"   # daily drift check
+  workflow_run:
+    workflows: [release, desktop-release, android-release]
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # Live assertion: "latest" resolves to a vX.Y.Z tag AND the README install assets are 200.
+      - run: sh scripts/check-latest-pointer.sh
