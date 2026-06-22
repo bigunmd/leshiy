@@ -219,9 +219,9 @@ pub fn init(opts: InitOptions<'_>) -> Result<InitOutput> {
     };
     let uri = format_reality_uri_full(&pk, host, &sni, &short_id, quic_endpoint.as_ref());
     write_secret_file(out, &toml::to_string_pretty(&cfg)?)?;
-    println!("REALITY server config written to {out}");
-    println!("Share this URI with clients:");
-    println!("{uri}");
+    crate::ui::ok(&format!("REALITY server config written to {out}"));
+    crate::ui::eline(&crate::ui::heading("Share this URI with clients:"));
+    println!("{uri}"); // stdout: raw URI (script-consumable)
     Ok(InitOutput {
         config_path: out.to_string(),
         uri,
