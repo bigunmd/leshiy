@@ -28,6 +28,11 @@ pub enum FrameType {
     Data = 3,
     Close = 4,
     Datagram = 5,
+    /// Keepalive probe (stream_id 0, empty payload). Non-critical: a peer that doesn't
+    /// understand it ignores it. Only emitted once `CAP_KEEPALIVE` is negotiated.
+    Ping = 6,
+    /// Keepalive response — sent in reply to a received `Ping`. Non-critical.
+    Pong = 7,
 }
 
 pub fn is_critical(ftype: u8) -> bool {

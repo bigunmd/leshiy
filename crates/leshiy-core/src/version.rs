@@ -6,6 +6,13 @@ use crate::error::{Error, Result};
 /// emitted after both peers advertise it.
 pub const CAP_DATAGRAM: u64 = 1 << 0;
 
+/// Capability bit: the peer understands the `Ping`/`Pong` keepalive frames and will
+/// echo a `Ping` with a `Pong`. Negotiated through `Hello.capabilities`; the mux only
+/// runs its keepalive (periodic ping + idle-read timeout) when both peers advertise it,
+/// so a silently-blackholed tunnel (no FIN/RST — the TSPU/DPI and NAT-rebind failure
+/// mode) is detected and `closed()` fires instead of the reader blocking forever.
+pub const CAP_KEEPALIVE: u64 = 1 << 1;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hello {
     pub version: u16,
@@ -105,6 +112,34 @@ mod tests {
             negotiate(&with, &without).unwrap().capabilities & CAP_DATAGRAM,
             0
         );
+    }
+
+    #[test]
+    fn keepalive_cap_negotiated_only_when_both_advertise() {
+        let with = Hello {
+            version: 1,
+            min_supported: 1,
+            capabilities: CAP_KEEPALIVE,
+        };
+        let without = Hello {
+            version: 1,
+            min_supported: 1,
+            capabilities: 0,
+        };
+        assert_eq!(
+            negotiate(&with, &with).unwrap().capabilities & CAP_KEEPALIVE,
+            CAP_KEEPALIVE
+        );
+        assert_eq!(
+            negotiate(&with, &without).unwrap().capabilities & CAP_KEEPALIVE,
+            0
+        );
+    }
+
+    #[test]
+    fn datagram_and_keepalive_are_distinct_bits() {
+        assert_ne!(CAP_DATAGRAM, CAP_KEEPALIVE);
+        assert_eq!(CAP_DATAGRAM & CAP_KEEPALIVE, 0);
     }
 
     #[test]
