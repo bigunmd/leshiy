@@ -223,6 +223,15 @@ fn print_list(users: &[Value]) {
         } else {
             "no"
         };
+        let enabled_cell = {
+            let padded = format!("{enabled:<8}");
+            let style = if u["enabled"].as_bool().unwrap_or(false) {
+                anstyle::AnsiColor::Green.on_default()
+            } else {
+                anstyle::AnsiColor::Red.on_default()
+            };
+            crate::ui::paint(&padded, style, crate::ui::color_stderr())
+        };
         let expires = u["expires_at"]
             .as_u64()
             .map(|t| t.to_string())
@@ -240,9 +249,9 @@ fn print_list(users: &[Value]) {
             .map(fmt_rate)
             .unwrap_or_else(|| "unlimited".into());
         println!(
-            "{} {:<8} {:<10} {:<12} {:<12} {:<12}",
+            "{} {} {:<10} {:<12} {:<12} {:<12}",
             crate::ui::id(&format!("{short_id:<17}")),
-            enabled,
+            enabled_cell,
             expires,
             cap,
             rate_up,
@@ -274,13 +283,13 @@ fn created_summary(uri: &str) -> Vec<String> {
         ));
         out.push(crate::ui::field("sni", &p.client.sni));
         out.push(crate::ui::field("server", &p.server_addr));
+        out.push(
+            crate::ui::label(
+                "  the server key + host above are SHARED by every user; only short_id is unique",
+            )
+            .to_string(),
+        );
     }
-    out.push(
-        crate::ui::label(
-            "  the server key + host above are SHARED by every user; only short_id is unique",
-        )
-        .to_string(),
-    );
     out
 }
 
