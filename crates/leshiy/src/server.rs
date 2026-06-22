@@ -437,6 +437,7 @@ pub async fn run(config: &str) -> Result<()> {
         server_public,
         host: cfg.host.clone(),
         quic: quic_endpoint_cfg,
+        default_sni: cfg.server_names.first().cloned(),
     };
     {
         let sp = sock_path.clone();

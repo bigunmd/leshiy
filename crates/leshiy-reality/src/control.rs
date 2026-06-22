@@ -13,6 +13,9 @@ pub struct UriIssuer {
     pub host: String,
     /// Optional QUIC endpoint to embed in the issued URIs.
     pub quic: Option<QuicEndpoint>,
+    /// Default SNI used when an `add`/`uri` request omits one (the server's first
+    /// configured server_name). Prevents emitting an unusable empty-`sni=` URI.
+    pub default_sni: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -192,7 +195,9 @@ fn dispatch(req: Req, store: &Arc<dyn UserAdmin>, issuer: &UriIssuer) -> Resp {
                 rate_up,
                 rate_down,
             });
-            let sni = sni.unwrap_or_default();
+            let sni = sni
+                .or_else(|| issuer.default_sni.clone())
+                .unwrap_or_default();
             let uri = format_reality_uri_full(
                 &issuer.server_public,
                 &issuer.host,
@@ -254,7 +259,8 @@ fn dispatch(req: Req, store: &Arc<dyn UserAdmin>, issuer: &UriIssuer) -> Resp {
                 uri: Some(format_reality_uri_full(
                     &issuer.server_public,
                     &issuer.host,
-                    &sni.unwrap_or_default(),
+                    &sni.or_else(|| issuer.default_sni.clone())
+                        .unwrap_or_default(),
                     &id,
                     issuer.quic.as_ref(),
                 )),
@@ -308,6 +314,7 @@ mod tests {
             server_public: [9u8; 32],
             host: "h:443".into(),
             quic: None,
+            default_sni: None,
         };
         let s2 = store.clone();
         let path = sock.clone();
@@ -336,6 +343,47 @@ mod tests {
         assert!(store.authorize(&[1, 2, 3, 4, 0, 0, 0, 0], 0).is_none()); // live effect
         let bad = req(&sock, r#"{"cmd":"frobnicate"}"#).await;
         assert!(bad.contains("\"ok\":false")); // unknown cmd, no panic
+    }
+
+    #[tokio::test]
+    async fn add_without_sni_uses_issuer_default() {
+        let dir = std::env::temp_dir().join(format!("leshiy-sni-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("c.sock");
+        let store = Arc::new(InMemoryUserStore::new(vec![]));
+        let issuer = UriIssuer {
+            server_public: [9u8; 32],
+            host: "vps:443".into(),
+            quic: None,
+            default_sni: Some("www.microsoft.com".into()),
+        };
+        let s2 = store.clone();
+        let path = sock.clone();
+        tokio::spawn(async move {
+            let _ = serve_control(&path, s2, issuer).await;
+        });
+        for _ in 0..50 {
+            if sock.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // No sni in the request → URI must carry the issuer default, not an empty sni.
+        let resp = req(&sock, r#"{"cmd":"add","enabled":true}"#).await;
+        assert!(resp.contains("sni=www.microsoft.com"), "got: {resp}");
+        assert!(
+            !resp.contains("sni=&"),
+            "must not emit an empty sni: {resp}"
+        );
+
+        // An explicit sni still wins.
+        let resp2 = req(
+            &sock,
+            r#"{"cmd":"add","sni":"login.live.com","enabled":true}"#,
+        )
+        .await;
+        assert!(resp2.contains("sni=login.live.com"), "got: {resp2}");
     }
 
     async fn req(sock: &std::path::Path, line: &str) -> String {
