@@ -227,8 +227,15 @@ impl<T: Transport + 'static, P: SystemProxy + 'static> Inner<T, P> {
     fn on_dial_result(&mut self, res: DialResult) {
         match res {
             Ok(tunnel) => {
+                // `StartServing` clones `current`, so set it before feeding the event.
                 self.current = Some(Arc::from(tunnel));
                 self.feed(Input::DialSucceeded);
+                // If the machine didn't adopt the tunnel — the user disconnected while
+                // the dial was in flight, so `DialSucceeded` was a no-op — drop it now so
+                // the live connection is closed instead of leaked until the next connect.
+                if self.machine.state != State::Connected {
+                    self.current = None;
+                }
             }
             Err(()) => self.feed(Input::DialFailed),
         }
@@ -260,5 +267,95 @@ async fn run<T: Transport + 'static, P: SystemProxy + 'static>(
             Some(()) = dropped_rx.recv() => inner.feed(Input::TunnelDropped),
             _ = stats.tick() => inner.emit_stats(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stream::{DatagramFlow, ProxyStream};
+    use crate::transport::Tunnel;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Notify;
+
+    /// A tunnel that never reports closed and flips a flag when dropped, so a test can
+    /// observe whether the supervisor released it.
+    struct TrackedTunnel {
+        dropped: Arc<AtomicBool>,
+    }
+    impl Drop for TrackedTunnel {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+    #[async_trait]
+    impl Tunnel for TrackedTunnel {
+        async fn open(&self, _target: &str) -> crate::error::Result<Box<dyn ProxyStream>> {
+            Err(crate::error::ClientError::ConnectFailed)
+        }
+        async fn open_datagram(
+            &self,
+            _target: &str,
+        ) -> crate::error::Result<Box<dyn DatagramFlow>> {
+            Err(crate::error::ClientError::ConnectFailed)
+        }
+        async fn closed(&self) {
+            std::future::pending::<()>().await; // a live tunnel: never closes on its own
+        }
+    }
+
+    /// A transport whose dial blocks until `gate` is notified, then returns a
+    /// `TrackedTunnel`. Lets a test interleave a `Disconnect` before the dial resolves.
+    struct GatedTransport {
+        gate: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+    }
+    #[async_trait]
+    impl Transport for GatedTransport {
+        async fn dial(
+            &self,
+            _uri: &str,
+            _pref: TransportPref,
+        ) -> crate::error::Result<Box<dyn Tunnel>> {
+            self.gate.notified().await;
+            Ok(Box::new(TrackedTunnel {
+                dropped: self.dropped.clone(),
+            }))
+        }
+    }
+
+    /// If the user disconnects while a dial is still in flight, a tunnel that completes
+    /// afterwards must be dropped (closed), not retained — otherwise it leaks a live
+    /// connection the supervisor will never serve or tear down.
+    #[tokio::test]
+    async fn dial_completing_after_disconnect_does_not_leak_the_tunnel() {
+        let gate = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let transport = GatedTransport {
+            gate: gate.clone(),
+            dropped: dropped.clone(),
+        };
+        let handle = spawn_supervisor(
+            transport,
+            crate::sysproxy::NoopProxy,
+            SupervisorConfig::default(),
+        );
+
+        handle.connect("leshiy://x".into());
+        // Let the Connect command be processed and the dial task spawn (now blocked on gate).
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // User disconnects while the dial is still in flight.
+        handle.disconnect();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Now let the dial complete — its tunnel arrives after Disconnect.
+        gate.notify_one();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(handle.state(), State::Disconnected);
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "tunnel from a post-disconnect dial must be dropped, not leaked"
+        );
     }
 }
