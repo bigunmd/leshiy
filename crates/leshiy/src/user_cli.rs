@@ -188,14 +188,20 @@ fn print_user(u: &Value) {
     let used_up = u["used_up"].as_u64().unwrap_or(0);
     let used_down = u["used_down"].as_u64().unwrap_or(0);
 
-    println!("short_id:  {short_id}");
-    println!("enabled:   {enabled}");
-    println!("expires:   {expires}");
-    println!("cap:       {cap}");
-    println!("rate_up:   {rate_up}");
-    println!("rate_down: {rate_down}");
-    println!("used_up:   {}", fmt_bytes(used_up));
-    println!("used_down: {}", fmt_bytes(used_down));
+    println!("{}", crate::ui::field("short_id", &crate::ui::id(short_id)));
+    println!("{}", crate::ui::field("enabled", &enabled.to_string()));
+    println!("{}", crate::ui::field("expires", &expires));
+    println!("{}", crate::ui::field("cap", &crate::ui::value(&cap)));
+    println!(
+        "{}",
+        crate::ui::field("rate_up", &crate::ui::value(&rate_up))
+    );
+    println!(
+        "{}",
+        crate::ui::field("rate_down", &crate::ui::value(&rate_down))
+    );
+    println!("{}", crate::ui::field("used_up", &fmt_bytes(used_up)));
+    println!("{}", crate::ui::field("used_down", &fmt_bytes(used_down)));
 }
 
 fn print_list(users: &[Value]) {
@@ -204,8 +210,11 @@ fn print_list(users: &[Value]) {
         return;
     }
     println!(
-        "{:<18} {:<8} {:<10} {:<12} {:<12} {:<12}",
-        "SHORT_ID", "ENABLED", "EXPIRES", "CAP", "RATE_UP", "RATE_DOWN"
+        "{}",
+        crate::ui::label(&format!(
+            "{:<18} {:<8} {:<10} {:<12} {:<12} {:<12}",
+            "SHORT_ID", "ENABLED", "EXPIRES", "CAP", "RATE_UP", "RATE_DOWN"
+        ))
     );
     for u in users {
         let short_id = u["short_id"].as_str().unwrap_or("-");
@@ -231,8 +240,13 @@ fn print_list(users: &[Value]) {
             .map(fmt_rate)
             .unwrap_or_else(|| "unlimited".into());
         println!(
-            "{:<18} {:<8} {:<10} {:<12} {:<12} {:<12}",
-            short_id, enabled, expires, cap, rate_up, rate_down
+            "{} {:<8} {:<10} {:<12} {:<12} {:<12}",
+            crate::ui::id(&format!("{short_id:<17}")),
+            enabled,
+            expires,
+            cap,
+            rate_up,
+            rate_down
         );
     }
 }
