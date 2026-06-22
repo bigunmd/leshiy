@@ -48,7 +48,16 @@ impl PrivilegedOps for WindowsOps {
             .netmask(std::net::Ipv4Addr::new(255, 255, 255, 0))
             .mtu(mtu)
             .up();
-        let device = tun::create_as_async(&cfg).map_err(to_io)?;
+        // Wintun loads `wintun.dll` from the helper's own directory at runtime. If the bundle
+        // is missing it (the #1 reason the Windows VPN silently fails to start), surface a
+        // clear, actionable error instead of the loader's opaque one.
+        let device = tun::create_as_async(&cfg).map_err(|e| {
+            std::io::Error::other(format!(
+                "failed to create the Wintun adapter: {e}. Ensure wintun.dll is present next to \
+                 leshiy-helper.exe (it is bundled with the installer) and that the helper is \
+                 running elevated."
+            ))
+        })?;
         let iface = device.tun_name().map_err(to_io)?;
 
         // 2. Routes: server host-exception FIRST via the original gateway, then the
