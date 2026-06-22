@@ -1411,7 +1411,7 @@ async fn reality_cli_user_add_qr_flag() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    // ── 5. `leshiy user add --qr` — capture stdout ───────────────────────
+    // ── 5. `leshiy user add --qr` — capture stdout AND stderr ────────────
     let add_out = std::process::Command::new(bin)
         .args([
             "user", "add", "--qr", "--sni", dest_sni, "--socket", &sock_str,
@@ -1424,12 +1424,25 @@ async fn reality_cli_user_add_qr_flag() {
         String::from_utf8_lossy(&add_out.stderr)
     );
     let out = String::from_utf8_lossy(&add_out.stdout).to_string();
+    let err = String::from_utf8_lossy(&add_out.stderr).to_string();
 
     let _ = std::fs::remove_dir_all(&cfg_dir);
 
-    assert!(out.contains("leshiy://"), "should print the URI");
+    // Contract (CLI UX polish): the raw URI is the machine token on stdout; the QR is
+    // human decoration on stderr. So `leshiy user add --qr | pbcopy` captures the URI,
+    // not unscannable QR art, while an interactive user still sees the QR on the terminal.
+    let is_qr =
+        |s: &str| s.contains('\u{2588}') || s.contains('\u{2580}') || s.contains('\u{2584}');
     assert!(
-        out.contains('\u{2588}') || out.contains('\u{2580}') || out.contains('\u{2584}'),
-        "should render a QR for --qr; stdout was:\n{out}"
+        out.contains("leshiy://"),
+        "URI should be on stdout; stdout was:\n{out}"
+    );
+    assert!(
+        !is_qr(&out),
+        "QR must NOT pollute stdout (it would corrupt piped consumers); stdout was:\n{out}"
+    );
+    assert!(
+        is_qr(&err),
+        "should render a QR on stderr for --qr; stderr was:\n{err}"
     );
 }
