@@ -17,11 +17,16 @@ pub struct StatusReport {
 pub fn render_status(r: &StatusReport) -> String {
     let onoff = |b: bool| if b { "yes" } else { "no" };
     format!(
-        "service active: {}\nlisten:         {}\ndest (cloak):   {}\nquic:           {}\nconnector:      {}",
+        "{}{}\n{}{}\n{}{}\n{}{}\n{}{}",
+        ui::label("service active: "),
         ui::value(onoff(r.active)),
+        ui::label("listen:         "),
         &r.listen,
+        ui::label("dest (cloak):   "),
         &r.dest,
+        ui::label("quic:           "),
         ui::value(onoff(r.quic)),
+        ui::label("connector:      "),
         ui::value(onoff(r.connector)),
     )
 }
