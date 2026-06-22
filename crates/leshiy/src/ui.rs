@@ -2,19 +2,18 @@
 //! Color is emitted only when stderr is a TTY and NO_COLOR is unset; all colored output
 //! goes to stderr so stdout stays byte-for-byte parseable by scripts.
 
+// Temporary: these helpers gain their callers in later CLI-polish tasks; this
+// blanket allow is removed in the final cleanup task once every helper is used.
+#![allow(dead_code)]
+
 use anstyle::{AnsiColor, Style};
 use std::io::IsTerminal;
 
 const S_OK: Style = AnsiColor::Green.on_default().bold();
-#[allow(dead_code)]
 const S_ERR: Style = AnsiColor::Red.on_default().bold();
-#[allow(dead_code)]
 const S_WARN: Style = AnsiColor::Yellow.on_default();
-#[allow(dead_code)]
 const S_ID: Style = AnsiColor::Cyan.on_default().bold();
-#[allow(dead_code)]
 const S_VAL: Style = AnsiColor::Cyan.on_default();
-#[allow(dead_code)]
 const S_LABEL: Style = Style::new().dimmed();
 
 /// True when stderr should carry ANSI color: a terminal, and `NO_COLOR` unset/empty.
@@ -31,31 +30,28 @@ pub fn paint(s: &str, style: Style, color: bool) -> String {
     }
 }
 
-#[allow(dead_code)]
 pub fn id(s: &str) -> String {
     paint(s, S_ID, color_stderr())
 }
-#[allow(dead_code)]
+
 pub fn value(s: &str) -> String {
     paint(s, S_VAL, color_stderr())
 }
-#[allow(dead_code)]
+
 pub fn url(s: &str) -> String {
     paint(s, S_VAL, color_stderr())
 }
-#[allow(dead_code)]
+
 pub fn label(s: &str) -> String {
     paint(s, S_LABEL, color_stderr())
 }
 
 /// A bold section heading.
-#[allow(dead_code)]
 pub fn heading(text: &str) -> String {
     paint(text, Style::new().bold(), color_stderr())
 }
 
 /// A `  <dim label, width 10> <value>` row (for show/created summaries).
-#[allow(dead_code)]
 pub fn field(label_text: &str, value_text: &str) -> String {
     format!(
         "  {} {}",
@@ -64,30 +60,31 @@ pub fn field(label_text: &str, value_text: &str) -> String {
     )
 }
 
-/// Print a line to stderr (decoration channel) through anstream (auto-strips on non-TTY).
+/// Print a line to stderr (decoration channel). Color decision is made upstream by
+/// `color_stderr()` and passed to `paint()`; callers provide plain strings when color
+/// is off, ANSI strings when on. `anstream::eprintln!` is the stderr writer.
 pub fn eline(s: &str) {
     anstream::eprintln!("{s}");
 }
 
-#[allow(dead_code)]
 pub fn ok(msg: &str) {
     eline(&format!(
         "{} {msg}",
         paint("\u{2713}", S_OK, color_stderr())
     ));
 }
-#[allow(dead_code)]
+
 pub fn warn(msg: &str) {
     eline(&format!(
         "{} {msg}",
         paint("warning:", S_WARN, color_stderr())
     ));
 }
-#[allow(dead_code)]
+
 pub fn error(msg: &str) {
     eline(&format!("{} {msg}", paint("error:", S_ERR, color_stderr())));
 }
-#[allow(dead_code)]
+
 pub fn hint(msg: &str) {
     eline(&paint(&format!("  {msg}"), S_LABEL, color_stderr()));
 }
