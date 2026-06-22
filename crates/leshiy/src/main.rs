@@ -6,6 +6,7 @@ mod quickstart;
 mod reality_config;
 mod server;
 mod tun;
+mod ui;
 mod user_cli;
 mod vpn;
 
