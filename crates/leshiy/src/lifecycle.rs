@@ -2,6 +2,7 @@
 //! against a mock; the real host effects live in `RealHostOps`.
 use crate::host::HostOps;
 use crate::reality_config::RealityServerConfig;
+use crate::ui;
 use anyhow::{Context, Result};
 
 /// A renderable snapshot of server state. Pure data → `render_status` is golden-testable.
@@ -17,11 +18,11 @@ pub fn render_status(r: &StatusReport) -> String {
     let onoff = |b: bool| if b { "yes" } else { "no" };
     format!(
         "service active: {}\nlisten:         {}\ndest (cloak):   {}\nquic:           {}\nconnector:      {}",
-        onoff(r.active),
-        r.listen,
-        r.dest,
-        onoff(r.quic),
-        onoff(r.connector),
+        ui::value(onoff(r.active)),
+        &r.listen,
+        &r.dest,
+        ui::value(onoff(r.quic)),
+        ui::value(onoff(r.connector)),
     )
 }
 
@@ -41,9 +42,9 @@ pub fn uninstall(config: &str, purge: bool, host: &dyn HostOps) -> Result<()> {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "/etc/leshiy".into());
         host.remove_path(&dir)?;
-        println!("purged {dir}");
+        ui::ok(&format!("purged {dir}"));
     } else {
-        println!("removed service + binary; kept config (use --purge to remove it)");
+        ui::ok("removed service + binary; kept config (use --purge to remove it)");
     }
     Ok(())
 }
@@ -54,7 +55,7 @@ pub fn upgrade(repo: &str, version: &str, host: &dyn HostOps) -> Result<()> {
     validate_version(version)?;
     host.fetch_verified_binary(repo, version, "/usr/local/bin/leshiy")?;
     host.systemctl(&["restart", "leshiy"])?;
-    println!("upgraded to {version} and restarted");
+    ui::ok(&format!("upgraded to {version} and restarted"));
     Ok(())
 }
 
