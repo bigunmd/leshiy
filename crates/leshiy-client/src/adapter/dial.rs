@@ -33,9 +33,17 @@ impl Transport for RealTransport {
 }
 
 async fn dial_reality(parsed: &RealityUri) -> Result<Box<dyn Tunnel>> {
-    let conn = connect_reality(&parsed.server_addr, parsed.client.clone())
-        .await
-        .map_err(|_| ClientError::ConnectFailed)?;
+    // Bound the connect+handshake so an explicit `Tcp`-pref dial against a server that
+    // accepts the TCP connection but then stalls (a common DPI/blackhole behavior) can't
+    // hang the supervisor forever — it fails, and the backoff schedules a retry. The
+    // `Auto` path already wraps REALITY in this timeout; do the same for the direct path.
+    let conn = tokio::time::timeout(
+        REALITY_CONNECT_TIMEOUT,
+        connect_reality(&parsed.server_addr, parsed.client.clone()),
+    )
+    .await
+    .map_err(|_| ClientError::ConnectFailed)? // elapsed
+    .map_err(|_| ClientError::ConnectFailed)?; // connect/handshake error
     Ok(Box::new(RealityTunnel { conn }))
 }
 
