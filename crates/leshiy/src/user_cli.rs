@@ -237,6 +237,39 @@ fn print_list(users: &[Value]) {
     }
 }
 
+/// Build the stderr "user created" decoration for a freshly issued URI. Pure; the raw URI
+/// is printed to stdout separately. Highlights the per-user `sid` (the ONLY part that differs
+/// between users) and notes that the server key + host are shared across all users.
+fn created_summary(uri: &str) -> Vec<String> {
+    use leshiy_reality::config::RealityUri;
+    let mut out = Vec::new();
+    out.push(String::new());
+    out.push(format!(
+        "{} user created",
+        crate::ui::paint(
+            "\u{2713}",
+            anstyle::AnsiColor::Green.on_default().bold(),
+            crate::ui::color_stderr()
+        )
+    ));
+    if let Ok(p) = RealityUri::parse(uri) {
+        let sid = hex::encode(p.client.short_id);
+        out.push(crate::ui::field(
+            "short_id",
+            &format!("{}   (unique per user)", crate::ui::id(&sid)),
+        ));
+        out.push(crate::ui::field("sni", &p.client.sni));
+        out.push(crate::ui::field("server", &p.server_addr));
+    }
+    out.push(
+        crate::ui::label(
+            "  the server key + host above are SHARED by every user; only short_id is unique",
+        )
+        .to_string(),
+    );
+    out
+}
+
 // ── Main dispatch ──────────────────────────────────────────────────────────────
 
 pub async fn run(cmd: UserCmd) -> Result<()> {
@@ -272,9 +305,15 @@ pub async fn run(cmd: UserCmd) -> Result<()> {
             });
             let resp = call(&sock, req).await?;
             if let Some(uri) = resp["uri"].as_str() {
+                // stdout: the raw URI ONLY (script-consumable). stderr: the human summary.
                 println!("{uri}");
+                for line in created_summary(uri) {
+                    crate::ui::eline(&line);
+                }
                 if qr {
-                    println!("{}", crate::quickstart::qr_for_stdout(uri));
+                    crate::ui::eline(&crate::quickstart::qr_for_stdout(uri));
+                } else {
+                    crate::ui::hint("re-run with --qr for a scannable QR code");
                 }
             }
         }
@@ -386,7 +425,9 @@ pub async fn run(cmd: UserCmd) -> Result<()> {
             if let Some(uri) = resp["uri"].as_str() {
                 println!("{uri}");
                 if qr {
-                    println!("{}", crate::quickstart::qr_for_stdout(uri));
+                    crate::ui::eline(&crate::quickstart::qr_for_stdout(uri));
+                } else {
+                    crate::ui::hint("re-run with --qr for a scannable QR code");
                 }
             }
         }
@@ -429,5 +470,33 @@ mod tests {
         assert_eq!(parse_expires("1717000000", 0).unwrap(), 1_717_000_000);
         // Bad unit.
         assert!(parse_expires("+5w", 0).is_err());
+    }
+
+    #[test]
+    fn created_summary_highlights_short_id_and_sni() {
+        // Use a valid URI: 32-byte key base64url-encoded (no padding), then @host:port?sni=...&sid=hex(8 bytes)
+        // Key=[0x07]*32, encoded base64url without padding = BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+        let uri = "leshiy://BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc@vps.example.com:443?sni=www.microsoft.com&sid=8e9919e1615b6bf1";
+        let lines = super::created_summary(uri);
+        let joined = lines.join("\n");
+        // The unique part must be called out explicitly.
+        assert!(
+            joined.contains("8e9919e1615b6bf1"),
+            "summary must show the short_id: {joined}"
+        );
+        assert!(
+            joined.contains("www.microsoft.com"),
+            "summary must show the sni: {joined}"
+        );
+        // It must NOT contain the full raw URI (that goes to stdout, not the summary).
+        assert!(
+            !joined.contains("leshiy://"),
+            "summary must not embed the raw URI: {joined}"
+        );
+        // It must note that the server key/host are shared, to dispel the 'same as user 1' confusion.
+        assert!(
+            joined.to_lowercase().contains("shared"),
+            "summary must note shared parts: {joined}"
+        );
     }
 }
