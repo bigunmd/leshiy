@@ -96,11 +96,11 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-fn server_hello() -> Hello {
+pub(crate) fn server_hello() -> Hello {
     Hello {
         version: PROTOCOL_MAJOR,
         min_supported: 1,
-        capabilities: leshiy_core::version::CAP_DATAGRAM,
+        capabilities: leshiy_core::version::CAP_DATAGRAM | leshiy_core::version::CAP_KEEPALIVE,
     }
 }
 

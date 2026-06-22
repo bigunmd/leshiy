@@ -76,7 +76,7 @@ fn client_hello_version() -> Hello {
     Hello {
         version: PROTOCOL_MAJOR,
         min_supported: 1,
-        capabilities: leshiy_core::version::CAP_DATAGRAM,
+        capabilities: leshiy_core::version::CAP_DATAGRAM | leshiy_core::version::CAP_KEEPALIVE,
     }
 }
 
@@ -336,6 +336,24 @@ mod tests {
     use crate::config::ClientAuthConfig;
     use leshiy_tls::ja::extract_client_hello_fields;
     use x25519_dalek::{PublicKey, StaticSecret};
+
+    #[test]
+    fn both_ends_advertise_keepalive_so_liveness_is_negotiated() {
+        // The mux only runs its idle-timeout/ping keepalive when BOTH peers advertise
+        // CAP_KEEPALIVE. The client and server hellos must agree, or a blackholed REALITY
+        // tunnel never trips closed() and the supervisor never reconnects.
+        use leshiy_core::version::CAP_KEEPALIVE;
+        assert_ne!(
+            client_hello_version().capabilities & CAP_KEEPALIVE,
+            0,
+            "client must advertise CAP_KEEPALIVE"
+        );
+        assert_ne!(
+            crate::server::server_hello().capabilities & CAP_KEEPALIVE,
+            0,
+            "server must advertise CAP_KEEPALIVE"
+        );
+    }
 
     #[test]
     fn authed_clienthello_opens_server_side() {
