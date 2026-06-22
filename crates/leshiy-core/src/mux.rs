@@ -2,16 +2,43 @@
 use crate::error::{Error, Result};
 use crate::frame::{Frame, FrameType, MAX_FRAME_PAYLOAD, base_type, is_critical};
 use crate::transport::{FrameRead, FrameWrite};
-use crate::version::{Hello, Negotiated, negotiate};
+use crate::version::{CAP_KEEPALIVE, Hello, Negotiated, negotiate};
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
 /// Upper bound on concurrently-open peer-initiated streams. A peer that exceeds
 /// it is aborting the session via resource exhaustion, so we tear the session
 /// down rather than grow the stream map without bound. (L3)
 const MAX_CONCURRENT_PEER_STREAMS: usize = 1024;
+
+/// Keepalive timing for a mux. Only takes effect once both peers advertise
+/// [`CAP_KEEPALIVE`]; otherwise the mux behaves exactly as before (a blocking read
+/// with no idle timeout).
+#[derive(Clone, Copy, Debug)]
+pub struct KeepaliveConfig {
+    /// How often to send a `Ping` on an otherwise-idle tunnel.
+    pub interval: Duration,
+    /// If no frame of any kind arrives within this window, the link is presumed dead
+    /// (silently blackholed — no FIN/RST) and the reader exits so `closed()` fires.
+    /// Must be comfortably larger than `interval` (the peer echoes our pings, so a live
+    /// idle tunnel still sees a frame every `interval`).
+    pub idle_timeout: Duration,
+}
+
+impl Default for KeepaliveConfig {
+    fn default() -> Self {
+        // 15s probe / 45s death = tolerate two lost probes before declaring the link
+        // dead. Short enough that a censored/blackholed tunnel reconnects promptly,
+        // long enough not to thrash on a merely slow path.
+        Self {
+            interval: Duration::from_secs(15),
+            idle_timeout: Duration::from_secs(45),
+        }
+    }
+}
 
 /// Which side of the connection owns this mux.
 /// Clients allocate odd stream ids; servers allocate even ids.
@@ -124,15 +151,37 @@ pub struct Mux {
 }
 
 impl Mux {
+    /// Start the mux with the default keepalive timing ([`KeepaliveConfig::default`]).
+    /// Keepalive only activates if the peer also advertises [`CAP_KEEPALIVE`]; otherwise
+    /// this behaves exactly as a plain mux (blocking read, no idle timeout).
+    pub async fn start<R, W>(reader: R, writer: W, local_hello: Hello, role: Role) -> Result<Mux>
+    where
+        R: FrameRead + Send + 'static,
+        W: FrameWrite + Send + 'static,
+    {
+        Self::start_with_keepalive(
+            reader,
+            writer,
+            local_hello,
+            role,
+            KeepaliveConfig::default(),
+        )
+        .await
+    }
+
     /// Start the mux over a completed session:
     /// 1. Exchange HELLO frames (write own, then read peer's) — deadlock-free on
     ///    full-duplex because both sides write before reading.
     /// 2. Spawn a writer task and a reader task.
-    pub async fn start<R, W>(
+    /// 3. If [`CAP_KEEPALIVE`] is negotiated, run keepalive: the reader bounds each
+    ///    read by `keepalive.idle_timeout` (a silent peer trips `closed()`), answers
+    ///    `Ping` with `Pong`, and a sender task emits a `Ping` every `keepalive.interval`.
+    pub async fn start_with_keepalive<R, W>(
         mut reader: R,
         mut writer: W,
         local_hello: Hello,
         role: Role,
+        keepalive: KeepaliveConfig,
     ) -> Result<Mux>
     where
         R: FrameRead + Send + 'static,
@@ -194,19 +243,49 @@ impl Mux {
             });
         }
 
+        let keepalive_on = negotiated.capabilities & CAP_KEEPALIVE != 0;
+
         // --- reader task: dispatches inbound frames to per-stream senders ---
         {
             let r_streams = streams.clone();
             let r_cmd_tx = cmd_tx.clone();
-            let r_closed = closed_tx;
+            let r_closed = closed_tx.clone();
+            let idle_timeout = keepalive.idle_timeout;
             tokio::spawn(async move {
                 loop {
-                    let f = match reader.read_frame().await {
-                        Ok(f) => f,
-                        Err(_) => break,
+                    // With keepalive negotiated, bound each read by the idle timeout: a
+                    // silently blackholed link (no FIN/RST) delivers no frame, so the read
+                    // never returns — the timeout fires, we exit, and `closed()` flips so
+                    // the supervisor reconnects. Without keepalive, read as before (the peer
+                    // won't echo our pings, so an idle timeout would false-positive).
+                    let read = reader.read_frame();
+                    let f = if keepalive_on {
+                        match tokio::time::timeout(idle_timeout, read).await {
+                            Ok(Ok(f)) => f,
+                            Ok(Err(_)) | Err(_) => break, // I/O error OR idle timeout → dead
+                        }
+                    } else {
+                        match read.await {
+                            Ok(f) => f,
+                            Err(_) => break,
+                        }
                     };
                     let bt = base_type(f.ftype);
-                    if bt == FrameType::Open as u8 {
+                    if bt == FrameType::Ping as u8 {
+                        // Echo a Pong so the peer can confirm our liveness. Best-effort:
+                        // if the writer is gone the session is already dying.
+                        let _ = r_cmd_tx
+                            .send(Command::Write(Frame {
+                                stream_id: 0,
+                                ftype: FrameType::Pong as u8,
+                                payload: Bytes::new(),
+                            }))
+                            .await;
+                        continue;
+                    } else if bt == FrameType::Pong as u8 {
+                        // Receipt already reset the idle timer above; nothing else to do.
+                        continue;
+                    } else if bt == FrameType::Open as u8 {
                         let (data_tx, data_rx) = mpsc::channel::<Bytes>(64);
                         {
                             let mut map = r_streams.lock().unwrap();
@@ -252,6 +331,44 @@ impl Mux {
                     // unknown non-critical frame → silently ignore (continue)
                 }
                 let _ = r_closed.send(true);
+            });
+        }
+
+        // --- keepalive sender task: emit a Ping every `interval` so an idle-but-live
+        //     tunnel keeps producing frames (the peer echoes Pong), and stop as soon as
+        //     the connection is observed closed. Only runs when the cap is negotiated. ---
+        if keepalive_on {
+            let ka_cmd_tx = cmd_tx.clone();
+            let mut ka_closed = closed_rx.clone();
+            let interval = keepalive.interval;
+            tokio::spawn(async move {
+                loop {
+                    if *ka_closed.borrow() {
+                        break; // connection already closed
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(interval) => {
+                            if ka_cmd_tx
+                                .send(Command::Write(Frame {
+                                    stream_id: 0,
+                                    ftype: FrameType::Ping as u8,
+                                    payload: Bytes::new(),
+                                }))
+                                .await
+                                .is_err()
+                            {
+                                break; // writer gone
+                            }
+                        }
+                        // The closed flag flipped (or the sender dropped) → re-check at the
+                        // top of the loop and exit. `changed()` is Send (unlike `wait_for`).
+                        changed = ka_closed.changed() => {
+                            if changed.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
             });
         }
 
@@ -458,6 +575,208 @@ mod tests {
 
         // The state is latched: a freshly-cloned receiver also observes `true`.
         assert!(*mux.closed_receiver().borrow());
+    }
+
+    fn hello_ka() -> Hello {
+        Hello {
+            version: 1,
+            min_supported: 1,
+            capabilities: crate::version::CAP_KEEPALIVE,
+        }
+    }
+
+    /// A reader that yields a fixed script of frames, then blocks forever (never EOF,
+    /// never errors) — models a silently blackholed link (no FIN/RST).
+    struct ScriptedThenSilent {
+        frames: std::collections::VecDeque<Frame>,
+    }
+    impl crate::transport::FrameRead for ScriptedThenSilent {
+        fn read_frame(
+            &mut self,
+        ) -> impl core::future::Future<Output = crate::Result<Frame>> + Send {
+            let next = self.frames.pop_front();
+            async move {
+                match next {
+                    Some(f) => Ok(f),
+                    None => std::future::pending().await,
+                }
+            }
+        }
+    }
+
+    /// A writer that records every frame it's asked to send.
+    #[derive(Clone)]
+    struct RecordingWriter {
+        sent: Arc<Mutex<Vec<Frame>>>,
+    }
+    impl crate::transport::FrameWrite for RecordingWriter {
+        async fn write_frame(&mut self, frame: &Frame) -> crate::Result<()> {
+            self.sent.lock().unwrap().push(frame.clone());
+            Ok(())
+        }
+    }
+
+    fn hello_frame(h: Hello) -> Frame {
+        Frame {
+            stream_id: 0,
+            ftype: FrameType::Hello as u8,
+            payload: Bytes::from(h.encode()),
+        }
+    }
+
+    #[tokio::test]
+    async fn keepalive_trips_closed_on_silent_peer() {
+        // Peer advertises CAP_KEEPALIVE in its HELLO, then goes silent forever. The
+        // idle-read timeout must fire `closed()` so the supervisor can reconnect —
+        // without keepalive the reader would block on read_frame() indefinitely.
+        let reader = ScriptedThenSilent {
+            frames: vec![hello_frame(hello_ka())].into(),
+        };
+        let cfg = KeepaliveConfig {
+            interval: std::time::Duration::from_millis(20),
+            idle_timeout: std::time::Duration::from_millis(80),
+        };
+        let mux = Mux::start_with_keepalive(
+            reader,
+            RecordingWriter {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            },
+            hello_ka(),
+            Role::Client,
+            cfg,
+        )
+        .await
+        .unwrap();
+
+        let mut closed = mux.closed_receiver();
+        tokio::time::timeout(std::time::Duration::from_secs(1), closed.wait_for(|v| *v))
+            .await
+            .expect("idle keepalive timeout must fire closed() on a silent peer")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_keepalive_cap_keeps_silent_peer_open() {
+        // Backward compatibility: if the cap is NOT negotiated (peer HELLO without it),
+        // a silent-but-idle tunnel must NOT trip closed() — no spurious idle timeout.
+        let reader = ScriptedThenSilent {
+            frames: vec![hello_frame(hello())].into(),
+        };
+        let cfg = KeepaliveConfig {
+            interval: std::time::Duration::from_millis(20),
+            idle_timeout: std::time::Duration::from_millis(50),
+        };
+        let mux = Mux::start_with_keepalive(
+            reader,
+            RecordingWriter {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            },
+            hello_ka(), // we advertise it, peer does not → not negotiated
+            Role::Client,
+            cfg,
+        )
+        .await
+        .unwrap();
+
+        let mut closed = mux.closed_receiver();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(300),
+                closed.wait_for(|v| *v)
+            )
+            .await
+            .is_err(),
+            "without the keepalive cap, an idle tunnel must stay open"
+        );
+    }
+
+    #[tokio::test]
+    async fn ping_is_answered_with_pong() {
+        // A received Ping must be echoed as a Pong so the peer can confirm our liveness.
+        let reader = ScriptedThenSilent {
+            frames: vec![
+                hello_frame(hello_ka()),
+                Frame {
+                    stream_id: 0,
+                    ftype: FrameType::Ping as u8,
+                    payload: Bytes::new(),
+                },
+            ]
+            .into(),
+        };
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let cfg = KeepaliveConfig {
+            // Long timers so neither our own ping nor the idle timeout interfere.
+            interval: std::time::Duration::from_secs(30),
+            idle_timeout: std::time::Duration::from_secs(30),
+        };
+        let _mux = Mux::start_with_keepalive(
+            reader,
+            RecordingWriter { sent: sent.clone() },
+            hello_ka(),
+            Role::Client,
+            cfg,
+        )
+        .await
+        .unwrap();
+
+        // Poll until a Pong shows up in the recorded writes.
+        let saw_pong = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if sent
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|f| base_type(f.ftype) == FrameType::Pong as u8)
+                {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(saw_pong, "a received Ping must be answered with a Pong");
+    }
+
+    #[tokio::test]
+    async fn keepalive_emits_periodic_pings() {
+        // With the cap negotiated, the mux must proactively send Ping frames so the
+        // peer keeps seeing traffic on an otherwise idle tunnel.
+        let reader = ScriptedThenSilent {
+            frames: vec![hello_frame(hello_ka())].into(),
+        };
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let cfg = KeepaliveConfig {
+            interval: std::time::Duration::from_millis(20),
+            idle_timeout: std::time::Duration::from_secs(30), // don't let idle kill it first
+        };
+        let _mux = Mux::start_with_keepalive(
+            reader,
+            RecordingWriter { sent: sent.clone() },
+            hello_ka(),
+            Role::Client,
+            cfg,
+        )
+        .await
+        .unwrap();
+
+        let saw_ping = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if sent
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|f| base_type(f.ftype) == FrameType::Ping as u8)
+                {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(saw_ping, "keepalive must emit periodic Ping frames");
     }
 
     #[tokio::test]
