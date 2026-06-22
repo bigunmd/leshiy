@@ -11,3 +11,6 @@ tauri.windows.conf.json
 
 # Bundled helper sidecar (built in CI per target triple)
 /binaries/
+
+# Windows VPN runtime (downloaded + verified in CI, bundled as a Tauri resource)
+wintun.dll

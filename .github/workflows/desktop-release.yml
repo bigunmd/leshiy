@@ -45,6 +45,32 @@ jobs:
           ext=""; [[ "$triple" == *windows* ]] && ext=".exe"
           mkdir -p apps/gui/src-tauri/binaries
           cp "target/release/leshiy-helper$ext" "apps/gui/src-tauri/binaries/leshiy-helper-$triple$ext"
+      - name: Stage Windows VPN runtime (wintun.dll) + base config overlay
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          # The Windows VPN runs a Wintun adapter from the elevated leshiy-helper, which
+          # LoadLibrary()'s wintun.dll from its own directory at runtime. Without the DLL the
+          # adapter never comes up and "VPN does not work". Tauri bundles it next to the app +
+          # helper exes via bundle.resources (this overlay). Download the OFFICIAL, WireGuard-
+          # signed DLL and verify its Authenticode signature before trusting it with kernel
+          # networking — a supply-chain gate that doesn't depend on a hand-pinned zip hash.
+          $ver = '0.14.1'
+          Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-$ver.zip" -OutFile wintun.zip
+          Expand-Archive -Path wintun.zip -DestinationPath wintun-extract -Force
+          $dll = "wintun-extract/wintun/bin/amd64/wintun.dll"
+          $sig = Get-AuthenticodeSignature $dll
+          if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notlike '*WireGuard LLC*') {
+            throw "wintun.dll failed Authenticode verification: status=$($sig.Status) subject=$($sig.SignerCertificate.Subject)"
+          }
+          Copy-Item $dll apps/gui/src-tauri/wintun.dll -Force
+          Remove-Item wintun.zip, wintun-extract -Recurse -Force
+          # Base Windows overlay (auto-merged by `tauri build` on Windows): bundle wintun.dll as
+          # a resource. The signing step below rewrites this file WITH resources + thumbprint
+          # when the cert secrets are set, so keep the resources entry in sync there.
+          $overlay = @{ bundle = @{ resources = @('wintun.dll') } } | ConvertTo-Json -Depth 6
+          Set-Content -Path apps/gui/src-tauri/tauri.windows.conf.json -Value $overlay -Encoding utf8
+          Write-Host "Staged wintun.dll ($ver) and wrote base Windows overlay."
       - name: Import Windows code-signing certificate
         if: matrix.platform == 'windows-latest' && env.WINDOWS_CERTIFICATE != ''
         shell: pwsh
@@ -58,9 +84,14 @@ jobs:
           $pw = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
           $c = Import-PfxCertificate -FilePath cert.pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
           Remove-Item cert.pfx
-          $overlay = @{ bundle = @{ windows = @{ certificateThumbprint = $c.Thumbprint } } } | ConvertTo-Json -Depth 6
+          # Rewrite the overlay WITH the wintun.dll resource (staged above) so signing doesn't
+          # clobber it — both must be present in the single Windows overlay Tauri merges.
+          $overlay = @{ bundle = @{
+            resources = @('wintun.dll')
+            windows = @{ certificateThumbprint = $c.Thumbprint }
+          } } | ConvertTo-Json -Depth 6
           Set-Content -Path apps/gui/src-tauri/tauri.windows.conf.json -Value $overlay -Encoding utf8
-          Write-Host "Wrote signing overlay (thumbprint $($c.Thumbprint))."
+          Write-Host "Wrote signing overlay (thumbprint $($c.Thumbprint)) + wintun resource."
       - id: tauri
         uses: tauri-apps/tauri-action@v0
         env:
