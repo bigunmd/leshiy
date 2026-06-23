@@ -81,7 +81,7 @@ const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 
 fn derive_key(passphrase: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
-    let params = Params::new(19 * 1024, 2, 1, Some(32))
+    let params = Params::new(64 * 1024, 3, 1, Some(32))
         .map_err(|e| Error::Vault(format!("argon2 params: {e}")))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = Zeroizing::new([0u8; 32]);
