@@ -375,6 +375,9 @@ pub enum RemoteCmd {
         /// Borrowed TLS site for REALITY, host:port.
         #[arg(long)]
         dest: String,
+        /// REALITY/TCP external listen port (default 443).
+        #[arg(long, default_value_t = 443)]
+        port: u16,
         /// Enable QUIC on this UDP port.
         #[arg(long)]
         quic: Option<u16>,
