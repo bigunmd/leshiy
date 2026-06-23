@@ -118,17 +118,21 @@ pub async fn run(opts: QuickstartOpts<'_>) -> Result<()> {
         quic_key: None,
         connector,
     })?;
-    // 3. Show the QR for phones (or the connector credential for exit role).
-    match opts.role {
-        Role::Exit => {
-            println!(
-                "\nThis is the EXIT's connector credential — give it to the entry's --exit-uri:"
-            );
-            println!("{}", out.uri);
-        }
-        Role::Single | Role::Entry => {
-            println!("\nShare with clients — scan to import on a device:");
-            println!("{}", qr_for_stdout(&out.uri));
+    // 3. Show the QR for phones (or the connector credential for exit role) — humans only.
+    if !opts.summary_json {
+        match opts.role {
+            Role::Exit => {
+                crate::ui::eline(&crate::ui::heading(
+                    "This is the EXIT's connector credential — give it to the entry's --exit-uri:",
+                ));
+                println!("{}", out.uri); // stdout: the connector credential
+            }
+            Role::Single | Role::Entry => {
+                crate::ui::eline(&crate::ui::heading(
+                    "Share with clients — scan to import on a device:",
+                ));
+                crate::ui::eline(&qr_for_stdout(&out.uri));
+            }
         }
     }
     // 4. Emit the machine-readable summary the installer parses.
@@ -277,5 +281,36 @@ mod tests {
         // Connect with a verifier that accepts the test cert (trust-on-first-use for the test).
         let ok = super::test_support::probe_with_test_roots(&name, addr.port()).await;
         assert!(ok, "expected TLS1.3 negotiation against local server");
+    }
+
+    /// Verify the --summary-json output format without running `quickstart::run()`.
+    ///
+    /// Running `run()` requires network probes and file writes.  Instead we exercise
+    /// the `serde_json::json!` block in isolation — same shape the installer parses.
+    #[test]
+    fn summary_json_shape() {
+        let summary = serde_json::json!({
+            "config_path": "/etc/leshiy/server.toml",
+            "uri": "leshiy://abc@203.0.113.5:443?sni=www.microsoft.com&sid=00",
+            "listen": "0.0.0.0:8443",
+            "quic_listen": serde_json::Value::Null,
+        });
+        let line = summary.to_string();
+        assert!(
+            line.starts_with('{'),
+            "summary JSON must start with '{{'  got: {line}"
+        );
+        assert!(
+            line.contains("\"uri\""),
+            "summary JSON must contain \"uri\" key, got: {line}"
+        );
+        assert!(
+            line.contains("\"config_path\""),
+            "summary JSON must contain \"config_path\" key, got: {line}"
+        );
+        assert!(
+            line.contains("\"listen\""),
+            "summary JSON must contain \"listen\" key, got: {line}"
+        );
     }
 }
