@@ -50,6 +50,16 @@ pub fn exec_user_add_cmd(container: &str, extra_args: &str) -> String {
     )
 }
 
+pub fn exec_user_list_json_cmd(container: &str) -> String {
+    format!("sudo docker exec {container} leshiy user list --json --config /etc/leshiy/server.toml")
+}
+
+pub fn exec_user_rm_cmd(container: &str, short_id: &str) -> String {
+    format!(
+        "sudo docker exec {container} leshiy user rm {short_id} --config /etc/leshiy/server.toml"
+    )
+}
+
 pub fn parse_ps_names(stdout: &str) -> Vec<String> {
     stdout
         .lines()
@@ -96,6 +106,18 @@ mod tests {
         assert_eq!(
             c,
             "sudo docker exec leshiy leshiy user add --config /etc/leshiy/server.toml --label self"
+        );
+    }
+
+    #[test]
+    fn user_list_json_and_rm_shapes() {
+        assert_eq!(
+            exec_user_list_json_cmd("leshiy"),
+            "sudo docker exec leshiy leshiy user list --json --config /etc/leshiy/server.toml"
+        );
+        assert_eq!(
+            exec_user_rm_cmd("leshiy", "0102030400000000"),
+            "sudo docker exec leshiy leshiy user rm 0102030400000000 --config /etc/leshiy/server.toml"
         );
     }
 }

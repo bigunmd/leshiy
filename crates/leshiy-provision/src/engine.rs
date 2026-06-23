@@ -213,6 +213,51 @@ pub async fn add_user<T: Transport>(
     Ok(cc)
 }
 
+/// A user as reported by the server's `leshiy user list --json`.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct RemoteUser {
+    pub short_id: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub expires_at: Option<u64>,
+    #[serde(default)]
+    pub data_cap: Option<u64>,
+    #[serde(default)]
+    pub used_up: u64,
+    #[serde(default)]
+    pub used_down: u64,
+}
+
+/// List the users currently registered on the server.
+pub async fn list_users<T: Transport>(t: &mut T, rec: &ServerRecord) -> Result<Vec<RemoteUser>> {
+    let out = t
+        .run(&docker::exec_user_list_json_cmd(&rec.container))
+        .await?
+        .ok()?;
+    // The JSON is the last non-empty line of stdout (guards against any banner noise).
+    let line = out
+        .stdout
+        .lines()
+        .map(str::trim)
+        .rfind(|l| l.starts_with('['))
+        .ok_or_else(|| Error::Parse("no user list json".into()))?;
+    serde_json::from_str(line).map_err(|e| Error::Parse(format!("user list json: {e}")))
+}
+
+/// Delete a user on the server and drop it from the local record.
+pub async fn delete_user<T: Transport>(
+    t: &mut T,
+    rec: &mut ServerRecord,
+    short_id: &str,
+) -> Result<()> {
+    t.run(&docker::exec_user_rm_cmd(&rec.container, short_id))
+        .await?
+        .ok()?;
+    rec.clients.retain(|c| c.short_id != short_id);
+    Ok(())
+}
+
 /// Whether the server container is currently running.
 pub async fn status<T: Transport>(t: &mut T, rec: &ServerRecord) -> Result<bool> {
     let names = docker::parse_ps_names(&t.run(docker::ps_names_cmd()).await?.stdout);
@@ -523,6 +568,89 @@ mod tests {
         };
         teardown(&mut t, &rec, false).await.unwrap();
         assert!(t.calls().iter().any(|c| c.contains("docker rm -f leshiy")));
+    }
+
+    fn rec_with_one_client() -> ServerRecord {
+        ServerRecord {
+            id: "s".into(),
+            label: "v".into(),
+            host: "h".into(),
+            port: 22,
+            ssh_user: "root".into(),
+            ssh_secret: SshSecret::None,
+            host_key_fp: "fp".into(),
+            public_host: "h:443".into(),
+            image_ref: "img".into(),
+            container: "leshiy".into(),
+            reality_public_b64: "x".into(),
+            quic: None,
+            clients: vec![ClientConfig {
+                short_id: "0102030400000000".into(),
+                label: "self".into(),
+                uri: "leshiy://x@h:443?sid=0102030400000000".into(),
+            }],
+            created_at: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn list_users_parses_server_json() {
+        let mut t = FakeTransport::new();
+        t.on("user list --json", CommandOutput {
+            code: 0,
+            stdout: r#"[{"short_id":"0102030400000000","enabled":true,"used_up":10,"used_down":20},{"short_id":"aabbccdd00000000","enabled":false}]"#.into(),
+            stderr: String::new(),
+        });
+        let rec = rec_with_one_client();
+        let users = list_users(&mut t, &rec).await.unwrap();
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[0].short_id, "0102030400000000");
+        assert!(users[0].enabled);
+        assert_eq!(users[0].used_up, 10);
+        assert!(!users[1].enabled);
+    }
+
+    #[tokio::test]
+    async fn delete_user_runs_rm_and_drops_client() {
+        let mut t = FakeTransport::new();
+        t.on(
+            "user rm",
+            CommandOutput {
+                code: 0,
+                stdout: "removed".into(),
+                stderr: String::new(),
+            },
+        );
+        let mut rec = rec_with_one_client();
+        delete_user(&mut t, &mut rec, "0102030400000000")
+            .await
+            .unwrap();
+        assert!(
+            t.calls()
+                .iter()
+                .any(|c| c.contains("user rm 0102030400000000"))
+        );
+        assert!(rec.clients.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_user_propagates_rm_error() {
+        let mut t = FakeTransport::new();
+        t.on(
+            "user rm",
+            CommandOutput {
+                code: 1,
+                stdout: String::new(),
+                stderr: "no such".into(),
+            },
+        );
+        let mut rec = rec_with_one_client();
+        let err = delete_user(&mut t, &mut rec, "0102030400000000")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::error::Error::Command { .. }));
+        // client NOT dropped on failure
+        assert_eq!(rec.clients.len(), 1);
     }
 
     #[tokio::test]
