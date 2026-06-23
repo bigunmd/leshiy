@@ -134,8 +134,8 @@ impl Transport for RusshTransport {
                 russh::ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
                 russh::ChannelMsg::ExtendedData { data, .. } => stderr.extend_from_slice(&data),
                 russh::ChannelMsg::ExitStatus { exit_status } => code = exit_status as i32,
-                russh::ChannelMsg::Eof | russh::ChannelMsg::Close => break,
-                _ => {}
+                russh::ChannelMsg::Close => break,
+                _ => {} // Eof and others: keep reading so a post-Eof ExitStatus is seen
             }
         }
 

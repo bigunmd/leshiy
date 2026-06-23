@@ -93,6 +93,15 @@ pub fn parse_quic_fields(uri: &str) -> Option<crate::vault::QuicInfo> {
     })
 }
 
+/// Whether an image reference is composed only of characters safe to place in a
+/// shell command (registry/repo/tag/digest). Rejects shell metacharacters.
+pub fn valid_image_ref(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/' | b':' | b'@')
+        })
+}
+
 /// Provision `target` into a running leshiy server and return its record.
 pub async fn provision<T: Transport>(
     t: &mut T,
@@ -113,6 +122,13 @@ async fn provision_inner<T: Transport>(
     on_event: &mut dyn FnMut(ProgressEvent),
     current: &mut Step,
 ) -> Result<ServerRecord> {
+    if !valid_image_ref(&p.image_ref) {
+        return Err(Error::Parse(format!(
+            "invalid image ref: {:?}",
+            p.image_ref
+        )));
+    }
+
     // 1. Connect + TOFU pin.
     *current = Step::Connect;
     on_event(ev(Step::Connect, Status::Started, &p.target.host));
@@ -780,6 +796,25 @@ mod tests {
         // nothing executed, client retained
         assert!(t.calls().is_empty());
         assert_eq!(rec.clients.len(), 1);
+    }
+
+    #[test]
+    fn valid_image_ref_accepts_registry_refs_rejects_injection() {
+        assert!(valid_image_ref("ghcr.io/leshiy/leshiy:1.4.0"));
+        assert!(valid_image_ref("localhost:5000/leshiy@sha256:abc"));
+        assert!(!valid_image_ref("img; rm -rf /"));
+        assert!(!valid_image_ref("img$(whoami)"));
+        assert!(!valid_image_ref(""));
+    }
+
+    #[tokio::test]
+    async fn provision_rejects_bad_image_ref() {
+        let mut t = FakeTransport::new();
+        let mut p = params();
+        p.image_ref = "img; rm -rf /".into();
+        let err = provision(&mut t, &p, &mut |_| {}).await.unwrap_err();
+        assert!(matches!(err, crate::error::Error::Parse(_)));
+        assert!(t.calls().is_empty());
     }
 
     #[tokio::test]
