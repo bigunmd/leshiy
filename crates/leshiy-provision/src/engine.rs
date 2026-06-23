@@ -32,6 +32,30 @@ pub struct ProgressEvent {
     pub detail: String,
 }
 
+/// The connector role a provisioned node plays in an Entry▶…▶Exit chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProvisionRole {
+    Single,
+    Exit,
+    Middle,
+    Entry,
+}
+
+impl ProvisionRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProvisionRole::Single => "single",
+            ProvisionRole::Exit => "exit",
+            ProvisionRole::Middle => "middle",
+            ProvisionRole::Entry => "entry",
+        }
+    }
+    /// Exit and middle nodes expose their issued URI as a connector credential.
+    fn exposes_connector(self) -> bool {
+        matches!(self, ProvisionRole::Exit | ProvisionRole::Middle)
+    }
+}
+
 pub struct ProvisionParams {
     pub id: String,
     pub label: String,
@@ -45,6 +69,9 @@ pub struct ProvisionParams {
     pub listen_port: u16,
     pub user_label: String,
     pub now: u64,
+    pub role: ProvisionRole,
+    pub connector: Option<String>,
+    pub downstream: Option<String>,
 }
 
 fn ev(step: Step, status: Status, detail: impl Into<String>) -> ProgressEvent {
@@ -189,6 +216,9 @@ async fn provision_inner<T: Transport>(
         if let Some(q) = p.quic_port {
             envs.push(("LESHIY_QUIC_LISTEN".to_string(), format!("0.0.0.0:{q}")));
         }
+        if let Some(conn) = &p.connector {
+            envs.push(("LESHIY_CONNECTOR".to_string(), conn.clone()));
+        }
         t.run(&docker::run_cmd(
             &p.container,
             &p.image_ref,
@@ -217,6 +247,11 @@ async fn provision_inner<T: Transport>(
 
     // 8. Build the record.
     *current = Step::Persist;
+    let connector_uri = if p.role.exposes_connector() {
+        Some(uri.clone())
+    } else {
+        None
+    };
     let rec = ServerRecord {
         id: p.id.clone(),
         label: p.label.clone(),
@@ -236,6 +271,9 @@ async fn provision_inner<T: Transport>(
             uri,
         }],
         created_at: p.now,
+        role: p.role.as_str().to_string(),
+        connector_uri,
+        downstream: p.downstream.clone(),
     };
     on_event(ev(Step::Persist, Status::Done, &rec.id));
     Ok(rec)
@@ -367,6 +405,9 @@ mod tests {
             listen_port: 443,
             user_label: "self".into(),
             now: 1_700_000_000,
+            role: ProvisionRole::Single,
+            connector: None,
+            downstream: None,
         }
     }
 
@@ -630,6 +671,9 @@ mod tests {
             quic: None,
             clients: vec![],
             created_at: 0,
+            role: "single".into(),
+            connector_uri: None,
+            downstream: None,
         };
         let cc = add_user(&mut t, &mut rec, "phone", "").await.unwrap();
         assert_eq!(cc.label, "phone");
@@ -665,6 +709,9 @@ mod tests {
             quic: None,
             clients: vec![],
             created_at: 0,
+            role: "single".into(),
+            connector_uri: None,
+            downstream: None,
         };
         assert!(status(&mut t, &rec).await.unwrap());
     }
@@ -687,6 +734,9 @@ mod tests {
             quic: None,
             clients: vec![],
             created_at: 0,
+            role: "single".into(),
+            connector_uri: None,
+            downstream: None,
         };
         teardown(&mut t, &rec, false).await.unwrap();
         assert!(t.calls().iter().any(|c| c.contains("docker rm -f leshiy")));
@@ -712,6 +762,9 @@ mod tests {
                 uri: "leshiy://x@h:443?sid=0102030400000000".into(),
             }],
             created_at: 0,
+            role: "single".into(),
+            connector_uri: None,
+            downstream: None,
         }
     }
 
@@ -836,6 +889,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provision_exit_stores_connector_uri() {
+        let mut t = FakeTransport::new();
+        let uri = "leshiy://QUJD@1.2.3.4:443?sni=d&sid=0102030400000000&quic=1.2.3.4:443&qsni=cdn&qcert=ab";
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 0,
+                stdout: format!("{uri}\n"),
+                stderr: String::new(),
+            },
+        );
+        let mut p = params();
+        p.role = ProvisionRole::Exit;
+        p.quic_port = Some(443);
+        let rec = provision(&mut t, &p, &mut |_| {}).await.unwrap();
+        assert_eq!(rec.role, "exit");
+        assert_eq!(rec.connector_uri.as_deref(), Some(uri));
+    }
+
+    #[tokio::test]
+    async fn provision_entry_sends_connector_env_and_no_connector_uri() {
+        let mut t = FakeTransport::new();
+        let uri = "leshiy://QUJD@1.2.3.4:443?sni=d&sid=0102030400000000";
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 0,
+                stdout: format!("{uri}\n"),
+                stderr: String::new(),
+            },
+        );
+        let mut p = params();
+        p.role = ProvisionRole::Entry;
+        p.connector = Some("leshiy://EXIT@a:443?sni=d&sid=02&quic=a:443&qsni=cdn&qcert=ab".into());
+        p.downstream = Some("exit-1".into());
+        let rec = provision(&mut t, &p, &mut |_| {}).await.unwrap();
+        assert_eq!(rec.role, "entry");
+        assert_eq!(rec.downstream.as_deref(), Some("exit-1"));
+        assert!(rec.connector_uri.is_none()); // entry exposes no upstream credential
+        assert!(t.calls().iter().any(|c| c.contains("LESHIY_CONNECTOR=")));
+    }
+
+    #[tokio::test]
     async fn teardown_with_purge_removes_config_dir() {
         let mut t = FakeTransport::new();
         let rec = ServerRecord {
@@ -853,6 +965,9 @@ mod tests {
             quic: None,
             clients: vec![],
             created_at: 0,
+            role: "single".into(),
+            connector_uri: None,
+            downstream: None,
         };
         teardown(&mut t, &rec, true).await.unwrap();
         assert!(t.calls().iter().any(|c| c.contains("docker rm -f leshiy")));

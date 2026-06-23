@@ -1,7 +1,9 @@
 //! `leshiy remote` — drive leshiy-provision from the CLI.
 
 use anyhow::{Context, Result};
-use leshiy_provision::engine::{self, ProgressEvent, ProvisionParams, RemoteUser, Status, Step};
+use leshiy_provision::engine::{
+    self, ProgressEvent, ProvisionParams, ProvisionRole, RemoteUser, Status, Step,
+};
 use leshiy_provision::ssh::{RusshTransport, SshTarget, Transport};
 use leshiy_provision::vault::{ClientConfig, ServerRecord, SshSecret, Vault};
 use std::path::PathBuf;
@@ -184,6 +186,9 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                 listen_port,
                 user_label,
                 now,
+                role: ProvisionRole::Single,
+                connector: None,
+                downstream: None,
             };
 
             let mut transport = RusshTransport::new();
@@ -418,6 +423,9 @@ mod tests {
                 uri: "leshiy://x@h:443?sid=01".into(),
             }],
             created_at: 0,
+            role: "single".into(),
+            connector_uri: None,
+            downstream: None,
         });
         let blob = v.export_one("s1", false, "share").unwrap();
         let recs = leshiy_provision::vault::open(&blob, "share").unwrap();

@@ -65,6 +65,12 @@ pub struct ServerRecord {
     pub quic: Option<QuicInfo>,
     pub clients: Vec<ClientConfig>,
     pub created_at: u64,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub connector_uri: Option<String>,
+    #[serde(default)]
+    pub downstream: Option<String>,
 }
 
 impl ServerRecord {
@@ -256,6 +262,9 @@ mod tests {
                 uri: "leshiy://PUBKEY@203.0.113.5:443?sni=x&sid=0102030400000000".into(),
             }],
             created_at: 1_700_000_000,
+            role: "single".into(),
+            connector_uri: None,
+            downstream: None,
         }
     }
 
