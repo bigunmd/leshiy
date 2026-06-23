@@ -22,10 +22,15 @@ impl russh::client::Handler for Handler {
         &mut self,
         server_public_key: &russh::keys::key::PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
-        // `PublicKey::fingerprint()` returns the BASE64_NOPAD SHA-256 of the
-        // wire-format public key — identical to what `ssh-keygen -l -E sha256`
-        // prints, minus the "SHA256:" prefix.
-        let fp = format!("SHA256:{}", server_public_key.fingerprint());
+        // Compute the fingerprint through the unit-tested helper so the tested
+        // seam is the live production path.  `PublicKeyBase64::public_key_bytes`
+        // returns the SSH wire-format encoding that OpenSSH hashes for its
+        // "SHA256:…" fingerprint.
+        use russh::keys::PublicKeyBase64;
+        use sha2::{Digest, Sha256};
+        let key_bytes = server_public_key.public_key_bytes();
+        let digest: [u8; 32] = Sha256::digest(&key_bytes).into();
+        let fp = crate::ssh::format_fp_sha256(&digest);
         *self.captured_fp.lock().unwrap() = Some(fp);
         Ok(true) // TOFU: accept every key; the engine compares against the pinned value
     }
@@ -77,6 +82,8 @@ impl Transport for RusshTransport {
                     pem.as_str(),
                     passphrase.as_deref().map(|p| p.as_str()),
                 )
+                // Safety note: russh-keys 0.45 errors do not embed credential
+                // bytes, so surfacing e.to_string() is safe.  Re-verify on upgrade.
                 .map_err(|e| Error::Ssh(e.to_string()))?;
                 handle
                     .authenticate_publickey(target.user.as_str(), Arc::new(key))
@@ -143,8 +150,11 @@ impl Transport for RusshTransport {
         // Write via a base64 pipe to avoid an SFTP subsystem dependency.
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        // POSIX-safe single-quote escaping: end the quoted string, emit a
+        // backslash-quoted apostrophe, then reopen the quoted string.
+        let safe_path = remote_path.replace('\'', "'\\''");
         let cmd = format!(
-            "umask 077; printf %s '{b64}' | base64 -d > '{remote_path}' && chmod {mode:o} '{remote_path}'"
+            "umask 077; printf %s '{b64}' | base64 -d > '{safe_path}' && chmod {mode:o} '{safe_path}'"
         );
         self.run(&cmd).await?.ok().map(|_| ())
     }
