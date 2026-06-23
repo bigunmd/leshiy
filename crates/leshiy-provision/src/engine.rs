@@ -197,12 +197,10 @@ pub async fn add_user<T: Transport>(
     label: &str,
     extra_args: &str,
 ) -> Result<ClientConfig> {
-    let args = if extra_args.is_empty() {
-        format!("--label {label}")
-    } else {
-        format!("--label {label} {extra_args}")
-    };
-    let cmd = docker::exec_user_add_cmd(&rec.container, &args);
+    // NOTE: --label is a LOCAL annotation only; it is NOT passed to the remote
+    // `leshiy user add` command because that subcommand has no --label flag.
+    let args = extra_args.trim();
+    let cmd = docker::exec_user_add_cmd(&rec.container, args);
     let stdout = t.run(&cmd).await?.ok()?.stdout;
     let uri = stdout.trim().lines().next().unwrap_or("").to_string();
     let (short_id, _pub) = parse_uri_fields(&uri)?;
@@ -237,8 +235,12 @@ pub async fn teardown<T: Transport>(t: &mut T, rec: &ServerRecord, purge: bool) 
 }
 
 /// Run `docker exec ... user add` and return captured stdout.
-async fn exec_user_add<T: Transport>(t: &mut T, container: &str, label: &str) -> Result<String> {
-    let cmd = docker::exec_user_add_cmd(container, &format!("--label {label}"));
+///
+/// The `_label` parameter is intentionally unused here: it is stored locally in
+/// `ClientConfig.label` by the caller. The remote `leshiy user add` subcommand
+/// has no `--label` flag, so we must not pass it on the wire.
+async fn exec_user_add<T: Transport>(t: &mut T, container: &str, _label: &str) -> Result<String> {
+    let cmd = docker::exec_user_add_cmd(container, "");
     Ok(t.run(&cmd).await?.ok()?.stdout)
 }
 
@@ -313,6 +315,9 @@ mod tests {
         assert_eq!(rec.reality_public_b64, "QUJD");
         assert!(events.contains(&Step::PullImage));
         assert!(events.contains(&Step::Persist));
+        // --label must never be sent to the remote command (the server binary
+        // has no such flag; label is a local-only annotation).
+        assert!(!t.calls().iter().any(|c| c.contains("--label")));
     }
 
     #[tokio::test]
@@ -463,6 +468,8 @@ mod tests {
         assert_eq!(cc.label, "phone");
         assert_eq!(cc.short_id, "0102030400000000");
         assert_eq!(rec.clients.len(), 1);
+        // label is stored locally but must NOT be forwarded to the remote command.
+        assert!(!t.calls().iter().any(|c| c.contains("--label")));
     }
 
     #[tokio::test]
