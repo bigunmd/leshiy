@@ -14,22 +14,22 @@ struct Handler {
     captured_fp: Arc<Mutex<Option<String>>>,
 }
 
-#[async_trait]
+// russh 0.61's `Handler` uses native async-trait methods, so this impl must NOT
+// carry `#[async_trait]` (unlike our own `Transport` trait below, which does).
 impl russh::client::Handler for Handler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &russh::keys::key::PublicKey,
+        server_public_key: &russh::keys::PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
-        // Compute the fingerprint through the unit-tested helper so the tested
-        // seam is the live production path.  `PublicKeyBase64::public_key_bytes`
-        // returns the SSH wire-format encoding that OpenSSH hashes for its
-        // "SHA256:…" fingerprint.
-        use russh::keys::PublicKeyBase64;
-        use sha2::{Digest, Sha256};
-        let key_bytes = server_public_key.public_key_bytes();
-        let digest: [u8; 32] = Sha256::digest(&key_bytes).into();
+        // Compute the OpenSSH SHA-256 fingerprint through the unit-tested helper
+        // so the tested seam is the live production path. `Fingerprint::sha256`
+        // yields the raw 32-byte digest OpenSSH renders as "SHA256:…".
+        let digest = server_public_key
+            .fingerprint(russh::keys::HashAlg::Sha256)
+            .sha256()
+            .unwrap_or([0u8; 32]);
         let fp = crate::ssh::format_fp_sha256(&digest);
         *self.captured_fp.lock().unwrap() = Some(fp);
         Ok(true) // TOFU: accept every key; the engine compares against the pinned value
@@ -82,18 +82,22 @@ impl Transport for RusshTransport {
                     pem.as_str(),
                     passphrase.as_deref().map(|p| p.as_str()),
                 )
-                // Safety note: russh-keys 0.45 errors do not embed credential
-                // bytes, so surfacing e.to_string() is safe.  Re-verify on upgrade.
+                // Safety note: russh-keys errors do not embed credential bytes,
+                // so surfacing e.to_string() is safe. Re-verify on upgrade.
                 .map_err(|e| Error::Ssh(e.to_string()))?;
+                // russh 0.61: publickey auth takes a `PrivateKeyWithHashAlg`
+                // (None → SHA-1 for RSA, ignored for other key types).
+                let key = russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key), None);
                 handle
-                    .authenticate_publickey(target.user.as_str(), Arc::new(key))
+                    .authenticate_publickey(target.user.as_str(), key)
                     .await
                     .map_err(|e| Error::Ssh(e.to_string()))?
             }
             SshSecret::None => return Err(Error::Ssh("no credential".into())),
         };
 
-        if !authed {
+        // russh 0.61 returns an `AuthResult` rather than a bool.
+        if !authed.success() {
             return Err(Error::Ssh("authentication failed".into()));
         }
 
