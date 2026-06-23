@@ -2,8 +2,8 @@
 
 use anyhow::{Context, Result};
 use leshiy_provision::engine::{self, ProgressEvent, ProvisionParams, Status, Step};
-use leshiy_provision::ssh::{RusshTransport, SshTarget};
-use leshiy_provision::vault::{SshSecret, Vault};
+use leshiy_provision::ssh::{RusshTransport, SshTarget, Transport};
+use leshiy_provision::vault::{ServerRecord, SshSecret, Vault};
 use std::path::PathBuf;
 use zeroize::Zeroizing;
 
@@ -66,6 +66,32 @@ fn render_client(uri: &str) {
     crate::ui::eline(&crate::ui::field("config", &crate::ui::url(uri)));
 }
 
+/// Connect and verify the returned host-key fingerprint against the pinned value
+/// stored in `rec.host_key_fp`. Returns an error if the fingerprint does not match
+/// (possible MITM) or if the connection itself fails.
+async fn connect_pinned(rec: &ServerRecord) -> Result<RusshTransport> {
+    let mut transport = RusshTransport::new();
+    let fp = transport
+        .connect(
+            &SshTarget {
+                host: rec.host.clone(),
+                port: rec.port,
+                user: rec.ssh_user.clone(),
+            },
+            &rec.ssh_secret,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    anyhow::ensure!(
+        fp == rec.host_key_fp,
+        "host key mismatch for {}: pinned {}, got {} — refusing to continue (possible MITM)",
+        rec.host,
+        rec.host_key_fp,
+        fp
+    );
+    Ok(transport)
+}
+
 pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
     use crate::cli::RemoteCmd;
     match cmd {
@@ -101,6 +127,7 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
             } else if password_stdin {
                 let mut line = String::new();
                 std::io::Read::read_to_string(&mut std::io::stdin(), &mut line)?;
+                let line = Zeroizing::new(line);
                 SshSecret::Password(Zeroizing::new(line.trim_end().to_string()))
             } else {
                 SshSecret::Password(Zeroizing::new(rpassword::prompt_password(
@@ -159,7 +186,104 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
             }
             Ok(())
         }
-        _ => anyhow::bail!("not yet implemented"),
+        RemoteCmd::User { cmd } => {
+            use crate::cli::RemoteUserCmd;
+            let pass = prompt_passphrase(false)?;
+            let mut vault =
+                Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+            match cmd {
+                RemoteUserCmd::Add { server, label } => {
+                    let mut rec = vault
+                        .get(&server)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("no server {server}"))?;
+                    let mut transport = connect_pinned(&rec).await?;
+                    let cc = engine::add_user(&mut transport, &mut rec, &label, "")
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    vault.upsert(rec);
+                    vault
+                        .save(&vault_path(), &pass)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    render_client(&cc.uri);
+                    Ok(())
+                }
+                RemoteUserCmd::Ls { server } => {
+                    let rec = vault
+                        .get(&server)
+                        .ok_or_else(|| anyhow::anyhow!("no server {server}"))?;
+                    for c in &rec.clients {
+                        crate::ui::eline(&crate::ui::field(&c.label, &crate::ui::id(&c.short_id)));
+                        println!("{}", c.uri);
+                    }
+                    Ok(())
+                }
+            }
+        }
+        RemoteCmd::Status { server } => {
+            let pass = prompt_passphrase(false)?;
+            let vault = Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let rec = vault
+                .get(&server)
+                .ok_or_else(|| anyhow::anyhow!("no server {server}"))?;
+            let mut transport = connect_pinned(rec).await?;
+            let up = engine::status(&mut transport, rec)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            crate::ui::eline(&crate::ui::field("running", &up.to_string()));
+            Ok(())
+        }
+        RemoteCmd::Backup {
+            server,
+            connection_only,
+            out,
+        } => {
+            let pass = prompt_passphrase(false)?;
+            let vault = Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let share = prompt_passphrase(true)?;
+            let blob = vault
+                .export_one(&server, connection_only, &share)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            std::fs::write(&out, &blob).with_context(|| format!("write {out}"))?;
+            crate::ui::ok(&format!("backup written to {out}"));
+            Ok(())
+        }
+        RemoteCmd::Restore { file } => {
+            let blob = std::fs::read(&file).with_context(|| format!("read {file}"))?;
+            let share = rpassword::prompt_password("Backup passphrase: ")?;
+            let recs =
+                leshiy_provision::vault::open(&blob, &share).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let pass = prompt_passphrase(false)?;
+            let mut vault =
+                Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+            for r in recs {
+                crate::ui::ok(&format!("restored {}", r.id));
+                vault.upsert(r);
+            }
+            vault
+                .save(&vault_path(), &pass)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(())
+        }
+        RemoteCmd::Teardown { server, purge } => {
+            let pass = prompt_passphrase(false)?;
+            let mut vault =
+                Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let rec = vault
+                .get(&server)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no server {server}"))?;
+            let mut transport = connect_pinned(&rec).await?;
+            engine::teardown(&mut transport, &rec, purge)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            vault.remove(&server);
+            vault
+                .save(&vault_path(), &pass)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            crate::ui::ok(&format!("server {server} torn down"));
+            Ok(())
+        }
     }
 }
 
@@ -184,5 +308,35 @@ mod tests {
             ("root".into(), "1.2.3.4".into(), 2222)
         );
         assert!(parse_ssh_host("no-at-sign").is_err());
+    }
+
+    #[test]
+    fn backup_then_restore_round_trips_via_vault() {
+        // Pure vault round-trip exercising the export/import the CLI arms use.
+        use leshiy_provision::vault::{ClientConfig, ServerRecord, SshSecret, Vault};
+        let mut v = Vault::new();
+        v.upsert(ServerRecord {
+            id: "s1".into(),
+            label: "v".into(),
+            host: "h".into(),
+            port: 22,
+            ssh_user: "root".into(),
+            ssh_secret: SshSecret::Password("p".to_string().into()),
+            host_key_fp: "fp".into(),
+            public_host: "h:443".into(),
+            image_ref: "img".into(),
+            container: "leshiy".into(),
+            reality_public_b64: "x".into(),
+            quic: None,
+            clients: vec![ClientConfig {
+                short_id: "01".into(),
+                label: "self".into(),
+                uri: "leshiy://x@h:443?sid=01".into(),
+            }],
+            created_at: 0,
+        });
+        let blob = v.export_one("s1", false, "share").unwrap();
+        let recs = leshiy_provision::vault::open(&blob, "share").unwrap();
+        assert_eq!(recs[0].id, "s1");
     }
 }
