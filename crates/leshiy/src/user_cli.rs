@@ -260,6 +260,11 @@ fn print_list(users: &[Value]) {
     }
 }
 
+/// Serialize the control-socket `users` array to a single compact JSON line.
+fn users_json_line(users: &[Value]) -> Result<String> {
+    Ok(serde_json::to_string(users)?)
+}
+
 /// Build the stderr "user created" decoration for a freshly issued URI. Pure; the raw URI
 /// is printed to stdout separately. Highlights the per-user `sid` (the ONLY part that differs
 /// between users) and notes that the server key + host are shared across all users.
@@ -341,12 +346,20 @@ pub async fn run(cmd: UserCmd) -> Result<()> {
             }
         }
 
-        UserCmd::List { config, socket } => {
+        UserCmd::List {
+            config,
+            socket,
+            json,
+        } => {
             let sock = resolve_socket(&config, socket.as_deref());
             let resp = call(&sock, json!({"cmd": "list"})).await?;
             let empty = vec![];
             let users = resp["users"].as_array().unwrap_or(&empty);
-            print_list(users);
+            if json {
+                println!("{}", users_json_line(users)?);
+            } else {
+                print_list(users);
+            }
         }
 
         UserCmd::Show {
@@ -493,6 +506,22 @@ mod tests {
         assert_eq!(parse_expires("1717000000", 0).unwrap(), 1_717_000_000);
         // Bad unit.
         assert!(parse_expires("+5w", 0).is_err());
+    }
+
+    #[test]
+    fn users_json_line_is_compact_array() {
+        let users = vec![
+            json!({"short_id":"0102030400000000","enabled":true,"used_up":10,"used_down":20}),
+            json!({"short_id":"aabbccdd00000000","enabled":false}),
+        ];
+        let line = users_json_line(&users).unwrap();
+        assert!(line.starts_with('['));
+        assert!(line.contains("0102030400000000"));
+        // round-trips back to two elements
+        let back: Vec<serde_json::Value> = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.len(), 2);
+        // single line (no embedded newline)
+        assert!(!line.contains('\n'));
     }
 
     #[test]

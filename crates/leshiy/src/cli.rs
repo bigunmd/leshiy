@@ -256,6 +256,9 @@ pub enum UserCmd {
         /// Explicit path to the control socket (overrides --config-derived path).
         #[arg(long)]
         socket: Option<String>,
+        /// Emit the raw users array as JSON (machine-readable) instead of a table.
+        #[arg(long)]
+        json: bool,
     },
     /// Show details for a single user.
     Show {
