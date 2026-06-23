@@ -387,6 +387,12 @@ pub enum RemoteCmd {
         /// Label for the first (self) client config.
         #[arg(long, default_value = "self")]
         user_label: String,
+        /// Connector role: single (default), exit, middle, or entry.
+        #[arg(long, default_value = "single")]
+        role: String,
+        /// For entry/middle: the saved downstream server (id or label) to forward to.
+        #[arg(long)]
+        downstream: Option<String>,
     },
     /// List saved servers.
     Ls,

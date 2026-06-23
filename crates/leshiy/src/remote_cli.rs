@@ -117,6 +117,16 @@ pub fn annotate_users(
         .collect()
 }
 
+pub fn parse_role(s: &str) -> Result<ProvisionRole> {
+    match s {
+        "single" => Ok(ProvisionRole::Single),
+        "exit" => Ok(ProvisionRole::Exit),
+        "middle" => Ok(ProvisionRole::Middle),
+        "entry" => Ok(ProvisionRole::Entry),
+        other => anyhow::bail!("unknown role {other:?} (expected single|exit|middle|entry)"),
+    }
+}
+
 pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
     use crate::cli::RemoteCmd;
     match cmd {
@@ -126,6 +136,13 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
             for r in vault.list() {
                 println!("{}", r.id);
                 crate::ui::eline(&crate::ui::field("label", &crate::ui::value(&r.label)));
+                crate::ui::eline(&crate::ui::field(
+                    "role",
+                    &crate::ui::value(if r.role.is_empty() { "single" } else { &r.role }),
+                ));
+                if let Some(ds) = &r.downstream {
+                    crate::ui::eline(&crate::ui::field("downstream", &crate::ui::value(ds)));
+                }
                 crate::ui::eline(&crate::ui::field("host", &crate::ui::value(&r.public_host)));
                 crate::ui::eline(&crate::ui::field("clients", &r.clients.len().to_string()));
             }
@@ -140,6 +157,8 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
             image,
             label,
             user_label,
+            role,
+            downstream,
         } => {
             let (user, h, port) = parse_ssh_host(&host)?;
             let secret = if let Some(keypath) = key {
@@ -169,6 +188,41 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
 
+            // Parse and validate the role string.
+            let role = parse_role(&role)?;
+
+            // Hoist passphrase prompt + vault load here — single prompt for both downstream
+            // lookup (entry/middle) and the final persist after provisioning.
+            let pass = prompt_passphrase(true)?;
+            let mut vault =
+                Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            // exit/middle expose a QUIC carrier; default it to the listen port if unset.
+            let quic = match role {
+                ProvisionRole::Exit | ProvisionRole::Middle => Some(quic.unwrap_or(listen_port)),
+                _ => quic,
+            };
+
+            // entry/middle must select a downstream with a connector credential.
+            let (connector, downstream_id) = match role {
+                ProvisionRole::Entry | ProvisionRole::Middle => {
+                    let ds = downstream.ok_or_else(|| {
+                        anyhow::anyhow!("--role {} requires --downstream <server>", role.as_str())
+                    })?;
+                    let rec = vault
+                        .get(&ds)
+                        .ok_or_else(|| anyhow::anyhow!("no server {ds}"))?;
+                    let cred = rec.connector_uri.clone().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "server {ds} has no connector credential \
+                             (provision it as --role exit or middle)"
+                        )
+                    })?;
+                    (Some(cred), Some(rec.id.clone()))
+                }
+                _ => (None, None),
+            };
+
             let params = ProvisionParams {
                 id: id.clone(),
                 label,
@@ -186,9 +240,9 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                 listen_port,
                 user_label,
                 now,
-                role: ProvisionRole::Single,
-                connector: None,
-                downstream: None,
+                role,
+                connector,
+                downstream: downstream_id,
             };
 
             let mut transport = RusshTransport::new();
@@ -196,18 +250,30 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            // Persist into the vault.
-            let pass = prompt_passphrase(true)?;
-            let mut vault =
-                Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
-            if let Some(first) = rec.clients.first() {
-                let uri = first.uri.clone();
-                vault.upsert(rec);
-                vault
-                    .save(&vault_path(), &pass)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                crate::ui::ok(&format!("server {id} provisioned"));
-                render_client(&uri);
+            // Persist into the vault (reuse the already-loaded vault and pass).
+            vault.upsert(rec.clone());
+            vault
+                .save(&vault_path(), &pass)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            // Role-aware presentation.
+            match role {
+                ProvisionRole::Exit | ProvisionRole::Middle => {
+                    if let Some(cred) = rec.connector_uri.clone() {
+                        crate::ui::ok(&format!("server {id} provisioned as {}", role.as_str()));
+                        crate::ui::eline(&crate::ui::heading(
+                            "connector credential — pass as --downstream when provisioning the next hop:",
+                        ));
+                        println!("{cred}"); // stdout: the connector credential
+                    }
+                }
+                _ => {
+                    if let Some(first) = rec.clients.first() {
+                        let uri = first.uri.clone();
+                        crate::ui::ok(&format!("server {id} provisioned"));
+                        render_client(&uri);
+                    }
+                }
             }
             Ok(())
         }
@@ -346,6 +412,16 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_role_maps_known_roles() {
+        use leshiy_provision::engine::ProvisionRole;
+        assert_eq!(parse_role("single").unwrap(), ProvisionRole::Single);
+        assert_eq!(parse_role("exit").unwrap(), ProvisionRole::Exit);
+        assert_eq!(parse_role("middle").unwrap(), ProvisionRole::Middle);
+        assert_eq!(parse_role("entry").unwrap(), ProvisionRole::Entry);
+        assert!(parse_role("bogus").is_err());
+    }
 
     #[test]
     fn annotate_users_matches_labels_and_flags_orphans() {
