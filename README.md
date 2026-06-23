@@ -29,6 +29,7 @@ single `leshiy://` URI.
   - [Manage users](#3-manage-users-optional)
   - [Enable QUIC](#4-enable-the-quic-transport-optional)
   - [Entry → Exit connector](#5-set-up-an-entry--exit-connector-optional-advanced)
+  - [Provision a server from the client](#6-provision-a-server-from-the-client)
 - [License](#license)
 
 ---
@@ -290,6 +291,27 @@ leshiy server-init --host <entry-ip>:443 --dest www.microsoft.com:443 \
     --connector '<EXIT_URI>' --out entry.toml
 # Give clients the ENTRY's URI. Chain further by giving the EXIT its own --connector.
 ```
+
+### 6. Provision a server from the client
+
+Stand up a fresh VPS into a leshiy server over SSH:
+
+```sh
+leshiy remote provision --host root@203.0.113.5 --dest www.microsoft.com:443
+# ... live progress, then your first client config:
+#   leshiy://...   (stdout)
+#   <QR code>      (stderr)
+```
+
+Saved servers live in an encrypted vault (`~/.config/leshiy/servers.lvault`,
+Argon2id + XChaCha20-Poly1305). Manage them with `leshiy remote ls`,
+`leshiy remote user add <server> --label phone`, `leshiy remote status <server>`,
+`leshiy remote backup <server> --out server.lvault` (add `--connection-only`
+to share without SSH credentials), `leshiy remote restore server.lvault`, and
+`leshiy remote teardown <server> [--purge]`.
+
+**Prerequisite:** a published server image (default `ghcr.io/leshiy/leshiy:1.4.0`);
+override with `--image`.
 
 ---
 
