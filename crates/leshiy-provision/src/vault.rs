@@ -93,13 +93,15 @@ fn derive_key(passphrase: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
 
 /// Encrypt `records` under a passphrase, returning the full vault blob.
 pub fn seal(records: &[ServerRecord], passphrase: &str) -> Result<Vec<u8>> {
-    let plaintext =
-        serde_json::to_vec(records).map_err(|e| Error::Vault(format!("encode: {e}")))?;
+    let plaintext = zeroize::Zeroizing::new(
+        serde_json::to_vec(records).map_err(|e| Error::Vault(format!("encode: {e}")))?,
+    );
 
     let mut salt = [0u8; SALT_LEN];
     let mut nonce = [0u8; NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut salt);
-    rand::thread_rng().fill_bytes(&mut nonce);
+    let mut rng = rand::thread_rng();
+    rng.fill_bytes(&mut salt);
+    rng.fill_bytes(&mut nonce);
 
     let key = derive_key(passphrase, &salt)?;
     let cipher = XChaCha20Poly1305::new(key.as_slice().into());
@@ -122,15 +124,23 @@ pub fn open(blob: &[u8], passphrase: &str) -> Result<Vec<ServerRecord>> {
     if blob.len() < header || &blob[..MAGIC.len()] != MAGIC {
         return Err(Error::Vault("not a leshiy vault".into()));
     }
+    let version = blob[MAGIC.len()];
+    if version != 1 {
+        return Err(Error::Vault(format!(
+            "unsupported vault version: {version}"
+        )));
+    }
     let salt = &blob[MAGIC.len() + 1..MAGIC.len() + 1 + SALT_LEN];
     let nonce = &blob[MAGIC.len() + 1 + SALT_LEN..header];
     let ct = &blob[header..];
 
     let key = derive_key(passphrase, salt)?;
     let cipher = XChaCha20Poly1305::new(key.as_slice().into());
-    let pt = cipher
-        .decrypt(XNonce::from_slice(nonce), ct)
-        .map_err(|_| Error::Vault("decrypt failed (wrong passphrase or corrupt)".into()))?;
+    let pt = zeroize::Zeroizing::new(
+        cipher
+            .decrypt(XNonce::from_slice(nonce), ct)
+            .map_err(|_| Error::Vault("decrypt failed (wrong passphrase or corrupt)".into()))?,
+    );
     serde_json::from_slice(&pt).map_err(|e| Error::Vault(format!("decode: {e}")))
 }
 
@@ -235,5 +245,13 @@ mod tests {
         let last = blob.len() - 1;
         blob[last] ^= 0x01; // flip a ciphertext byte
         assert!(open(&blob, "pw").is_err());
+    }
+
+    #[test]
+    fn bad_version_byte_rejected() {
+        let mut blob = seal(&[sample()], "pw").unwrap();
+        blob[super::MAGIC.len()] = 9; // bogus version
+        let err = open(&blob, "pw").unwrap_err();
+        assert!(format!("{err}").contains("version"));
     }
 }
