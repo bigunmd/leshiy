@@ -117,6 +117,12 @@ pub fn annotate_users(
         .collect()
 }
 
+/// Validate a user-supplied listen port (rejects 0).
+pub fn resolve_listen_port(port: u16) -> Result<u16> {
+    anyhow::ensure!(port != 0, "port must be between 1 and 65535");
+    Ok(port)
+}
+
 pub fn parse_role(s: &str) -> Result<ProvisionRole> {
     match s {
         "single" => Ok(ProvisionRole::Single),
@@ -154,6 +160,7 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
             password_stdin,
             dest,
             quic,
+            port: cli_port,
             image,
             label,
             user_label,
@@ -179,9 +186,9 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                 )?))
             };
 
+            let listen_port = resolve_listen_port(cli_port)?;
             let id = format!("{h}-{port}");
             let label = label.unwrap_or_else(|| h.clone());
-            let listen_port: u16 = 443;
             let public_host = format!("{h}:{listen_port}");
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -412,6 +419,13 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_listen_port_rejects_zero() {
+        assert_eq!(resolve_listen_port(443).unwrap(), 443);
+        assert_eq!(resolve_listen_port(8443).unwrap(), 8443);
+        assert!(resolve_listen_port(0).is_err());
+    }
 
     #[test]
     fn parse_role_maps_known_roles() {
