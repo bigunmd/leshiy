@@ -128,6 +128,12 @@ async fn provision_inner<T: Transport>(
             p.image_ref
         )));
     }
+    if !valid_image_ref(&p.container) {
+        return Err(Error::Parse(format!(
+            "invalid container name: {:?}",
+            p.container
+        )));
+    }
 
     // 1. Connect + TOFU pin.
     *current = Step::Connect;
@@ -804,6 +810,8 @@ mod tests {
         assert!(valid_image_ref("localhost:5000/leshiy@sha256:abc"));
         assert!(!valid_image_ref("img; rm -rf /"));
         assert!(!valid_image_ref("img$(whoami)"));
+        assert!(!valid_image_ref("img`whoami`"));
+        assert!(!valid_image_ref("img|cat"));
         assert!(!valid_image_ref(""));
     }
 
@@ -812,6 +820,16 @@ mod tests {
         let mut t = FakeTransport::new();
         let mut p = params();
         p.image_ref = "img; rm -rf /".into();
+        let err = provision(&mut t, &p, &mut |_| {}).await.unwrap_err();
+        assert!(matches!(err, crate::error::Error::Parse(_)));
+        assert!(t.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn provision_rejects_bad_container_name() {
+        let mut t = FakeTransport::new();
+        let mut p = params();
+        p.container = "x; reboot".into();
         let err = provision(&mut t, &p, &mut |_| {}).await.unwrap_err();
         assert!(matches!(err, crate::error::Error::Parse(_)));
         assert!(t.calls().is_empty());
