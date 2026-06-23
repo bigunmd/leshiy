@@ -4,6 +4,7 @@ mod host;
 mod lifecycle;
 mod quickstart;
 mod reality_config;
+mod remote_cli;
 mod server;
 mod tun;
 mod ui;
@@ -157,6 +158,7 @@ async fn run() -> anyhow::Result<()> {
             };
             lifecycle::upgrade(&repo, &v, &host::RealHostOps)?
         }
+        cli::Cmd::Remote { cmd } => remote_cli::run(cmd).await?,
     }
     Ok(())
 }

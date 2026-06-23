@@ -186,6 +186,11 @@ pub enum Cmd {
         #[arg(long)]
         version: Option<String>,
     },
+    /// Provision and manage remote leshiy servers.
+    Remote {
+        #[command(subcommand)]
+        cmd: RemoteCmd,
+    },
 }
 
 /// Connector role for `quickstart`.
@@ -347,6 +352,74 @@ pub enum UserCmd {
         #[arg(long)]
         qr: bool,
     },
+}
+
+#[derive(clap::Subcommand)]
+pub enum RemoteCmd {
+    /// Provision a fresh VPS into a leshiy server over SSH.
+    Provision {
+        /// SSH target as user@host[:port].
+        #[arg(long)]
+        host: String,
+        /// Path to a private key file (PEM). If omitted, you'll be prompted for a password.
+        #[arg(long)]
+        key: Option<String>,
+        /// Read the SSH password from stdin (first line).
+        #[arg(long)]
+        password_stdin: bool,
+        /// Borrowed TLS site for REALITY, host:port.
+        #[arg(long)]
+        dest: String,
+        /// Enable QUIC on this UDP port.
+        #[arg(long)]
+        quic: Option<u16>,
+        /// Container image reference.
+        #[arg(long, default_value = "ghcr.io/leshiy/leshiy:1.4.0")]
+        image: String,
+        /// Friendly server label.
+        #[arg(long)]
+        label: Option<String>,
+        /// Label for the first (self) client config.
+        #[arg(long, default_value = "self")]
+        user_label: String,
+    },
+    /// List saved servers.
+    Ls,
+    /// Manage users on a saved server.
+    User {
+        #[command(subcommand)]
+        cmd: RemoteUserCmd,
+    },
+    /// Show whether a saved server is running.
+    Status { server: String },
+    /// Export an encrypted backup of a saved server.
+    Backup {
+        server: String,
+        #[arg(long)]
+        connection_only: bool,
+        #[arg(long)]
+        out: String,
+    },
+    /// Import a server backup blob into the vault.
+    Restore { file: String },
+    /// Remove the server container; optionally purge its config.
+    Teardown {
+        server: String,
+        #[arg(long)]
+        purge: bool,
+    },
+}
+
+#[derive(clap::Subcommand)]
+pub enum RemoteUserCmd {
+    /// Add a client and print its config (URI to stdout, QR to stderr).
+    Add {
+        server: String,
+        #[arg(long, default_value = "client")]
+        label: String,
+    },
+    /// List clients recorded for a server.
+    Ls { server: String },
 }
 
 #[cfg(test)]

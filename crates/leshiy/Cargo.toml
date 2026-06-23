@@ -38,6 +38,8 @@ qrcode.workspace = true
 terminal_size.workspace = true
 tokio-rustls.workspace = true
 webpki-roots.workspace = true
+leshiy-provision = { path = "../leshiy-provision" }
+rpassword.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
