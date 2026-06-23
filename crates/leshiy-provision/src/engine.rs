@@ -222,6 +222,11 @@ pub async fn status<T: Transport>(t: &mut T, rec: &ServerRecord) -> Result<bool>
 }
 
 /// Remove the server container (and optionally purge its config dir).
+///
+/// Best-effort: `docker rm -f` is allowed to fail (the container may not exist
+/// when tearing down a half-built server). The purge step, when requested, runs
+/// regardless. Only transport-level errors (SSH connection failures, etc.) are
+/// propagated via `?`; the remote command's exit code is intentionally ignored.
 pub async fn teardown<T: Transport>(t: &mut T, rec: &ServerRecord, purge: bool) -> Result<()> {
     t.run(&format!("sudo docker rm -f {}", rec.container))
         .await?;
@@ -511,5 +516,29 @@ mod tests {
         };
         teardown(&mut t, &rec, false).await.unwrap();
         assert!(t.calls().iter().any(|c| c.contains("docker rm -f leshiy")));
+    }
+
+    #[tokio::test]
+    async fn teardown_with_purge_removes_config_dir() {
+        let mut t = FakeTransport::new();
+        let rec = ServerRecord {
+            id: "s".into(),
+            label: "v".into(),
+            host: "h".into(),
+            port: 22,
+            ssh_user: "root".into(),
+            ssh_secret: SshSecret::None,
+            host_key_fp: "fp".into(),
+            public_host: "h:443".into(),
+            image_ref: "img".into(),
+            container: "leshiy".into(),
+            reality_public_b64: "x".into(),
+            quic: None,
+            clients: vec![],
+            created_at: 0,
+        };
+        teardown(&mut t, &rec, true).await.unwrap();
+        assert!(t.calls().iter().any(|c| c.contains("docker rm -f leshiy")));
+        assert!(t.calls().iter().any(|c| c.contains("rm -rf /etc/leshiy")));
     }
 }
