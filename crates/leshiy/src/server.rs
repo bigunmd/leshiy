@@ -270,6 +270,53 @@ fn pubkey_bytes(auth: &leshiy_reality::config::ServerAuthConfig) -> [u8; 32] {
     PublicKey::from(&sk).to_bytes()
 }
 
+/// Resolved boot-time configuration from environment variables.
+pub struct BootConfig {
+    pub host: String,
+    pub dest: String,
+    pub listen: String,
+    pub quic_listen: Option<String>,
+    pub quic_domain: Option<String>,
+    pub config: String,
+}
+
+/// Read boot config from an env accessor. `LESHIY_HOST` and `LESHIY_DEST` are
+/// required; the rest have defaults.
+pub fn resolve_boot_config(get: impl Fn(&str) -> Option<String>) -> Result<BootConfig> {
+    let host = get("LESHIY_HOST").ok_or_else(|| anyhow::anyhow!("LESHIY_HOST is required"))?;
+    let dest = get("LESHIY_DEST").ok_or_else(|| anyhow::anyhow!("LESHIY_DEST is required"))?;
+    Ok(BootConfig {
+        host,
+        dest,
+        listen: get("LESHIY_LISTEN").unwrap_or_else(|| "0.0.0.0:443".to_string()),
+        quic_listen: get("LESHIY_QUIC_LISTEN"),
+        quic_domain: get("LESHIY_QUIC_DOMAIN"),
+        config: get("LESHIY_CONFIG").unwrap_or_else(|| "/etc/leshiy/server.toml".to_string()),
+    })
+}
+
+/// Container entrypoint: generate config from env on first boot, then run.
+pub async fn boot() -> Result<()> {
+    let c = resolve_boot_config(|k| std::env::var(k).ok())?;
+    if !std::path::Path::new(&c.config).exists() {
+        if let Some(parent) = std::path::Path::new(&c.config).parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        init(InitOptions {
+            host: &c.host,
+            dest: &c.dest,
+            listen: Some(&c.listen),
+            out: &c.config,
+            quic_listen: c.quic_listen.as_deref(),
+            quic_domain: c.quic_domain.as_deref(),
+            quic_cert: None,
+            quic_key: None,
+            connector: None,
+        })?;
+    }
+    run(&c.config).await
+}
+
 pub async fn run(config: &str) -> Result<()> {
     let toml_str = std::fs::read_to_string(config).with_context(|| format!("read {config}"))?;
     let cfg: RealityServerConfig = toml::from_str(&toml_str).context("parse config")?;
@@ -451,6 +498,55 @@ pub async fn run(config: &str) -> Result<()> {
     run_reality_server(listener, auth, user_store, egress, cert)
         .await
         .map_err(|e| anyhow::anyhow!("server: {e}"))
+}
+
+#[cfg(test)]
+mod boot_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn env<'a>(m: &'a HashMap<&'a str, &'a str>) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| m.get(k).map(|v| v.to_string())
+    }
+
+    #[test]
+    fn resolve_boot_defaults_listen_and_config() {
+        let m = HashMap::from([
+            ("LESHIY_HOST", "1.2.3.4:443"),
+            ("LESHIY_DEST", "www.microsoft.com:443"),
+        ]);
+        let c = resolve_boot_config(env(&m)).unwrap();
+        assert_eq!(c.host, "1.2.3.4:443");
+        assert_eq!(c.dest, "www.microsoft.com:443");
+        assert_eq!(c.listen, "0.0.0.0:443");
+        assert_eq!(c.config, "/etc/leshiy/server.toml");
+        assert!(c.quic_listen.is_none());
+    }
+
+    #[test]
+    fn resolve_boot_requires_host_and_dest() {
+        let m = HashMap::from([("LESHIY_DEST", "x:443")]);
+        assert!(resolve_boot_config(env(&m)).is_err());
+        let m2 = HashMap::from([("LESHIY_HOST", "h:443")]);
+        assert!(resolve_boot_config(env(&m2)).is_err());
+    }
+
+    #[test]
+    fn resolve_boot_passes_quic_and_overrides() {
+        let m = HashMap::from([
+            ("LESHIY_HOST", "h:443"),
+            ("LESHIY_DEST", "d:443"),
+            ("LESHIY_LISTEN", "0.0.0.0:8443"),
+            ("LESHIY_QUIC_LISTEN", "0.0.0.0:8444"),
+            ("LESHIY_QUIC_DOMAIN", "cdn.example.org"),
+            ("LESHIY_CONFIG", "/tmp/x.toml"),
+        ]);
+        let c = resolve_boot_config(env(&m)).unwrap();
+        assert_eq!(c.listen, "0.0.0.0:8443");
+        assert_eq!(c.quic_listen.as_deref(), Some("0.0.0.0:8444"));
+        assert_eq!(c.quic_domain.as_deref(), Some("cdn.example.org"));
+        assert_eq!(c.config, "/tmp/x.toml");
+    }
 }
 
 #[cfg(all(test, unix))]

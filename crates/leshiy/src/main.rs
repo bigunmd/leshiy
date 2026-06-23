@@ -159,6 +159,7 @@ async fn run() -> anyhow::Result<()> {
             lifecycle::upgrade(&repo, &v, &host::RealHostOps)?
         }
         cli::Cmd::Remote { cmd } => remote_cli::run(cmd).await?,
+        cli::Cmd::Boot => server::boot().await?,
     }
     Ok(())
 }

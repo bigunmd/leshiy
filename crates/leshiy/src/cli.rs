@@ -191,6 +191,8 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: RemoteCmd,
     },
+    /// Container entrypoint: build config from LESHIY_* env vars on first boot, then run.
+    Boot,
 }
 
 /// Connector role for `quickstart`.
