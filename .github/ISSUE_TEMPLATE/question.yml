@@ -1,0 +1,32 @@
+name: ❓ Question / support
+description: Ask a question about using or self-hosting Leshiy
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Need help using or self-hosting Leshiy? Ask away.
+
+        Please check the [README](https://github.com/bigunmd/leshiy#readme) first — the
+        quick-start and self-hosting sections cover most setup questions.
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: What would you like to know?
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried?
+      description: Commands you ran, docs you read, and what happened.
+    validations:
+      required: false
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Version and platform, if relevant (e.g. `leshiy 1.4.0`, Ubuntu 24.04).
+    validations:
+      required: false

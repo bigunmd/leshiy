@@ -1,0 +1,79 @@
+name: 🐛 Bug report
+description: Report something that isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug! Please search existing issues first.
+
+        ⚠️ **Do not report security vulnerabilities here.** Use the
+        [Security tab](https://github.com/bigunmd/leshiy/security) → "Report a vulnerability".
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including what you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: How can we reproduce the problem? Include the exact commands you ran.
+      placeholder: |
+        1. Run `leshiy server-init ...`
+        2. Connect with `leshiy connect ...`
+        3. See error
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of Leshiy is affected?
+      options:
+        - CLI server
+        - CLI client
+        - Desktop app (GUI)
+        - Android app
+        - REALITY transport
+        - QUIC transport
+        - Other / not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      description: Which transport were you using (if relevant)?
+      options:
+        - "auto"
+        - REALITY (TCP/443)
+        - QUIC / HTTP-3
+        - Not applicable
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `leshiy --version` (or the app version).
+      placeholder: "leshiy 1.4.0"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS / platform
+      description: e.g. Ubuntu 24.04, Windows 11, Android 14, Fedora 40.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log output. Set `RUST_LOG=debug` for more detail. This will be formatted as code, so no backticks needed.
+      render: shell
+    validations:
+      required: false
