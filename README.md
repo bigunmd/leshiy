@@ -304,6 +304,8 @@ leshiy remote provision --host root@203.0.113.5 --dest www.microsoft.com:443
 ```
 
 > **Note:** the server image must be built from this release for `--dest` and `--quic` to take effect.
+> Re-running `provision` against an already-provisioned host **reuses the existing server config**
+> (keys persist on a Docker volume); to change `--dest`/`--quic`, `teardown` the server first, then provision again.
 
 Saved servers live in an encrypted vault (`~/.config/leshiy/servers.lvault`,
 Argon2id + XChaCha20-Poly1305). Manage them with `leshiy remote ls`,
