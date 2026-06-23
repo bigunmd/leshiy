@@ -318,7 +318,9 @@ to share without SSH credentials), `leshiy remote restore server.lvault`, and
 `leshiy remote teardown <server> [--purge]`.
 
 `leshiy remote user ls <server>` lists the users currently on the server (live),
-and `leshiy remote user rm <server> <short_id>` deletes one.
+and `leshiy remote user rm <server> <short_id>` deletes one. (Live `user ls`
+needs a server image built from this release or newer — it relies on
+`leshiy user list --json`.)
 
 **Prerequisite:** a published server image (default `ghcr.io/leshiy/leshiy:1.4.0`);
 override with `--image`.
