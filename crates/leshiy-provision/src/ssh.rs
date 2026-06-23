@@ -1,9 +1,20 @@
 //! SSH transport abstraction. The engine talks only to the `Transport` trait,
 //! so tests run against `FakeTransport` with no live server.
 
+pub use crate::ssh_russh::RusshTransport;
+
 use crate::error::{Error, Result};
 use crate::vault::SshSecret;
 use async_trait::async_trait;
+
+/// Format a raw SHA-256 digest as an OpenSSH-style `SHA256:<base64-nopad>` string.
+pub fn format_fp_sha256(digest: &[u8; 32]) -> String {
+    use base64::Engine;
+    format!(
+        "SHA256:{}",
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(digest)
+    )
+}
 
 #[derive(Clone, Debug)]
 pub struct SshTarget {
@@ -105,6 +116,15 @@ impl Transport for FakeTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fingerprint_has_sha256_prefix() {
+        // Deterministic 32-byte digest -> stable formatting.
+        let digest = [0u8; 32];
+        let fp = crate::ssh::format_fp_sha256(&digest);
+        assert!(fp.starts_with("SHA256:"));
+        assert!(fp.len() > "SHA256:".len());
+    }
 
     #[tokio::test]
     async fn fake_connect_returns_pinned_fp_and_matches_commands() {

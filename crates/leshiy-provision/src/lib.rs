@@ -6,6 +6,7 @@ pub mod docker;
 pub mod engine;
 pub mod error;
 pub mod ssh;
+mod ssh_russh;
 pub mod vault;
 
 pub use error::{Error, Result};
