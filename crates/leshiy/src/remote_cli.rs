@@ -15,16 +15,19 @@ pub fn vault_path() -> PathBuf {
     base.join("leshiy").join("servers.lvault")
 }
 
-pub fn prompt_passphrase(confirm: bool) -> Result<zeroize::Zeroizing<String>> {
-    let pass = zeroize::Zeroizing::new(
-        rpassword::prompt_password("Vault passphrase: ").context("read passphrase")?,
-    );
+pub fn prompt_passphrase_with(prompt: &str, confirm: bool) -> Result<zeroize::Zeroizing<String>> {
+    let pass =
+        zeroize::Zeroizing::new(rpassword::prompt_password(prompt).context("read passphrase")?);
     if confirm {
         let again = rpassword::prompt_password("Confirm passphrase: ")
             .context("read confirm passphrase")?;
         anyhow::ensure!(*pass == again, "passphrases do not match");
     }
     Ok(pass)
+}
+
+pub fn prompt_passphrase(confirm: bool) -> Result<zeroize::Zeroizing<String>> {
+    prompt_passphrase_with("Vault passphrase: ", confirm)
 }
 
 pub fn parse_ssh_host(spec: &str) -> Result<(String, String, u16)> {
@@ -242,7 +245,7 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
         } => {
             let pass = prompt_passphrase(false)?;
             let vault = Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let share = prompt_passphrase(true)?;
+            let share = prompt_passphrase_with("Backup share passphrase: ", true)?;
             let blob = vault
                 .export_one(&server, connection_only, &share)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;

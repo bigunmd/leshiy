@@ -303,6 +303,13 @@ leshiy remote provision --host root@203.0.113.5 --dest www.microsoft.com:443
 #   <QR code>      (stderr)
 ```
 
+> **Current limitations (pre-release):** the server runs from a prebuilt
+> container image that self-configures its REALITY destination. The `--dest`
+> camouflage target and `--quic` flag are recorded locally but are **not yet
+> applied on the server** — wiring them through requires image-side support
+> (tracked separately). The issued client config is internally consistent and
+> will connect, but reflects the image's defaults, not `--dest`.
+
 Saved servers live in an encrypted vault (`~/.config/leshiy/servers.lvault`,
 Argon2id + XChaCha20-Poly1305). Manage them with `leshiy remote ls`,
 `leshiy remote user add <server> --label phone`, `leshiy remote status <server>`,
