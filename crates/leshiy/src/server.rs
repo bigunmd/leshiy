@@ -278,6 +278,7 @@ pub struct BootConfig {
     pub quic_listen: Option<String>,
     pub quic_domain: Option<String>,
     pub config: String,
+    pub connector: Option<String>,
 }
 
 /// Read boot config from an env accessor. `LESHIY_HOST` and `LESHIY_DEST` are
@@ -292,6 +293,7 @@ pub fn resolve_boot_config(get: impl Fn(&str) -> Option<String>) -> Result<BootC
         quic_listen: get("LESHIY_QUIC_LISTEN"),
         quic_domain: get("LESHIY_QUIC_DOMAIN"),
         config: get("LESHIY_CONFIG").unwrap_or_else(|| "/etc/leshiy/server.toml".to_string()),
+        connector: get("LESHIY_CONNECTOR"),
     })
 }
 
@@ -311,7 +313,7 @@ pub async fn boot() -> Result<()> {
             quic_domain: c.quic_domain.as_deref(),
             quic_cert: None,
             quic_key: None,
-            connector: None,
+            connector: c.connector.as_deref(),
         })?;
     }
     run(&c.config).await
@@ -529,6 +531,26 @@ mod boot_tests {
         assert!(resolve_boot_config(env(&m)).is_err());
         let m2 = HashMap::from([("LESHIY_HOST", "h:443")]);
         assert!(resolve_boot_config(env(&m2)).is_err());
+    }
+
+    #[test]
+    fn resolve_boot_reads_connector() {
+        let m = HashMap::from([
+            ("LESHIY_HOST", "h:443"),
+            ("LESHIY_DEST", "d:443"),
+            (
+                "LESHIY_CONNECTOR",
+                "leshiy://PUB@exit:443?sni=d&sid=0102030400000000&quic=exit:443&qsni=cdn&qcert=ab",
+            ),
+        ]);
+        let c = resolve_boot_config(env(&m)).unwrap();
+        assert!(c.connector.as_deref().unwrap().contains("quic=exit:443"));
+    }
+
+    #[test]
+    fn resolve_boot_connector_absent_is_none() {
+        let m = HashMap::from([("LESHIY_HOST", "h:443"), ("LESHIY_DEST", "d:443")]);
+        assert!(resolve_boot_config(env(&m)).unwrap().connector.is_none());
     }
 
     #[test]
