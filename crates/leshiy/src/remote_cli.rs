@@ -15,12 +15,14 @@ pub fn vault_path() -> PathBuf {
     base.join("leshiy").join("servers.lvault")
 }
 
-pub fn prompt_passphrase(confirm: bool) -> Result<String> {
-    let pass = rpassword::prompt_password("Vault passphrase: ").context("read passphrase")?;
+pub fn prompt_passphrase(confirm: bool) -> Result<zeroize::Zeroizing<String>> {
+    let pass = zeroize::Zeroizing::new(
+        rpassword::prompt_password("Vault passphrase: ").context("read passphrase")?,
+    );
     if confirm {
         let again = rpassword::prompt_password("Confirm passphrase: ")
             .context("read confirm passphrase")?;
-        anyhow::ensure!(pass == again, "passphrases do not match");
+        anyhow::ensure!(*pass == again, "passphrases do not match");
     }
     Ok(pass)
 }
@@ -250,7 +252,10 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
         }
         RemoteCmd::Restore { file } => {
             let blob = std::fs::read(&file).with_context(|| format!("read {file}"))?;
-            let share = rpassword::prompt_password("Backup passphrase: ")?;
+            let share = zeroize::Zeroizing::new(
+                rpassword::prompt_password("Backup passphrase: ")
+                    .context("read backup passphrase")?,
+            );
             let recs =
                 leshiy_provision::vault::open(&blob, &share).map_err(|e| anyhow::anyhow!("{e}"))?;
             let pass = prompt_passphrase(false)?;
@@ -338,5 +343,6 @@ mod tests {
         let blob = v.export_one("s1", false, "share").unwrap();
         let recs = leshiy_provision::vault::open(&blob, "share").unwrap();
         assert_eq!(recs[0].id, "s1");
+        assert!(leshiy_provision::vault::open(&blob, "wrong-passphrase").is_err());
     }
 }
