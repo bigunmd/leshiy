@@ -25,3 +25,4 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /leshiy /usr/local/bin/leshiy
 USER nonroot
 ENTRYPOINT ["/usr/local/bin/leshiy"]
+CMD ["boot"]
