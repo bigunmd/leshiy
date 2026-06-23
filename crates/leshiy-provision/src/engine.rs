@@ -233,7 +233,7 @@ async fn provision_inner<T: Transport>(
         on_event(ev(
             Step::PullImage,
             Status::Done,
-            "reusing existing container — dest/quic changes are NOT re-applied (teardown first to change them)",
+            "reusing existing container — dest/quic/connector changes are NOT re-applied (teardown first to change them)",
         ));
     }
 
@@ -247,6 +247,12 @@ async fn provision_inner<T: Transport>(
 
     // 8. Build the record.
     *current = Step::Persist;
+    if p.role.exposes_connector() && parse_quic_fields(&uri).is_none() {
+        return Err(Error::Parse(format!(
+            "node provisioned as {} but its issued URI has no QUIC endpoint — the connector chain needs QUIC (is the image built with QUIC support?)",
+            p.role.as_str()
+        )));
+    }
     let connector_uri = if p.role.exposes_connector() {
         Some(uri.clone())
     } else {
@@ -945,6 +951,34 @@ mod tests {
         assert_eq!(rec.downstream.as_deref(), Some("exit-1"));
         assert!(rec.connector_uri.is_none()); // entry exposes no upstream credential
         assert!(t.calls().iter().any(|c| c.contains("LESHIY_CONNECTOR=")));
+    }
+
+    #[tokio::test]
+    async fn provision_exit_without_quic_uri_fails() {
+        let mut t = FakeTransport::new();
+        // issued URI has NO quic= endpoint
+        let uri = "leshiy://QUJD@1.2.3.4:443?sni=d&sid=0102030400000000";
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 0,
+                stdout: format!("{uri}\n"),
+                stderr: String::new(),
+            },
+        );
+        let mut p = params();
+        p.role = ProvisionRole::Exit;
+        p.quic_port = Some(443);
+        let err = provision(&mut t, &p, &mut |_| {}).await.unwrap_err();
+        assert!(matches!(err, crate::error::Error::Parse(_)));
     }
 
     #[tokio::test]
