@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use leshiy_provision::engine::{self, ProgressEvent, ProvisionParams, RemoteUser, Status, Step};
 use leshiy_provision::ssh::{RusshTransport, SshTarget, Transport};
-use leshiy_provision::vault::{ServerRecord, SshSecret, Vault};
+use leshiy_provision::vault::{ClientConfig, ServerRecord, SshSecret, Vault};
 use std::path::PathBuf;
 use zeroize::Zeroizing;
 
@@ -101,7 +101,7 @@ async fn connect_pinned(rec: &ServerRecord) -> Result<RusshTransport> {
 /// server but absent from the vault get `None` (orphans).
 pub fn annotate_users(
     remote: &[RemoteUser],
-    clients: &[leshiy_provision::vault::ClientConfig],
+    clients: &[ClientConfig],
 ) -> Vec<(String, Option<String>, bool)> {
     remote
         .iter()
@@ -239,7 +239,7 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                     let mut transport = connect_pinned(&rec).await?;
                     let users = leshiy_provision::engine::list_users(&mut transport, &rec)
                         .await
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        .context("list users on server")?;
                     let rows = annotate_users(&users, &rec.clients);
                     if rows.is_empty() {
                         crate::ui::eline("(no users on server)");
@@ -263,11 +263,9 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                     let mut transport = connect_pinned(&rec).await?;
                     leshiy_provision::engine::delete_user(&mut transport, &mut rec, &short_id)
                         .await
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        .context("delete user on server")?;
                     vault.upsert(rec);
-                    vault
-                        .save(&vault_path(), &pass)
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    vault.save(&vault_path(), &pass).context("save vault")?;
                     crate::ui::ok(&format!("deleted user {short_id} on {server}"));
                     Ok(())
                 }

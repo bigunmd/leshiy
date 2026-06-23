@@ -421,7 +421,7 @@ pub enum RemoteUserCmd {
         #[arg(long, default_value = "client")]
         label: String,
     },
-    /// List clients recorded for a server.
+    /// List the users currently on the server (live).
     Ls { server: String },
     /// Delete a user on the server by short_id.
     Rm { server: String, short_id: String },
