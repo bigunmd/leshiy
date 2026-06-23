@@ -149,10 +149,12 @@ async fn provision_inner<T: Transport>(
 
     // 5/6. Pull + run (skipped if exists).
     if !exists {
+        *current = Step::PullImage;
         on_event(ev(Step::PullImage, Status::Started, &p.image_ref));
         t.run(&docker::pull_cmd(&p.image_ref)).await?.ok()?;
         on_event(ev(Step::PullImage, Status::Done, ""));
 
+        *current = Step::RunContainer;
         on_event(ev(Step::RunContainer, Status::Started, ""));
         let mut envs = vec![
             ("LESHIY_HOST".to_string(), p.public_host.clone()),
@@ -504,6 +506,37 @@ mod tests {
             statuses
                 .iter()
                 .any(|(s, st)| *s == Step::IssueUser && *st == Status::Failed)
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_failed_event_names_runcontainer_on_run_error() {
+        let mut t = FakeTransport::new();
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker run",
+            CommandOutput {
+                code: 1,
+                stdout: String::new(),
+                stderr: "run failed".into(),
+            },
+        );
+        let mut statuses = Vec::new();
+        let _ = provision(&mut t, &params(), &mut |e| {
+            statuses.push((e.step, e.status))
+        })
+        .await;
+        assert!(
+            statuses
+                .iter()
+                .any(|(s, st)| *s == Step::RunContainer && *st == Status::Failed)
         );
     }
 
