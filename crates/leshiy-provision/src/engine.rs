@@ -190,6 +190,47 @@ async fn provision_inner<T: Transport>(
     Ok(rec)
 }
 
+/// Add another client on an already-provisioned server; appends to `rec.clients`.
+pub async fn add_user<T: Transport>(
+    t: &mut T,
+    rec: &mut ServerRecord,
+    label: &str,
+    extra_args: &str,
+) -> Result<ClientConfig> {
+    let args = if extra_args.is_empty() {
+        format!("--label {label}")
+    } else {
+        format!("--label {label} {extra_args}")
+    };
+    let cmd = docker::exec_user_add_cmd(&rec.container, &args);
+    let stdout = t.run(&cmd).await?.ok()?.stdout;
+    let uri = stdout.trim().lines().next().unwrap_or("").to_string();
+    let (short_id, _pub) = parse_uri_fields(&uri)?;
+    let cc = ClientConfig {
+        short_id,
+        label: label.to_string(),
+        uri,
+    };
+    rec.clients.push(cc.clone());
+    Ok(cc)
+}
+
+/// Whether the server container is currently running.
+pub async fn status<T: Transport>(t: &mut T, rec: &ServerRecord) -> Result<bool> {
+    let names = docker::parse_ps_names(&t.run(docker::ps_names_cmd()).await?.stdout);
+    Ok(names.iter().any(|n| n == &rec.container))
+}
+
+/// Remove the server container (and optionally purge its config dir).
+pub async fn teardown<T: Transport>(t: &mut T, rec: &ServerRecord, purge: bool) -> Result<()> {
+    t.run(&format!("sudo docker rm -f {}", rec.container))
+        .await?;
+    if purge {
+        t.run("sudo rm -rf /etc/leshiy").await?;
+    }
+    Ok(())
+}
+
 /// Run `docker exec ... user add` and return captured stdout.
 async fn exec_user_add<T: Transport>(t: &mut T, container: &str, label: &str) -> Result<String> {
     let cmd = docker::exec_user_add_cmd(container, &format!("--label {label}"));
@@ -384,5 +425,91 @@ mod tests {
     #[test]
     fn parse_uri_requires_at_sign() {
         assert!(parse_uri_fields("leshiy://nohost-no-at?sid=01").is_err());
+    }
+
+    #[tokio::test]
+    async fn add_user_appends_client() {
+        let mut t = FakeTransport::new();
+        t.on(
+            "docker exec",
+            CommandOutput {
+                code: 0,
+                stdout: format!("{}\n", issued_uri()),
+                stderr: String::new(),
+            },
+        );
+        let mut rec = ServerRecord {
+            id: "srv1".into(),
+            label: "vps".into(),
+            host: "h".into(),
+            port: 22,
+            ssh_user: "root".into(),
+            ssh_secret: SshSecret::Password("p".to_string().into()),
+            host_key_fp: "fp".into(),
+            public_host: "h:443".into(),
+            image_ref: "img".into(),
+            container: "leshiy".into(),
+            reality_public_b64: "QUJD".into(),
+            quic: None,
+            clients: vec![],
+            created_at: 0,
+        };
+        let cc = add_user(&mut t, &mut rec, "phone", "").await.unwrap();
+        assert_eq!(cc.label, "phone");
+        assert_eq!(cc.short_id, "0102030400000000");
+        assert_eq!(rec.clients.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn status_true_when_container_listed() {
+        let mut t = FakeTransport::new();
+        t.on(
+            "docker ps",
+            CommandOutput {
+                code: 0,
+                stdout: "leshiy\n".into(),
+                stderr: String::new(),
+            },
+        );
+        let rec = ServerRecord {
+            id: "s".into(),
+            label: "v".into(),
+            host: "h".into(),
+            port: 22,
+            ssh_user: "root".into(),
+            ssh_secret: SshSecret::None,
+            host_key_fp: "fp".into(),
+            public_host: "h:443".into(),
+            image_ref: "img".into(),
+            container: "leshiy".into(),
+            reality_public_b64: "x".into(),
+            quic: None,
+            clients: vec![],
+            created_at: 0,
+        };
+        assert!(status(&mut t, &rec).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn teardown_removes_container() {
+        let mut t = FakeTransport::new();
+        let rec = ServerRecord {
+            id: "s".into(),
+            label: "v".into(),
+            host: "h".into(),
+            port: 22,
+            ssh_user: "root".into(),
+            ssh_secret: SshSecret::None,
+            host_key_fp: "fp".into(),
+            public_host: "h:443".into(),
+            image_ref: "img".into(),
+            container: "leshiy".into(),
+            reality_public_b64: "x".into(),
+            quic: None,
+            clients: vec![],
+            created_at: 0,
+        };
+        teardown(&mut t, &rec, false).await.unwrap();
+        assert!(t.calls().iter().any(|c| c.contains("docker rm -f leshiy")));
     }
 }
