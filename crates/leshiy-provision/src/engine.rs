@@ -203,7 +203,7 @@ async fn provision_inner<T: Transport>(
         on_event(ev(
             Step::PullImage,
             Status::Done,
-            "reusing existing container",
+            "reusing existing container — dest/quic changes are NOT re-applied (teardown first to change them)",
         ));
     }
 
