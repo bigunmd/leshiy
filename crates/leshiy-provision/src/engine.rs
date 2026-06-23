@@ -60,16 +60,17 @@ pub fn parse_uri_fields(uri: &str) -> Result<(String, String)> {
     let rest = uri
         .strip_prefix("leshiy://")
         .ok_or_else(|| Error::Parse("not a leshiy uri".into()))?;
-    let pub_b64 = rest
-        .split('@')
-        .next()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| Error::Parse("no pubkey".into()))?
-        .to_string();
+    let (pub_b64, _after) = rest
+        .split_once('@')
+        .ok_or_else(|| Error::Parse("no '@' in uri".into()))?;
+    if pub_b64.is_empty() {
+        return Err(Error::Parse("no pubkey".into()));
+    }
+    let pub_b64 = pub_b64.to_string();
     let sid = uri
         .split("sid=")
         .nth(1)
-        .map(|s| s.split(['&', ' ', '\n']).next().unwrap_or("").to_string())
+        .map(|s| s.split(['&', ' ', '\n']).next().unwrap_or(s).to_string())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| Error::Parse("no sid".into()))?;
     Ok((sid, pub_b64))
@@ -81,12 +82,28 @@ pub async fn provision<T: Transport>(
     p: &ProvisionParams,
     on_event: &mut dyn FnMut(ProgressEvent),
 ) -> Result<ServerRecord> {
+    let mut current = Step::Connect;
+    let result = provision_inner(t, p, on_event, &mut current).await;
+    if let Err(ref e) = result {
+        on_event(ev(current, Status::Failed, format!("{e}")));
+    }
+    result
+}
+
+async fn provision_inner<T: Transport>(
+    t: &mut T,
+    p: &ProvisionParams,
+    on_event: &mut dyn FnMut(ProgressEvent),
+    current: &mut Step,
+) -> Result<ServerRecord> {
     // 1. Connect + TOFU pin.
+    *current = Step::Connect;
     on_event(ev(Step::Connect, Status::Started, &p.target.host));
     let host_key_fp = t.connect(&p.target, &p.secret).await?;
     on_event(ev(Step::Connect, Status::Done, &host_key_fp));
 
     // 2. Preflight + 3. Docker ready.
+    *current = Step::Preflight;
     on_event(ev(Step::Preflight, Status::Started, ""));
     let has_docker = t.run(docker::detect_docker_cmd()).await?.stdout.trim() == "yes";
     on_event(ev(
@@ -95,6 +112,7 @@ pub async fn provision<T: Transport>(
         format!("docker={has_docker}"),
     ));
 
+    *current = Step::DockerReady;
     on_event(ev(Step::DockerReady, Status::Started, ""));
     if !has_docker {
         t.run(docker::install_docker_cmd()).await?.ok()?;
@@ -102,6 +120,7 @@ pub async fn provision<T: Transport>(
     on_event(ev(Step::DockerReady, Status::Done, ""));
 
     // 4. Detect existing container (idempotent re-run).
+    *current = Step::DetectExisting;
     on_event(ev(Step::DetectExisting, Status::Started, ""));
     let names = docker::parse_ps_names(&t.run(docker::ps_names_cmd()).await?.stdout);
     let exists = names.iter().any(|n| n == &p.container);
@@ -113,10 +132,12 @@ pub async fn provision<T: Transport>(
 
     // 5. Pull + 6. Run (skipped if already running).
     if !exists {
+        *current = Step::PullImage;
         on_event(ev(Step::PullImage, Status::Started, &p.image_ref));
         t.run(&docker::pull_cmd(&p.image_ref)).await?.ok()?;
         on_event(ev(Step::PullImage, Status::Done, ""));
 
+        *current = Step::RunContainer;
         on_event(ev(Step::RunContainer, Status::Started, ""));
         t.run(&docker::run_cmd(
             &p.container,
@@ -136,6 +157,7 @@ pub async fn provision<T: Transport>(
     }
 
     // 7. Issue the first user.
+    *current = Step::IssueUser;
     on_event(ev(Step::IssueUser, Status::Started, &p.user_label));
     let add = exec_user_add(t, &p.container, &p.user_label).await?;
     let uri = add.trim().lines().next().unwrap_or("").to_string();
@@ -143,6 +165,7 @@ pub async fn provision<T: Transport>(
     on_event(ev(Step::IssueUser, Status::Done, &short_id));
 
     // 8. Build the record.
+    *current = Step::Persist;
     let rec = ServerRecord {
         id: p.id.clone(),
         label: p.label.clone(),
@@ -325,5 +348,41 @@ mod tests {
         );
         let err = provision(&mut t, &params(), &mut |_| {}).await.unwrap_err();
         assert!(matches!(err, crate::error::Error::Command { .. }));
+    }
+
+    #[tokio::test]
+    async fn provision_emits_failed_event_on_user_add_error() {
+        let mut t = FakeTransport::new();
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 1,
+                stdout: String::new(),
+                stderr: "boom".into(),
+            },
+        );
+        let mut statuses = Vec::new();
+        let _ = provision(&mut t, &params(), &mut |e| {
+            statuses.push((e.step, e.status))
+        })
+        .await;
+        assert!(
+            statuses
+                .iter()
+                .any(|(s, st)| *s == Step::IssueUser && *st == Status::Failed)
+        );
+    }
+
+    #[test]
+    fn parse_uri_requires_at_sign() {
+        assert!(parse_uri_fields("leshiy://nohost-no-at?sid=01").is_err());
     }
 }
