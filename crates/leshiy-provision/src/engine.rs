@@ -42,7 +42,7 @@ pub struct ProvisionParams {
     pub image_ref: String,
     pub container: String,
     pub quic_port: Option<u16>,
-    pub reality_port: u16,
+    pub listen_port: u16,
     pub user_label: String,
     pub now: u64,
 }
@@ -74,6 +74,23 @@ pub fn parse_uri_fields(uri: &str) -> Result<(String, String)> {
         .filter(|s| !s.is_empty())
         .ok_or_else(|| Error::Parse("no sid".into()))?;
     Ok((sid, pub_b64))
+}
+
+/// Extract a QUIC endpoint from an issued URI's query, if present.
+pub fn parse_quic_fields(uri: &str) -> Option<crate::vault::QuicInfo> {
+    fn q<'a>(uri: &'a str, key: &str) -> Option<&'a str> {
+        uri.split(&format!("{key}="))
+            .nth(1)
+            .map(|s| s.split(['&', ' ', '\n']).next().unwrap_or(s))
+            .filter(|s| !s.is_empty())
+    }
+    let addr = q(uri, "quic")?;
+    let sni = q(uri, "qsni")?;
+    Some(crate::vault::QuicInfo {
+        addr: addr.to_string(),
+        sni: sni.to_string(),
+        cert_sha256: q(uri, "qcert").map(str::to_string),
+    })
 }
 
 /// Provision `target` into a running leshiy server and return its record.
@@ -130,20 +147,30 @@ async fn provision_inner<T: Transport>(
         format!("exists={exists}"),
     ));
 
-    // 5. Pull + 6. Run (skipped if already running).
+    // 5/6. Pull + run (skipped if exists).
     if !exists {
-        *current = Step::PullImage;
         on_event(ev(Step::PullImage, Status::Started, &p.image_ref));
         t.run(&docker::pull_cmd(&p.image_ref)).await?.ok()?;
         on_event(ev(Step::PullImage, Status::Done, ""));
 
-        *current = Step::RunContainer;
         on_event(ev(Step::RunContainer, Status::Started, ""));
+        let mut envs = vec![
+            ("LESHIY_HOST".to_string(), p.public_host.clone()),
+            ("LESHIY_DEST".to_string(), p.dest_sni.clone()),
+            (
+                "LESHIY_LISTEN".to_string(),
+                format!("0.0.0.0:{}", p.listen_port),
+            ),
+        ];
+        if let Some(q) = p.quic_port {
+            envs.push(("LESHIY_QUIC_LISTEN".to_string(), format!("0.0.0.0:{q}")));
+        }
         t.run(&docker::run_cmd(
             &p.container,
             &p.image_ref,
-            p.reality_port,
+            p.listen_port,
             p.quic_port,
+            &envs,
         ))
         .await?
         .ok()?;
@@ -178,7 +205,7 @@ async fn provision_inner<T: Transport>(
         image_ref: p.image_ref.clone(),
         container: p.container.clone(),
         reality_public_b64,
-        quic: None,
+        quic: parse_quic_fields(&uri),
         clients: vec![ClientConfig {
             short_id,
             label: p.user_label.clone(),
@@ -313,7 +340,7 @@ mod tests {
             image_ref: "ghcr.io/x/leshiy:1.4.0".into(),
             container: "leshiy".into(),
             quic_port: None,
-            reality_port: 443,
+            listen_port: 443,
             user_label: "self".into(),
             now: 1_700_000_000,
         }
@@ -483,6 +510,43 @@ mod tests {
     #[test]
     fn parse_uri_requires_at_sign() {
         assert!(parse_uri_fields("leshiy://nohost-no-at?sid=01").is_err());
+    }
+
+    #[test]
+    fn parse_quic_fields_extracts_endpoint() {
+        let uri = "leshiy://QUJD@1.2.3.4:443?sni=d&sid=0102030400000000&quic=1.2.3.4:8443&qsni=cdn.example.com&qcert=abc123";
+        let q = parse_quic_fields(uri).unwrap();
+        assert_eq!(q.addr, "1.2.3.4:8443");
+        assert_eq!(q.sni, "cdn.example.com");
+        assert_eq!(q.cert_sha256.as_deref(), Some("abc123"));
+        assert!(parse_quic_fields("leshiy://QUJD@1.2.3.4:443?sni=d&sid=01").is_none());
+    }
+
+    #[tokio::test]
+    async fn provision_populates_quic_when_uri_has_it() {
+        let mut t = FakeTransport::new();
+        let uri = "leshiy://QUJD@1.2.3.4:443?sni=d&sid=0102030400000000&quic=1.2.3.4:8443&qsni=cdn.example.com&qcert=abc123";
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 0,
+                stdout: format!("{uri}\n"),
+                stderr: String::new(),
+            },
+        );
+        let mut p = params();
+        p.quic_port = Some(8443);
+        let rec = provision(&mut t, &p, &mut |_| {}).await.unwrap();
+        let q = rec.quic.expect("quic populated");
+        assert_eq!(q.addr, "1.2.3.4:8443");
     }
 
     #[tokio::test]

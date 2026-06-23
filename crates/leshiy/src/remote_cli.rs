@@ -160,11 +160,8 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
 
             let id = format!("{h}-{port}");
             let label = label.unwrap_or_else(|| h.clone());
-            let reality_port: u16 = dest
-                .rsplit_once(':')
-                .and_then(|(_, p)| p.parse().ok())
-                .unwrap_or(443);
-            let public_host = format!("{h}:{reality_port}");
+            let listen_port: u16 = 443;
+            let public_host = format!("{h}:{listen_port}");
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -184,7 +181,7 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                 image_ref: image,
                 container: "leshiy".into(),
                 quic_port: quic,
-                reality_port,
+                listen_port,
                 user_label,
                 now,
             };
