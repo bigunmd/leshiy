@@ -405,7 +405,7 @@ mod tests {
             secret: SshSecret::Password("pw".to_string().into()),
             public_host: "203.0.113.5:443".into(),
             dest_sni: "www.microsoft.com:443".into(),
-            image_ref: "ghcr.io/x/leshiy:1.4.0".into(),
+            image_ref: "ghcr.io/x/leshiy:1.5.0".into(),
             container: "leshiy".into(),
             quic_port: None,
             listen_port: 443,
@@ -865,7 +865,7 @@ mod tests {
 
     #[test]
     fn valid_image_ref_accepts_registry_refs_rejects_injection() {
-        assert!(valid_image_ref("ghcr.io/leshiy/leshiy:1.4.0"));
+        assert!(valid_image_ref("ghcr.io/leshiy/leshiy:1.5.0"));
         assert!(valid_image_ref("localhost:5000/leshiy@sha256:abc"));
         assert!(!valid_image_ref("img; rm -rf /"));
         assert!(!valid_image_ref("img$(whoami)"));

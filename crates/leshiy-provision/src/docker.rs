@@ -84,8 +84,8 @@ mod tests {
     #[test]
     fn pull_and_run_shape() {
         assert_eq!(
-            pull_cmd("ghcr.io/x/leshiy:1.4.0"),
-            "sudo docker pull ghcr.io/x/leshiy:1.4.0"
+            pull_cmd("ghcr.io/x/leshiy:1.5.0"),
+            "sudo docker pull ghcr.io/x/leshiy:1.5.0"
         );
     }
 

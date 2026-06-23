@@ -382,7 +382,7 @@ pub enum RemoteCmd {
         #[arg(long)]
         quic: Option<u16>,
         /// Container image reference.
-        #[arg(long, default_value = "ghcr.io/leshiy/leshiy:1.4.0")]
+        #[arg(long, default_value = "ghcr.io/leshiy/leshiy:1.5.0")]
         image: String,
         /// Friendly server label.
         #[arg(long)]

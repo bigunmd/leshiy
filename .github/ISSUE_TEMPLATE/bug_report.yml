@@ -59,7 +59,7 @@ body:
     attributes:
       label: Version
       description: Output of `leshiy --version` (or the app version).
-      placeholder: "leshiy 1.4.0"
+      placeholder: "leshiy 1.5.0"
     validations:
       required: true
   - type: input
