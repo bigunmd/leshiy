@@ -97,7 +97,7 @@ camera on Android, or from an image file), or reading it from the clipboard.
 - **By network / domain** — include or exclude specific IP ranges (CIDRs) and domains.
 - **Community rule lists** — subscribe to curated preset lists (e.g. route or bypass
   whole regions); they refresh automatically.
-- **Per-app (Android)** — tunnel only the apps you choose, or everything *except* them.
+- **Per-app (Android)** — tunnel only the apps you choose, or everything _except_ them.
 
 **Live status:** connection state, real-time throughput, and round-trip latency to
 your server.
@@ -110,20 +110,20 @@ your server.
 Capability-level comparison (not a benchmark; the alternatives are mature and widely
 deployed, Leshiy is new):
 
-| | **Leshiy** | Xray (VLESS+REALITY) | AmneziaWG | Hysteria2 |
-|---|:---:|:---:|:---:|:---:|
-| Censor-facing cloak | REALITY **+** HTTP/3 masquerade | REALITY (SNI-borrow) | obfuscated WireGuard | HTTP/3 masquerade |
-| Transports | **TCP _and_ QUIC** | TCP (primary) | UDP only | UDP (QUIC) only |
-| Auto QUIC↔TCP fallback | ✅ built-in | ❌ | ❌ | ❌ |
-| Anti-active-probing | ✅ both paths | ✅ | partial | ✅ |
-| Stream multiplexing | ✅ native | optional (mux) | n/a (L3 VPN) | ✅ (QUIC) |
-| Post-quantum key exchange | ✅ default | optional | ❌ | via TLS |
-| Per-user caps / rate / expiry | ✅ built-in (+sqlite) | via panels (3x-ui/Marzban) | external tooling | partial |
-| Entry/Exit relay chaining | ✅ **built-in, chainable** | manual (`dialerProxy`) | ❌ | ❌ |
-| Implementation | **pure Rust** | Go | Go | Go |
-| Maturity | **beta / unaudited** | mature | mature | mature |
+|                               |           **Leshiy**            |    Xray (VLESS+REALITY)    |      AmneziaWG       |     Hysteria2     |
+| ----------------------------- | :-----------------------------: | :------------------------: | :------------------: | :---------------: |
+| Censor-facing cloak           | REALITY **+** HTTP/3 masquerade |    REALITY (SNI-borrow)    | obfuscated WireGuard | HTTP/3 masquerade |
+| Transports                    |       **TCP _and_ QUIC**        |       TCP (primary)        |       UDP only       |  UDP (QUIC) only  |
+| Auto QUIC↔TCP fallback        |           ✅ built-in           |             ❌             |          ❌          |        ❌         |
+| Anti-active-probing           |          ✅ both paths          |             ✅             |       partial        |        ✅         |
+| Stream multiplexing           |            ✅ native            |       optional (mux)       |     n/a (L3 VPN)     |     ✅ (QUIC)     |
+| Post-quantum key exchange     |           ✅ default            |          optional          |          ❌          |      via TLS      |
+| Per-user caps / rate / expiry |      ✅ built-in (+sqlite)      | via panels (3x-ui/Marzban) |   external tooling   |      partial      |
+| Entry/Exit relay chaining     |   ✅ **built-in, chainable**    |   manual (`dialerProxy`)   |          ❌          |        ❌         |
+| Implementation                |          **pure Rust**          |             Go             |          Go          |        Go         |
+| Maturity                      |      **beta / unaudited**       |           mature           |        mature        |      mature       |
 
-**Where Leshiy aims to differ:** one tool that runs *both* a REALITY/TCP and a QUIC/HTTP-3
+**Where Leshiy aims to differ:** one tool that runs _both_ a REALITY/TCP and a QUIC/HTTP-3
 transport with automatic fallback, ships a built-in **entry/exit connector with relay
 chaining**, includes **multi-user management** without a separate panel, and is **pure
 Rust** (no BoringSSL/C dependency). The trade-off is track record — Xray, AmneziaWG, and
@@ -335,7 +335,7 @@ leshiy remote provision --role entry --host root@ENTRY_IP --dest www.microsoft.c
 
 Add `--role middle --downstream <prev>` nodes for extra hops. `leshiy remote ls` shows each server's role and downstream.
 
-**Prerequisite:** a published server image (default `ghcr.io/leshiy/leshiy:1.4.0`);
+**Prerequisite:** a published server image (default `ghcr.io/leshiy/leshiy:1.5.0`);
 override with `--image`.
 
 ---

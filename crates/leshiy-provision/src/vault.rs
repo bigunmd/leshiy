@@ -252,7 +252,7 @@ mod tests {
             ssh_secret: SshSecret::Password("hunter2".to_string().into()),
             host_key_fp: "SHA256:abc".into(),
             public_host: "203.0.113.5:443".into(),
-            image_ref: "ghcr.io/x/leshiy:1.4.0".into(),
+            image_ref: "ghcr.io/x/leshiy:1.5.0".into(),
             container: "leshiy".into(),
             reality_public_b64: "PUBKEY".into(),
             quic: None,
