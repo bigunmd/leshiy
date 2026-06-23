@@ -144,6 +144,94 @@ pub fn open(blob: &[u8], passphrase: &str) -> Result<Vec<ServerRecord>> {
     serde_json::from_slice(&pt).map_err(|e| Error::Vault(format!("decode: {e}")))
 }
 
+use std::path::Path;
+
+/// In-memory collection of server records, persisted as a sealed blob.
+#[derive(Default)]
+pub struct Vault {
+    records: Vec<ServerRecord>,
+}
+
+impl Vault {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Load and decrypt the vault at `path`. A missing file yields an empty vault.
+    pub fn load(path: &Path, passphrase: &str) -> Result<Self> {
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(Self {
+                records: open(&bytes, passphrase)?,
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::new()),
+            Err(e) => Err(Error::Io(e)),
+        }
+    }
+
+    /// Encrypt and atomically write the vault to `path`.
+    pub fn save(&self, path: &Path, passphrase: &str) -> Result<()> {
+        let blob = seal(&self.records, passphrase)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &blob)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    fn matches(rec: &ServerRecord, key: &str) -> bool {
+        rec.id == key || rec.label == key
+    }
+
+    /// Insert, or replace an existing record with the same `id`.
+    pub fn upsert(&mut self, rec: ServerRecord) {
+        if let Some(slot) = self.records.iter_mut().find(|r| r.id == rec.id) {
+            *slot = rec;
+        } else {
+            self.records.push(rec);
+        }
+    }
+
+    pub fn get(&self, id_or_label: &str) -> Option<&ServerRecord> {
+        self.records.iter().find(|r| Self::matches(r, id_or_label))
+    }
+
+    pub fn get_mut(&mut self, id_or_label: &str) -> Option<&mut ServerRecord> {
+        self.records
+            .iter_mut()
+            .find(|r| Self::matches(r, id_or_label))
+    }
+
+    pub fn remove(&mut self, id_or_label: &str) -> bool {
+        let before = self.records.len();
+        self.records.retain(|r| !Self::matches(r, id_or_label));
+        self.records.len() != before
+    }
+
+    pub fn list(&self) -> &[ServerRecord] {
+        &self.records
+    }
+
+    /// Seal a single record (optionally connection-only) under `passphrase`.
+    pub fn export_one(
+        &self,
+        id_or_label: &str,
+        connection_only: bool,
+        passphrase: &str,
+    ) -> Result<Vec<u8>> {
+        let rec = self
+            .get(id_or_label)
+            .ok_or_else(|| Error::Vault(format!("no server {id_or_label:?}")))?;
+        let out = if connection_only {
+            rec.redacted_for_sharing()
+        } else {
+            rec.clone()
+        };
+        seal(std::slice::from_ref(&out), passphrase)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +341,45 @@ mod tests {
         blob[super::MAGIC.len()] = 9; // bogus version
         let err = open(&blob, "pw").unwrap_err();
         assert!(format!("{err}").contains("version"));
+    }
+
+    #[test]
+    fn upsert_get_remove() {
+        let mut v = Vault::new();
+        v.upsert(sample());
+        assert_eq!(v.list().len(), 1);
+        assert!(v.get("srv1").is_some());
+        assert!(v.get("my-vps").is_some()); // by label
+        assert!(v.remove("srv1"));
+        assert_eq!(v.list().len(), 0);
+    }
+
+    #[test]
+    fn save_then_load_round_trips() {
+        let dir = std::env::temp_dir().join(format!("lvault-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("servers.lvault");
+        let mut v = Vault::new();
+        v.upsert(sample());
+        v.save(&path, "pw").unwrap();
+        let loaded = Vault::load(&path, "pw").unwrap();
+        assert_eq!(loaded.list().len(), 1);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn load_missing_file_is_empty() {
+        let v = Vault::load(std::path::Path::new("/nonexistent/x.lvault"), "pw").unwrap();
+        assert_eq!(v.list().len(), 0);
+    }
+
+    #[test]
+    fn export_connection_only_strips_secret() {
+        let mut v = Vault::new();
+        v.upsert(sample());
+        let blob = v.export_one("srv1", true, "share-pw").unwrap();
+        let recs = open(&blob, "share-pw").unwrap();
+        assert!(matches!(recs[0].ssh_secret, SshSecret::None));
+        assert_eq!(recs[0].clients.len(), 1);
     }
 }
