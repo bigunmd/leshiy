@@ -117,4 +117,35 @@ mod tests {
         assert!(matches!(r.ssh_secret, SshSecret::None));
         assert_eq!(r.clients.len(), 1);
     }
+
+    #[test]
+    fn ssh_secret_debug_redacts_contents() {
+        let pw = SshSecret::Password("hunter2".to_string().into());
+        assert!(!format!("{pw:?}").contains("hunter2"));
+        let key = SshSecret::PrivateKey {
+            pem: "PRIVATE-KEY-MATERIAL".to_string().into(),
+            passphrase: Some("secret-pass".to_string().into()),
+        };
+        let dbg = format!("{key:?}");
+        assert!(!dbg.contains("PRIVATE-KEY-MATERIAL"));
+        assert!(!dbg.contains("secret-pass"));
+    }
+
+    #[test]
+    fn private_key_secret_json_round_trips() {
+        let mut r = sample();
+        r.ssh_secret = SshSecret::PrivateKey {
+            pem: "PEMDATA".to_string().into(),
+            passphrase: Some("pp".to_string().into()),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: ServerRecord = serde_json::from_str(&json).unwrap();
+        match back.ssh_secret {
+            SshSecret::PrivateKey { pem, passphrase } => {
+                assert_eq!(&*pem, "PEMDATA");
+                assert_eq!(passphrase.as_deref().map(|p| &**p), Some("pp"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
 }
