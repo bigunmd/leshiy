@@ -235,7 +235,7 @@ pub async fn list_users<T: Transport>(t: &mut T, rec: &ServerRecord) -> Result<V
         .run(&docker::exec_user_list_json_cmd(&rec.container))
         .await?
         .ok()?;
-    // The JSON is the last non-empty line of stdout (guards against any banner noise).
+    // Takes the JSON array line from stdout (stderr is already separate).
     let line = out
         .stdout
         .lines()
@@ -251,6 +251,9 @@ pub async fn delete_user<T: Transport>(
     rec: &mut ServerRecord,
     short_id: &str,
 ) -> Result<()> {
+    if short_id.len() != 16 || !short_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(Error::Parse(format!("invalid short_id: {short_id:?}")));
+    }
     t.run(&docker::exec_user_rm_cmd(&rec.container, short_id))
         .await?
         .ok()?;
@@ -650,6 +653,35 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, crate::error::Error::Command { .. }));
         // client NOT dropped on failure
+        assert_eq!(rec.clients.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_users_bad_json_is_parse_error() {
+        let mut t = FakeTransport::new();
+        t.on(
+            "user list --json",
+            CommandOutput {
+                code: 0,
+                stdout: "not json at all".into(),
+                stderr: String::new(),
+            },
+        );
+        let rec = rec_with_one_client();
+        let err = list_users(&mut t, &rec).await.unwrap_err();
+        assert!(matches!(err, crate::error::Error::Parse(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_user_rejects_non_hex_short_id() {
+        let mut t = FakeTransport::new();
+        let mut rec = rec_with_one_client();
+        let err = delete_user(&mut t, &mut rec, "x; rm -rf /")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::error::Error::Parse(_)));
+        // nothing executed, client retained
+        assert!(t.calls().is_empty());
         assert_eq!(rec.clients.len(), 1);
     }
 
