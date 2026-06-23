@@ -42,6 +42,7 @@ pub async fn run(
         _ = async {
             while let Some(evt) = events.recv().await {
                 if let Some(state) = evt.state {
+                    crate::ui::eline(&format!("vpn: {}", crate::ui::value(&format!("{state:?}"))));
                     tracing::info!(?state, "vpn state");
                 }
             }

@@ -10,6 +10,13 @@ const REALITY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub async fn run(uri: &str, socks: &str, transport: crate::cli::Transport) -> Result<()> {
     use crate::cli::Transport;
     let parsed = RealityUri::parse(uri).map_err(|e| anyhow!("bad uri: {e}"))?;
+    crate::ui::ok(&format!(
+        "local SOCKS5 proxy on {}",
+        crate::ui::value(socks)
+    ));
+    crate::ui::hint(&format!(
+        "point your browser/app at socks5://{socks} (Ctrl-C to stop)"
+    ));
     match transport {
         Transport::Quic => serve_quic(&parsed, socks).await,
         Transport::Tcp => serve_reality(&parsed, socks).await,

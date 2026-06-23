@@ -6,13 +6,37 @@ mod quickstart;
 mod reality_config;
 mod server;
 mod tun;
+mod ui;
 mod user_cli;
 mod vpn;
 
 use clap::Parser;
 
+/// Format an anyhow error as `error: <top>` + an indented `caused by:` chain.
+fn render_error(e: &anyhow::Error) -> String {
+    use std::fmt::Write;
+    let color = ui::color_stderr();
+    let mut s = format!(
+        "{} {}",
+        ui::paint("error:", anstyle::AnsiColor::Red.on_default().bold(), color),
+        e
+    );
+    for cause in e.chain().skip(1) {
+        let _ = write!(s, "\n  {} {cause}", ui::label("caused by:"));
+    }
+    s
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> std::process::ExitCode {
+    if let Err(e) = run().await {
+        ui::eline(&render_error(&e));
+        return std::process::ExitCode::FAILURE;
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -24,18 +48,23 @@ async fn main() -> anyhow::Result<()> {
             use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
             use std::io::IsTerminal;
             let kp = leshiy_core::handshake::generate_keypair()?;
-            println!("public:  {}", URL_SAFE_NO_PAD.encode(&kp.public));
-            println!("private: {}", URL_SAFE_NO_PAD.encode(&*kp.private));
-            // M5: the private line is secret key material. Warn on stderr so that
-            // capturing it (scrollback, shell history, CI logs, a redirected file)
-            // is a conscious choice rather than a silent leak.
+            println!(
+                "{} {}",
+                ui::label("public: "),
+                URL_SAFE_NO_PAD.encode(&kp.public)
+            );
+            println!(
+                "{} {}",
+                ui::label("private:"),
+                URL_SAFE_NO_PAD.encode(&*kp.private)
+            );
             if std::io::stdout().is_terminal() {
-                eprintln!(
-                    "warning: the 'private' line is SECRET — do not share, log, screenshot, or commit it."
+                ui::warn(
+                    "the 'private' line is SECRET — do not share, log, screenshot, or commit it.",
                 );
             } else {
-                eprintln!(
-                    "warning: a SECRET private key was written to the redirected output — restrict it (chmod 600)."
+                ui::warn(
+                    "a SECRET private key was written to redirected output — restrict it (chmod 600).",
                 );
             }
         }
@@ -130,4 +159,17 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn render_error_shows_message_and_cause_chain() {
+        let base = anyhow::anyhow!("socket missing");
+        let wrapped = base.context("connect to control socket");
+        let out = super::render_error(&wrapped);
+        assert!(out.contains("error:"));
+        assert!(out.contains("connect to control socket"));
+        assert!(out.contains("socket missing"));
+    }
 }
