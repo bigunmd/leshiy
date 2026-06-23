@@ -319,6 +319,21 @@ and `leshiy remote user rm <server> <short_id>` deletes one. (Live `user ls`
 needs a server image built from this release or newer — it relies on
 `leshiy user list --json`.)
 
+**Chained (Entry ▶ Exit):** provision the exit first, then the entry selecting it.
+
+```sh
+# 1. Exit (terminal clean egress; QUIC carrier auto-enabled):
+leshiy remote provision --role exit --host root@EXIT_IP --dest www.cloudflare.com:443
+#    → prints a connector credential and saves the server (e.g. id EXIT_IP-22)
+
+# 2. Entry (censor-facing; forwards to the exit):
+leshiy remote provision --role entry --host root@ENTRY_IP --dest www.microsoft.com:443 \
+    --downstream EXIT_IP-22
+#    → issues the client config (QR). Clients connect to the entry; traffic exits via the exit.
+```
+
+Add `--role middle --downstream <prev>` nodes for extra hops. `leshiy remote ls` shows each server's role and downstream.
+
 **Prerequisite:** a published server image (default `ghcr.io/leshiy/leshiy:1.4.0`);
 override with `--image`.
 
