@@ -51,7 +51,11 @@ terminal_size = "0.4"
 # `rustls::pki_types`, so the DER types interoperate. `std` for the Error impl.
 rustls-pki-types = { version = "1", features = ["std"] }
 async-trait = "0.1"
-russh = "0.45"
+# Point russh at the `ring` crypto backend (already in the tree) rather than its
+# default `aws-lc-rs`, to keep the SSH client's crypto footprint light. Keep
+# `flate2` (compression) and `rsa` (RSA SSH-key support; see deny.toml
+# RUSTSEC-2023-0071 note). aws-lc-rs is still pulled by the QUIC/rustls stack.
+russh = { version = "0.61", default-features = false, features = ["flate2", "ring", "rsa"] }
 argon2 = "0.5"
 uuid = { version = "1", features = ["v4"] }
 # Helper IPC (Phase 4): SO_PEERCRED peer-uid auth on the control socket (`socket`),

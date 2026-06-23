@@ -10,15 +10,25 @@
 # Fail the build on any RustSec advisory affecting the dependency tree. Watch
 # the young QUIC/HTTP3 stack (quinn, h3, h3-quinn) and rusqlite in particular.
 yanked = "deny"
-# Reviewed exceptions. These are `unmaintained` advisories (NOT vulnerabilities)
-# with no safe upgrade available; each is an explicit, auditable decision rather
-# than disabling unmaintained detection wholesale (so a future unmaintained dep
-# still trips the gate).
+# Reviewed exceptions. Each is an explicit, auditable risk-acceptance for an
+# advisory with NO safe upgrade available — never a blanket disable, so a future
+# unmaintained dep or a fixable vuln still trips the gate.
 ignore = [
-    # paste 1.0.15 — deep transitive: net-route -> netlink-packet-{core,route,utils}.
-    # Used only on the desktop route-table path; unavoidable without dropping
-    # net-route, and the advisory has no fixed version.
+    # paste 1.0.15 (unmaintained) — deep transitive: net-route ->
+    # netlink-packet-{core,route,utils}. Used only on the desktop route-table
+    # path; unavoidable without dropping net-route, and the advisory has no
+    # fixed version.
     "RUSTSEC-2024-0436",
+    # rsa 0.10.0-rc.x — Marvin timing side-channel (RUSTSEC-2023-0071).
+    # Transitive via russh/ssh-key for RSA SSH-key support; NO fixed version
+    # exists upstream (RustCrypto/RSA#626). Risk accepted: leshiy uses `russh`
+    # only as an SSH *client* during `leshiy remote provision`, performing at
+    # most one RSA signing op with the operator's OWN private key on the
+    # operator's OWN machine. The Marvin attack needs an attacker to time many
+    # RSA private-key operations over the network (a server-side oracle), which
+    # a one-shot client auth does not expose. Password / Ed25519 auth never
+    # touches `rsa`. Revisit when RustCrypto/RSA ships a constant-time release.
+    "RUSTSEC-2023-0071",
 ]
 
 [bans]
