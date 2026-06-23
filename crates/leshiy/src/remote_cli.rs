@@ -1,7 +1,7 @@
 //! `leshiy remote` — drive leshiy-provision from the CLI.
 
 use anyhow::{Context, Result};
-use leshiy_provision::engine::{self, ProgressEvent, ProvisionParams, Status, Step};
+use leshiy_provision::engine::{self, ProgressEvent, ProvisionParams, RemoteUser, Status, Step};
 use leshiy_provision::ssh::{RusshTransport, SshTarget, Transport};
 use leshiy_provision::vault::{ServerRecord, SshSecret, Vault};
 use std::path::PathBuf;
@@ -95,6 +95,24 @@ async fn connect_pinned(rec: &ServerRecord) -> Result<RusshTransport> {
         fp
     );
     Ok(transport)
+}
+
+/// Pair each server user with its local label (if known). Users present on the
+/// server but absent from the vault get `None` (orphans).
+pub fn annotate_users(
+    remote: &[RemoteUser],
+    clients: &[leshiy_provision::vault::ClientConfig],
+) -> Vec<(String, Option<String>, bool)> {
+    remote
+        .iter()
+        .map(|u| {
+            let label = clients
+                .iter()
+                .find(|c| c.short_id == u.short_id)
+                .map(|c| c.label.clone());
+            (u.short_id.clone(), label, u.enabled)
+        })
+        .collect()
 }
 
 pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
@@ -216,11 +234,41 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                 RemoteUserCmd::Ls { server } => {
                     let rec = vault
                         .get(&server)
+                        .cloned()
                         .ok_or_else(|| anyhow::anyhow!("no server {server}"))?;
-                    for c in &rec.clients {
-                        crate::ui::eline(&crate::ui::field(&c.label, &crate::ui::id(&c.short_id)));
-                        println!("{}", c.uri);
+                    let mut transport = connect_pinned(&rec).await?;
+                    let users = leshiy_provision::engine::list_users(&mut transport, &rec)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let rows = annotate_users(&users, &rec.clients);
+                    if rows.is_empty() {
+                        crate::ui::eline("(no users on server)");
                     }
+                    for (short_id, label, enabled) in rows {
+                        let label = label.unwrap_or_else(|| "(not in vault)".into());
+                        let state = if enabled { "enabled" } else { "disabled" };
+                        crate::ui::eline(&crate::ui::field(
+                            &label,
+                            &format!("{} {}", crate::ui::id(&short_id), state),
+                        ));
+                        println!("{short_id}");
+                    }
+                    Ok(())
+                }
+                RemoteUserCmd::Rm { server, short_id } => {
+                    let mut rec = vault
+                        .get(&server)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("no server {server}"))?;
+                    let mut transport = connect_pinned(&rec).await?;
+                    leshiy_provision::engine::delete_user(&mut transport, &mut rec, &short_id)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    vault.upsert(rec);
+                    vault
+                        .save(&vault_path(), &pass)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    crate::ui::ok(&format!("deleted user {short_id} on {server}"));
                     Ok(())
                 }
             }
@@ -298,6 +346,39 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn annotate_users_matches_labels_and_flags_orphans() {
+        use leshiy_provision::engine::RemoteUser;
+        use leshiy_provision::vault::ClientConfig;
+        let remote = vec![
+            RemoteUser {
+                short_id: "01".into(),
+                enabled: true,
+                expires_at: None,
+                data_cap: None,
+                used_up: 0,
+                used_down: 0,
+            },
+            RemoteUser {
+                short_id: "02".into(),
+                enabled: false,
+                expires_at: None,
+                data_cap: None,
+                used_up: 0,
+                used_down: 0,
+            },
+        ];
+        let clients = vec![ClientConfig {
+            short_id: "01".into(),
+            label: "phone".into(),
+            uri: "u".into(),
+        }];
+        let rows = annotate_users(&remote, &clients);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], ("01".into(), Some("phone".into()), true));
+        assert_eq!(rows[1], ("02".into(), None, false)); // on server, not in vault
+    }
 
     #[test]
     fn vault_path_ends_with_expected_file() {

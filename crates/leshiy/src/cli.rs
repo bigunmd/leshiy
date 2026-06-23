@@ -423,6 +423,8 @@ pub enum RemoteUserCmd {
     },
     /// List clients recorded for a server.
     Ls { server: String },
+    /// Delete a user on the server by short_id.
+    Rm { server: String, short_id: String },
 }
 
 #[cfg(test)]
