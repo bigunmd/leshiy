@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/leshiy-core", "crates/leshiy", "crates/leshiy-tls", "crates/leshiy-reality", "crates/leshiy-quic", "crates/leshiy-client", "crates/leshiy-tun", "crates/leshiy-helper"]
+members = ["crates/leshiy-core", "crates/leshiy", "crates/leshiy-tls", "crates/leshiy-reality", "crates/leshiy-quic", "crates/leshiy-client", "crates/leshiy-tun", "crates/leshiy-helper", "crates/leshiy-provision"]
 exclude = ["apps/gui/src-tauri"]
 
 [workspace.package]
@@ -51,6 +51,8 @@ terminal_size = "0.4"
 # `rustls::pki_types`, so the DER types interoperate. `std` for the Error impl.
 rustls-pki-types = { version = "1", features = ["std"] }
 async-trait = "0.1"
+russh = "0.45"
+argon2 = "0.5"
 uuid = { version = "1", features = ["v4"] }
 # Helper IPC (Phase 4): SO_PEERCRED peer-uid auth on the control socket (`socket`),
 # plus `getuid` for the default allow-uid / SO_PEERCRED tests (`user`). Linux.
