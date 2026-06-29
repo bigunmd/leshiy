@@ -5,7 +5,7 @@ use crate::error::HelperError;
 use crate::proto::StartParams;
 use leshiy_client::settings::TransportPref;
 use leshiy_client::{
-    ByteCounters, Rates, ReconnectParams, ReconnectingTunnel, RealTransport, State, Throughput,
+    ByteCounters, Rates, RealTransport, ReconnectParams, ReconnectingTunnel, State, Throughput,
     Transport, Tunnel,
 };
 use leshiy_reality::config::RealityUri;
