@@ -33,6 +33,11 @@ pub enum FrameType {
     Ping = 6,
     /// Keepalive response — sent in reply to a received `Ping`. Non-critical.
     Pong = 7,
+    /// Per-stream flow-control credit: payload is a 4-byte big-endian `u32` count of bytes the
+    /// receiver has consumed (and so re-grants to the sender) for `stream_id`. Non-critical: a
+    /// peer that doesn't understand it ignores it. Only emitted once `CAP_FLOWCONTROL` is
+    /// negotiated.
+    WindowUpdate = 8,
 }
 
 pub fn is_critical(ftype: u8) -> bool {

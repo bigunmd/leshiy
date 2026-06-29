@@ -1,7 +1,7 @@
 //! `leshiy tun`: dial the URI to a Tunnel, discover the server IP + original gateway,
 //! and run the full-tunnel engine. Must run with root / CAP_NET_ADMIN.
 use anyhow::{Context, Result, anyhow};
-use leshiy_client::{RealTransport, Transport as _, TransportPref};
+use leshiy_client::{ReconnectParams, ReconnectingTunnel, RealTransport, Transport as _, TransportPref};
 use leshiy_reality::config::RealityUri;
 use leshiy_tun::{TunConfig, TunEngine};
 use std::sync::Arc;
@@ -31,12 +31,16 @@ pub async fn run(
         crate::cli::Transport::Quic => TransportPref::Quic,
         crate::cli::Transport::Tcp => TransportPref::Tcp,
     };
-    let tunnel: Arc<dyn leshiy_client::Tunnel> = Arc::from(
+    let seed: Arc<dyn leshiy_client::Tunnel> = Arc::from(
         RealTransport
             .dial(uri, pref)
             .await
             .map_err(|e| anyhow!("dial: {e}"))?,
     );
+    // Wrap so the full-tunnel session auto-reconnects if the upstream drops (WSL2 NAT reset,
+    // sleep/resume, idle eviction) instead of wedging until restart — the TUN device, routes,
+    // and DNS stay in place across reconnects.
+    let tunnel = ReconnectingTunnel::spawn(RealTransport, uri, pref, seed, ReconnectParams::default());
 
     let cfg = TunConfig {
         tun_name: tun_name.to_string(),

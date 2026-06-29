@@ -2,17 +2,34 @@
 use crate::error::{Error, Result};
 use crate::frame::{Frame, FrameType, MAX_FRAME_PAYLOAD, base_type, is_critical};
 use crate::transport::{FrameRead, FrameWrite};
-use crate::version::{CAP_KEEPALIVE, Hello, Negotiated, negotiate};
+use crate::version::{CAP_FLOWCONTROL, CAP_KEEPALIVE, Hello, Negotiated, negotiate};
 use bytes::Bytes;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Semaphore, mpsc, watch};
 
 /// Upper bound on concurrently-open peer-initiated streams. A peer that exceeds
 /// it is aborting the session via resource exhaustion, so we tear the session
 /// down rather than grow the stream map without bound. (L3)
 const MAX_CONCURRENT_PEER_STREAMS: usize = 1024;
+
+/// Initial per-stream receive window granted to the peer (bytes): the sender may have at most this
+/// many bytes in flight before a `WindowUpdate` credits more. Kept well under [`MAX_BUFFERED`] so a
+/// compliant peer never trips the runaway guard, and comfortably above [`MAX_FRAME_PAYLOAD`] so a
+/// single chunk always fits the window.
+const INIT_WINDOW: usize = 256 * 1024;
+/// Re-grant credit once the consumer has drained at least this much (half the window), so the
+/// sender refills before stalling without flooding the link with `WindowUpdate`s.
+const WINDOW_THRESHOLD: usize = INIT_WINDOW / 2;
+/// Clamp a single `WindowUpdate`'s credit so a misbehaving peer can't overflow the send permits.
+const MAX_CREDIT: usize = INIT_WINDOW;
+/// Hard cap on bytes buffered for one stream awaiting its consumer. With flow control a compliant
+/// peer stays under [`INIT_WINDOW`]; this is the safety net against a peer that ignores the window
+/// (e.g. a pre-flow-control build) — that one stream is reset rather than letting the buffer grow
+/// without bound or blocking the shared reader.
+const MAX_BUFFERED: usize = 4 * 1024 * 1024;
 
 /// Keepalive timing for a mux. Only takes effect once both peers advertise
 /// [`CAP_KEEPALIVE`]; otherwise the mux behaves exactly as before (a blocking read
@@ -59,9 +76,72 @@ pub enum StreamKind {
 /// Internal commands sent from Stream/Mux to the writer task.
 enum Command {
     /// Register a new outgoing stream and send an OPEN frame.
-    Open(u32, String, mpsc::Sender<Bytes>),
+    Open(u32, String, StreamSink),
     /// Write an arbitrary frame (DATA, CLOSE, …).
     Write(Frame),
+}
+
+/// The receiver-side handle to a stream, stored in the shared [`Streams`] map. The reader pushes
+/// inbound payloads into `data_tx` (unbounded, so a slow consumer never blocks the shared reader),
+/// tracks queued bytes in `buffered`, and credits `send_window` when a `WindowUpdate` for this
+/// stream arrives.
+#[derive(Clone)]
+struct StreamSink {
+    data_tx: mpsc::UnboundedSender<Bytes>,
+    buffered: Arc<AtomicUsize>,
+    /// Our credit to *send* on this stream (bytes), or `None` when flow control isn't negotiated.
+    send_window: Option<Arc<Semaphore>>,
+}
+
+impl StreamSink {
+    /// Closing the send window wakes any sender blocked acquiring credit (it errors out) when the
+    /// stream is torn down, so a blocked `Stream::send` can never hang after the peer closes.
+    fn close(&self) {
+        if let Some(sem) = &self.send_window {
+            sem.close();
+        }
+    }
+}
+
+/// Build a `WindowUpdate` frame crediting `credit` bytes to `stream_id`.
+fn window_update_frame(stream_id: u32, credit: u32) -> Frame {
+    Frame {
+        stream_id,
+        ftype: FrameType::WindowUpdate as u8,
+        payload: Bytes::copy_from_slice(&credit.to_be_bytes()),
+    }
+}
+
+/// Create the receiver/sender halves of a new stream: an unbounded data channel (so the shared
+/// reader never blocks delivering to it), a shared buffered-bytes counter, and — when flow control
+/// is on — a send window seeded with [`INIT_WINDOW`] credit. `target` is the stream's display
+/// target; the OPEN frame's wire payload is sent separately by the caller.
+fn new_stream(
+    id: u32,
+    target: String,
+    kind: StreamKind,
+    cmd_tx: mpsc::Sender<Command>,
+    flowcontrol: bool,
+) -> (Stream, StreamSink) {
+    let (data_tx, rx) = mpsc::unbounded_channel::<Bytes>();
+    let buffered = Arc::new(AtomicUsize::new(0));
+    let send_window = flowcontrol.then(|| Arc::new(Semaphore::new(INIT_WINDOW)));
+    let sink = StreamSink {
+        data_tx,
+        buffered: buffered.clone(),
+        send_window: send_window.clone(),
+    };
+    let stream = Stream {
+        target,
+        kind,
+        id,
+        tx: cmd_tx,
+        rx,
+        buffered,
+        send_window,
+        consumed: 0,
+    };
+    (stream, sink)
 }
 
 /// A logical stream inside a [`Mux`].
@@ -72,7 +152,15 @@ pub struct Stream {
     pub kind: StreamKind,
     id: u32,
     tx: mpsc::Sender<Command>,
-    rx: mpsc::Receiver<Bytes>,
+    rx: mpsc::UnboundedReceiver<Bytes>,
+    /// Bytes queued for this stream but not yet `recv`'d. Decremented on consume; shared with the
+    /// reader, which increments it and enforces [`MAX_BUFFERED`].
+    buffered: Arc<AtomicUsize>,
+    /// Our send credit (flow control on), or `None`. Drained by `send`, refilled by inbound
+    /// `WindowUpdate`s (applied by the reader).
+    send_window: Option<Arc<Semaphore>>,
+    /// Bytes consumed since the last `WindowUpdate` we emitted (flow control on).
+    consumed: usize,
 }
 
 impl Stream {
@@ -92,6 +180,7 @@ impl Stream {
                 while !data.is_empty() {
                     let n = data.len().min(MAX_FRAME_PAYLOAD);
                     let chunk = data.split_to(n);
+                    self.acquire_credit(n).await?;
                     self.tx
                         .send(Command::Write(Frame {
                             stream_id: self.id,
@@ -108,6 +197,7 @@ impl Stream {
                 if data.len() > MAX_FRAME_PAYLOAD {
                     return Err(Error::Protocol("datagram exceeds max frame payload".into()));
                 }
+                self.acquire_credit(data.len()).await?;
                 self.tx
                     .send(Command::Write(Frame {
                         stream_id: self.id,
@@ -120,9 +210,40 @@ impl Stream {
         }
     }
 
+    /// Block until we hold `n` bytes of send credit for this stream (flow control on), consuming
+    /// them. No-op when flow control isn't negotiated. This is where backpressure propagates back
+    /// to the data origin (the tun relay / SOCKS client) when the peer's consumer is slow — instead
+    /// of the slow stream stalling the shared reader for everyone. A closed window (peer reset the
+    /// stream / tunnel died) surfaces as [`Error::Closed`].
+    async fn acquire_credit(&self, n: usize) -> Result<()> {
+        if let Some(sem) = &self.send_window {
+            sem.acquire_many(n as u32)
+                .await
+                .map_err(|_| Error::Closed)?
+                .forget();
+        }
+        Ok(())
+    }
+
     /// Receive the next payload chunk from the peer.
     pub async fn recv(&mut self) -> Result<Bytes> {
-        self.rx.recv().await.ok_or(Error::Closed)
+        let chunk = self.rx.recv().await.ok_or(Error::Closed)?;
+        // Release the buffer this chunk occupied, and (flow control on) credit the peer once we've
+        // drained at least half the window, so a fast, well-behaved transfer keeps flowing.
+        self.buffered.fetch_sub(chunk.len(), Ordering::SeqCst);
+        if self.send_window.is_some() {
+            self.consumed += chunk.len();
+            if self.consumed >= WINDOW_THRESHOLD {
+                let credit = self.consumed.min(u32::MAX as usize) as u32;
+                self.consumed = 0;
+                // Best-effort: if the writer is gone the session is already dying.
+                let _ = self
+                    .tx
+                    .send(Command::Write(window_update_frame(self.id, credit)))
+                    .await;
+            }
+        }
+        Ok(chunk)
     }
 
     /// Send a CLOSE frame and remove the stream from the registry.
@@ -138,8 +259,18 @@ impl Stream {
     }
 }
 
-/// Shared map of active streams: stream_id → data sender.
-type Streams = Arc<Mutex<HashMap<u32, mpsc::Sender<Bytes>>>>;
+/// Shared map of active streams: stream_id → receiver-side handle.
+type Streams = Arc<Mutex<HashMap<u32, StreamSink>>>;
+
+/// Drain the stream map, closing every send window — wakes any sender blocked on credit (it
+/// errors) and drops each `data_tx` so consumers see EOF. Called when a task tears the session
+/// down, so no stream is left hanging.
+fn close_all_streams(streams: &Streams) {
+    let drained: Vec<StreamSink> = streams.lock().unwrap().drain().map(|(_, s)| s).collect();
+    for sink in drained {
+        sink.close();
+    }
+}
 
 /// Multiplexer: owns the background reader/writer tasks for one [`Session`].
 pub struct Mux {
@@ -148,6 +279,9 @@ pub struct Mux {
     next_id: u32,
     pub negotiated: Negotiated,
     closed_rx: watch::Receiver<bool>,
+    /// Whether per-stream flow control was negotiated; controls whether outgoing streams get a
+    /// send window.
+    flowcontrol: bool,
 }
 
 impl Mux {
@@ -215,8 +349,8 @@ impl Mux {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
-                        Command::Open(id, target, data_tx) => {
-                            w_streams.lock().unwrap().insert(id, data_tx);
+                        Command::Open(id, target, sink) => {
+                            w_streams.lock().unwrap().insert(id, sink);
                             if writer
                                 .write_frame(&Frame {
                                     stream_id: id,
@@ -230,8 +364,10 @@ impl Mux {
                             }
                         }
                         Command::Write(f) => {
-                            if base_type(f.ftype) == FrameType::Close as u8 {
-                                w_streams.lock().unwrap().remove(&f.stream_id);
+                            if base_type(f.ftype) == FrameType::Close as u8
+                                && let Some(sink) = w_streams.lock().unwrap().remove(&f.stream_id)
+                            {
+                                sink.close();
                             }
                             if writer.write_frame(&f).await.is_err() {
                                 break;
@@ -239,11 +375,14 @@ impl Mux {
                         }
                     }
                 }
+                // The transport write side died: tear down every stream so no sender hangs.
+                close_all_streams(&w_streams);
                 let _ = w_closed.send(true);
             });
         }
 
         let keepalive_on = negotiated.capabilities & CAP_KEEPALIVE != 0;
+        let flowcontrol_on = negotiated.capabilities & CAP_FLOWCONTROL != 0;
 
         // --- reader task: dispatches inbound frames to per-stream senders ---
         {
@@ -286,14 +425,6 @@ impl Mux {
                         // Receipt already reset the idle timer above; nothing else to do.
                         continue;
                     } else if bt == FrameType::Open as u8 {
-                        let (data_tx, data_rx) = mpsc::channel::<Bytes>(64);
-                        {
-                            let mut map = r_streams.lock().unwrap();
-                            if map.len() >= MAX_CONCURRENT_PEER_STREAMS {
-                                break; // peer opened too many concurrent streams → abort (L3)
-                            }
-                            map.insert(f.stream_id, data_tx);
-                        }
                         // Parse the optional scheme prefix: `udp:` → datagram, `tcp:`/bare → stream.
                         let raw = String::from_utf8_lossy(&f.payload).into_owned();
                         let (kind, target) = match raw.strip_prefix("udp:") {
@@ -305,31 +436,74 @@ impl Mux {
                                     .unwrap_or(raw),
                             ),
                         };
-                        let stream = Stream {
-                            target,
-                            kind,
-                            id: f.stream_id,
-                            tx: r_cmd_tx.clone(),
-                            rx: data_rx,
-                        };
+                        let (stream, sink) =
+                            new_stream(f.stream_id, target, kind, r_cmd_tx.clone(), flowcontrol_on);
+                        {
+                            let mut map = r_streams.lock().unwrap();
+                            if map.len() >= MAX_CONCURRENT_PEER_STREAMS {
+                                break; // peer opened too many concurrent streams → abort (L3)
+                            }
+                            map.insert(f.stream_id, sink);
+                        }
                         if inc_tx.send(stream).await.is_err() {
                             break;
                         }
                     } else if bt == FrameType::Data as u8 || bt == FrameType::Datagram as u8 {
                         // DATA (stream) and DATAGRAM (one packet) both route to the per-stream
-                        // channel. Clone the sender out of the map BEFORE awaiting the send
-                        // so we never hold the Mutex guard across an .await.
-                        let tx = r_streams.lock().unwrap().get(&f.stream_id).cloned();
-                        if let Some(tx) = tx {
-                            let _ = tx.send(f.payload).await;
+                        // channel. The channel is UNBOUNDED, so a slow consumer can never block the
+                        // shared reader and head-of-line-block other streams; flow control bounds how
+                        // much the peer may have in flight. Clone the sink out of the map first so we
+                        // never hold the Mutex guard across an .await.
+                        let sink = r_streams.lock().unwrap().get(&f.stream_id).cloned();
+                        if let Some(sink) = sink {
+                            let n = f.payload.len();
+                            let buffered = sink.buffered.fetch_add(n, Ordering::SeqCst) + n;
+                            if buffered > MAX_BUFFERED {
+                                // The peer is ignoring its window (or there is none): reset just this
+                                // stream instead of buffering without bound or stalling the mux.
+                                sink.buffered.fetch_sub(n, Ordering::SeqCst);
+                                if let Some(sink) = r_streams.lock().unwrap().remove(&f.stream_id) {
+                                    sink.close();
+                                }
+                                let _ = r_cmd_tx
+                                    .send(Command::Write(Frame {
+                                        stream_id: f.stream_id,
+                                        ftype: FrameType::Close as u8,
+                                        payload: Bytes::new(),
+                                    }))
+                                    .await;
+                            } else {
+                                // Unbounded send: only fails if the consumer dropped its receiver.
+                                let _ = sink.data_tx.send(f.payload);
+                            }
+                        }
+                    } else if bt == FrameType::WindowUpdate as u8 {
+                        // The peer drained `credit` bytes we sent: refill our send window for this
+                        // stream so we may send more. Clamp to keep the semaphore from overflowing.
+                        if f.payload.len() >= 4 {
+                            let credit = u32::from_be_bytes([
+                                f.payload[0],
+                                f.payload[1],
+                                f.payload[2],
+                                f.payload[3],
+                            ]) as usize;
+                            if let Some(sink) = r_streams.lock().unwrap().get(&f.stream_id)
+                                && let Some(sem) = &sink.send_window
+                            {
+                                sem.add_permits(credit.min(MAX_CREDIT));
+                            }
                         }
                     } else if bt == FrameType::Close as u8 {
-                        r_streams.lock().unwrap().remove(&f.stream_id);
+                        if let Some(sink) = r_streams.lock().unwrap().remove(&f.stream_id) {
+                            sink.close();
+                        }
                     } else if is_critical(f.ftype) {
                         break; // unknown critical frame → abort session
                     }
                     // unknown non-critical frame → silently ignore (continue)
                 }
+                // The transport read side died: tear down every stream so no sender hangs.
+                close_all_streams(&r_streams);
                 let _ = r_closed.send(true);
             });
         }
@@ -379,6 +553,7 @@ impl Mux {
             next_id,
             negotiated,
             closed_rx,
+            flowcontrol: flowcontrol_on,
         })
     }
 
@@ -387,18 +562,18 @@ impl Mux {
     pub async fn open(&mut self, target: &str) -> Result<Stream> {
         let id = self.next_id;
         self.next_id += 2;
-        let (data_tx, data_rx) = mpsc::channel::<Bytes>(64);
+        let (stream, sink) = new_stream(
+            id,
+            target.to_string(),
+            StreamKind::Tcp,
+            self.cmd_tx.clone(),
+            self.flowcontrol,
+        );
         self.cmd_tx
-            .send(Command::Open(id, target.to_string(), data_tx))
+            .send(Command::Open(id, target.to_string(), sink))
             .await
             .map_err(|_| Error::Closed)?;
-        Ok(Stream {
-            target: target.to_string(),
-            kind: StreamKind::Tcp,
-            id,
-            tx: self.cmd_tx.clone(),
-            rx: data_rx,
-        })
+        Ok(stream)
     }
 
     /// Open a new outgoing UDP datagram association to `target` ("host:port").
@@ -410,18 +585,18 @@ impl Mux {
         }
         let id = self.next_id;
         self.next_id += 2;
-        let (data_tx, data_rx) = mpsc::channel::<Bytes>(64);
+        let (stream, sink) = new_stream(
+            id,
+            target.to_string(),
+            StreamKind::Udp,
+            self.cmd_tx.clone(),
+            self.flowcontrol,
+        );
         self.cmd_tx
-            .send(Command::Open(id, format!("udp:{target}"), data_tx))
+            .send(Command::Open(id, format!("udp:{target}"), sink))
             .await
             .map_err(|_| Error::Closed)?;
-        Ok(Stream {
-            target: target.to_string(),
-            kind: StreamKind::Udp,
-            id,
-            tx: self.cmd_tx.clone(),
-            rx: data_rx,
-        })
+        Ok(stream)
     }
 
     /// Wait for the next inbound stream opened by the peer.
@@ -582,6 +757,14 @@ mod tests {
             version: 1,
             min_supported: 1,
             capabilities: crate::version::CAP_KEEPALIVE,
+        }
+    }
+
+    fn hello_fc() -> Hello {
+        Hello {
+            version: 1,
+            min_supported: 1,
+            capabilities: crate::version::CAP_FLOWCONTROL,
         }
     }
 
@@ -837,6 +1020,112 @@ mod tests {
             .expect("session must abort once the peer exceeds the stream cap")
             .unwrap();
         drain.abort();
+    }
+
+    #[tokio::test]
+    async fn slow_stream_does_not_block_another_with_flow_control() {
+        // A stalled stream (its consumer never reads) must NOT head-of-line-block another stream.
+        // The peer pushes 200 frames on stream A — far past the old 64-deep per-stream channel —
+        // then one frame on stream B. With the shared reader no longer blocking on a slow stream,
+        // B's frame is delivered even though A is never drained. (Pre-fix, the reader would block
+        // on A's full channel and B.recv() would hang.)
+        let mut frames: std::collections::VecDeque<Frame> = std::collections::VecDeque::new();
+        frames.push_back(hello_frame(hello_fc()));
+        frames.push_back(Frame {
+            stream_id: 1,
+            ftype: FrameType::Open as u8,
+            payload: Bytes::from_static(b"echo:a"),
+        });
+        frames.push_back(Frame {
+            stream_id: 3,
+            ftype: FrameType::Open as u8,
+            payload: Bytes::from_static(b"echo:b"),
+        });
+        for _ in 0..200 {
+            frames.push_back(Frame {
+                stream_id: 1,
+                ftype: FrameType::Data as u8,
+                payload: Bytes::from(vec![0u8; 100]),
+            });
+        }
+        frames.push_back(Frame {
+            stream_id: 3,
+            ftype: FrameType::Data as u8,
+            payload: Bytes::from_static(b"hello-b"),
+        });
+
+        let reader = ScriptedThenSilent { frames };
+        let mut mux = Mux::start(
+            reader,
+            RecordingWriter {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            },
+            hello_fc(),
+            Role::Server,
+        )
+        .await
+        .unwrap();
+
+        let a = mux.accept().await.unwrap(); // stream A: id 1, intentionally never drained
+        let mut b = mux.accept().await.unwrap(); // stream B: id 3
+        assert_eq!(a.target, "echo:a");
+        assert_eq!(b.target, "echo:b");
+
+        let got = tokio::time::timeout(Duration::from_secs(1), b.recv())
+            .await
+            .expect("stream B must not be head-of-line-blocked by the stalled stream A")
+            .unwrap();
+        assert_eq!(got.as_ref(), b"hello-b");
+    }
+
+    #[tokio::test]
+    async fn flow_control_allows_transfer_larger_than_window() {
+        // Send more than one window's worth of bytes through a real session. This only completes
+        // if the receiver credits the sender (`WindowUpdate`) as it drains — otherwise the sender
+        // blocks at INIT_WINDOW and the transfer deadlocks.
+        const TOTAL: usize = 1024 * 1024; // 1 MiB ≫ INIT_WINDOW (256 KiB)
+
+        let server = generate_keypair().unwrap();
+        let server_pub = server.public.clone();
+        let server_priv = server.private.clone();
+        let (c_io, s_io) = tokio::io::duplex(64 * 1024);
+
+        let srv = tokio::spawn(async move {
+            let sess = Session::accept(s_io, &server_priv, PROTOCOL_MAJOR)
+                .await
+                .unwrap();
+            let (r, w) = sess.into_halves();
+            let mut mux = Mux::start(r, w, hello_fc(), Role::Server).await.unwrap();
+            let mut stream = mux.accept().await.unwrap();
+            let mut got = 0usize;
+            while got < TOTAL {
+                match stream.recv().await {
+                    Ok(b) if !b.is_empty() => got += b.len(),
+                    _ => break,
+                }
+            }
+            got
+        });
+
+        let client = generate_keypair().unwrap();
+        let sess = Session::connect(c_io, &server_pub, &client.private, PROTOCOL_MAJOR)
+            .await
+            .unwrap();
+        let (r, w) = sess.into_halves();
+        let mut mux = Mux::start(r, w, hello_fc(), Role::Client).await.unwrap();
+        let s = mux.open("sink:0").await.unwrap();
+        let chunk = Bytes::from(vec![7u8; 32 * 1024]);
+        let mut sent = 0usize;
+        while sent < TOTAL {
+            s.send(chunk.clone()).await.unwrap();
+            sent += chunk.len();
+        }
+
+        let got = tokio::time::timeout(Duration::from_secs(5), srv)
+            .await
+            .expect("transfer larger than the window must not deadlock")
+            .unwrap();
+        assert_eq!(got, TOTAL);
     }
 
     #[tokio::test]

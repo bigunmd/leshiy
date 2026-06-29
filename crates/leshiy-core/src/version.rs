@@ -13,6 +13,13 @@ pub const CAP_DATAGRAM: u64 = 1 << 0;
 /// mode) is detected and `closed()` fires instead of the reader blocking forever.
 pub const CAP_KEEPALIVE: u64 = 1 << 1;
 
+/// Capability bit: the peer understands per-stream flow control (the `WindowUpdate` frame and
+/// credit accounting). Negotiated through `Hello.capabilities`; only when both peers advertise it
+/// does the mux apply windowing. When active, the shared reader never blocks delivering data to a
+/// slow stream (it backpressures the sender via credits instead), so one stalled stream can no
+/// longer head-of-line-block the whole tunnel.
+pub const CAP_FLOWCONTROL: u64 = 1 << 2;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hello {
     pub version: u16,
@@ -137,9 +144,33 @@ mod tests {
     }
 
     #[test]
-    fn datagram_and_keepalive_are_distinct_bits() {
+    fn flowcontrol_cap_negotiated_only_when_both_advertise() {
+        let with = Hello {
+            version: 1,
+            min_supported: 1,
+            capabilities: CAP_FLOWCONTROL,
+        };
+        let without = Hello {
+            version: 1,
+            min_supported: 1,
+            capabilities: 0,
+        };
+        assert_eq!(
+            negotiate(&with, &with).unwrap().capabilities & CAP_FLOWCONTROL,
+            CAP_FLOWCONTROL
+        );
+        assert_eq!(
+            negotiate(&with, &without).unwrap().capabilities & CAP_FLOWCONTROL,
+            0
+        );
+    }
+
+    #[test]
+    fn datagram_keepalive_flowcontrol_are_distinct_bits() {
         assert_ne!(CAP_DATAGRAM, CAP_KEEPALIVE);
         assert_eq!(CAP_DATAGRAM & CAP_KEEPALIVE, 0);
+        assert_eq!(CAP_DATAGRAM & CAP_FLOWCONTROL, 0);
+        assert_eq!(CAP_KEEPALIVE & CAP_FLOWCONTROL, 0);
     }
 
     #[test]

@@ -12,6 +12,11 @@ fn bbr_transport() -> Arc<TransportConfig> {
     transport.max_idle_timeout(Some(
         quinn::IdleTimeout::try_from(std::time::Duration::from_secs(30)).unwrap(),
     ));
+    // Send keepalive PINGs well within the idle timeout so an otherwise-idle tunnel — or one whose
+    // UDP path is briefly disrupted (e.g. WSL2 NAT rebind, sleep/resume) — stays alive and the
+    // break is detected promptly, instead of the connection silently dying after 30s idle. Quinn
+    // disables keepalive by default; without it an idle QUIC tunnel is torn down on idle timeout.
+    transport.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
     Arc::new(transport)
 }
 

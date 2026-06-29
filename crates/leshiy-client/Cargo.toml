@@ -14,6 +14,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 bytes = { workspace = true }
 h3 = { workspace = true }
 h3-quinn = { workspace = true }
