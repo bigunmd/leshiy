@@ -4,7 +4,10 @@
 use crate::error::HelperError;
 use crate::proto::StartParams;
 use leshiy_client::settings::TransportPref;
-use leshiy_client::{ByteCounters, Rates, RealTransport, State, Throughput, Transport, Tunnel};
+use leshiy_client::{
+    ByteCounters, Rates, ReconnectParams, ReconnectingTunnel, RealTransport, State, Throughput,
+    Transport, Tunnel,
+};
 use leshiy_reality::config::RealityUri;
 use leshiy_tun::{TunConfig, TunEngine};
 use std::sync::Arc;
@@ -153,7 +156,18 @@ impl EngineRunner {
         .map_err(|_| HelperError::Engine("dial timed out".into()))?
         // Surface the real dial error (don't swallow it) so failures are diagnosable.
         .map_err(|e| HelperError::Engine(format!("dial failed: {e}")))?;
-        let tunnel: Arc<dyn Tunnel> = Arc::from(dialed);
+        let seed: Arc<dyn Tunnel> = Arc::from(dialed);
+        // Auto-reconnect the full-tunnel session if the upstream drops (WSL2 NAT reset,
+        // sleep/resume, idle eviction). Without this the engine keeps running over a dead tunnel:
+        // new flows fail with "connection refused" while the GUI still shows Connected. The TUN
+        // device, routes, and DNS stay in place across reconnects.
+        let tunnel: Arc<dyn Tunnel> = ReconnectingTunnel::spawn(
+            RealTransport,
+            params.uri.clone(),
+            Self::pref(params.transport),
+            seed,
+            ReconnectParams::default(),
+        );
         tracing::info!("tunnel dialed; bringing up the TUN engine");
 
         let cfg = TunConfig {

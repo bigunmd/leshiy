@@ -100,7 +100,9 @@ pub(crate) fn server_hello() -> Hello {
     Hello {
         version: PROTOCOL_MAJOR,
         min_supported: 1,
-        capabilities: leshiy_core::version::CAP_DATAGRAM | leshiy_core::version::CAP_KEEPALIVE,
+        capabilities: leshiy_core::version::CAP_DATAGRAM
+            | leshiy_core::version::CAP_KEEPALIVE
+            | leshiy_core::version::CAP_FLOWCONTROL,
     }
 }
 
