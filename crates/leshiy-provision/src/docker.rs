@@ -6,16 +6,18 @@ pub fn detect_docker_cmd() -> &'static str {
     "command -v docker >/dev/null 2>&1 && echo yes || echo no"
 }
 
-/// Install Docker by sniffing the available package manager.
+/// Install Docker by sniffing the available package manager. The whole script
+/// runs under a single `sudo` so password-sudo mode only needs one prompt
+/// (the transport primes `sudo -S` once per command).
 pub fn install_docker_cmd() -> &'static str {
-    "set -e; \
-     if command -v apt-get >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y docker.io; \
-     elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y docker; \
-     elif command -v yum >/dev/null 2>&1; then sudo yum install -y docker; \
-     elif command -v zypper >/dev/null 2>&1; then sudo zypper install -y docker; \
-     elif command -v pacman >/dev/null 2>&1; then sudo pacman -Sy --noconfirm docker; \
-     else echo 'no supported package manager' >&2; exit 1; fi; \
-     sudo systemctl enable --now docker"
+    "sudo sh -c 'set -e; \
+     if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y docker.io; \
+     elif command -v dnf >/dev/null 2>&1; then dnf install -y docker; \
+     elif command -v yum >/dev/null 2>&1; then yum install -y docker; \
+     elif command -v zypper >/dev/null 2>&1; then zypper install -y docker; \
+     elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm docker; \
+     else echo no supported package manager >&2; exit 1; fi; \
+     systemctl enable --now docker'"
 }
 
 pub fn pull_cmd(image_ref: &str) -> String {

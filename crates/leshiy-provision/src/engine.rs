@@ -72,6 +72,9 @@ pub struct ProvisionParams {
     pub role: ProvisionRole,
     pub connector: Option<String>,
     pub downstream: Option<String>,
+    /// Persist that this server escalates via sudo, so day-2 ops prompt for the
+    /// sudo password. The password itself is never stored.
+    pub sudo: bool,
 }
 
 fn ev(step: Step, status: Status, detail: impl Into<String>) -> ProgressEvent {
@@ -280,6 +283,7 @@ async fn provision_inner<T: Transport>(
         role: p.role.as_str().to_string(),
         connector_uri,
         downstream: p.downstream.clone(),
+        sudo: p.sudo,
     };
     on_event(ev(Step::Persist, Status::Done, &rec.id));
     Ok(rec)
@@ -414,6 +418,7 @@ mod tests {
             role: ProvisionRole::Single,
             connector: None,
             downstream: None,
+            sudo: false,
         }
     }
 
@@ -680,6 +685,7 @@ mod tests {
             role: "single".into(),
             connector_uri: None,
             downstream: None,
+            sudo: false,
         };
         let cc = add_user(&mut t, &mut rec, "phone", "").await.unwrap();
         assert_eq!(cc.label, "phone");
@@ -718,6 +724,7 @@ mod tests {
             role: "single".into(),
             connector_uri: None,
             downstream: None,
+            sudo: false,
         };
         assert!(status(&mut t, &rec).await.unwrap());
     }
@@ -743,6 +750,7 @@ mod tests {
             role: "single".into(),
             connector_uri: None,
             downstream: None,
+            sudo: false,
         };
         teardown(&mut t, &rec, false).await.unwrap();
         assert!(t.calls().iter().any(|c| c.contains("docker rm -f leshiy")));
@@ -771,6 +779,7 @@ mod tests {
             role: "single".into(),
             connector_uri: None,
             downstream: None,
+            sudo: false,
         }
     }
 
@@ -1002,6 +1011,7 @@ mod tests {
             role: "single".into(),
             connector_uri: None,
             downstream: None,
+            sudo: false,
         };
         teardown(&mut t, &rec, true).await.unwrap();
         assert!(t.calls().iter().any(|c| c.contains("docker rm -f leshiy")));

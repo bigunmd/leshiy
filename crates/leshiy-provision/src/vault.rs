@@ -71,6 +71,11 @@ pub struct ServerRecord {
     pub connector_uri: Option<String>,
     #[serde(default)]
     pub downstream: Option<String>,
+    /// True when this server was provisioned as a non-root user and its
+    /// privileged commands must run via `sudo` (day-2 ops prompt for the sudo
+    /// password). The password itself is never persisted.
+    #[serde(default)]
+    pub sudo: bool,
 }
 
 impl ServerRecord {
@@ -265,6 +270,7 @@ mod tests {
             role: "single".into(),
             connector_uri: None,
             downstream: None,
+            sudo: false,
         }
     }
 

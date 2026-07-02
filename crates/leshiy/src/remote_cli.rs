@@ -96,6 +96,13 @@ async fn connect_pinned(rec: &ServerRecord) -> Result<RusshTransport> {
         rec.host_key_fp,
         fp
     );
+    // Sudo-provisioned servers need the sudo password for every privileged
+    // command; prompt for it here so all day-2 ops (user add/rm, status,
+    // teardown) work. The password is used for this session only, never stored.
+    if rec.sudo {
+        let pw = rpassword::prompt_password("sudo password: ")?;
+        transport.set_sudo_password(Some(Zeroizing::new(pw)));
+    }
     Ok(transport)
 }
 
@@ -158,6 +165,8 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
             host,
             key,
             password_stdin,
+            sudo,
+            sudo_password_stdin,
             dest,
             quic,
             port: cli_port,
@@ -184,6 +193,25 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                 SshSecret::Password(Zeroizing::new(rpassword::prompt_password(
                     "SSH password: ",
                 )?))
+            };
+
+            // --sudo-password-stdin implies --sudo. Gather the sudo password now
+            // (stdin read, if any, happens before other prompts).
+            let use_sudo = sudo || sudo_password_stdin;
+            let sudo_password: Option<Zeroizing<String>> = if use_sudo {
+                if sudo_password_stdin {
+                    let mut line = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut line)?;
+                    Some(Zeroizing::new(
+                        line.trim_end_matches(['\n', '\r']).to_string(),
+                    ))
+                } else {
+                    Some(Zeroizing::new(rpassword::prompt_password(
+                        "sudo password: ",
+                    )?))
+                }
+            } else {
+                None
             };
 
             let listen_port = resolve_listen_port(cli_port)?;
@@ -250,9 +278,11 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                 role,
                 connector,
                 downstream: downstream_id,
+                sudo: use_sudo,
             };
 
             let mut transport = RusshTransport::new();
+            transport.set_sudo_password(sudo_password);
             let rec = engine::provision(&mut transport, &params, &mut |e| render_progress(&e))
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -516,6 +546,7 @@ mod tests {
             role: "single".into(),
             connector_uri: None,
             downstream: None,
+            sudo: false,
         });
         let blob = v.export_one("s1", false, "share").unwrap();
         let recs = leshiy_provision::vault::open(&blob, "share").unwrap();

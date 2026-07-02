@@ -6,6 +6,17 @@ use crate::ssh::{CommandOutput, SshTarget, Transport};
 use crate::vault::SshSecret;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
+use zeroize::Zeroizing;
+
+/// Rewrite a leading `sudo ` into a non-interactive `sudo -S -p ''` that reads
+/// the password from stdin. Commands that don't start with `sudo ` (e.g. the
+/// docker probe) are returned unchanged. Pure so it can be unit-tested.
+fn sudoize(cmd: &str) -> String {
+    match cmd.strip_prefix("sudo ") {
+        Some(rest) => format!("sudo -S -p '' {rest}"),
+        None => cmd.to_string(),
+    }
+}
 
 /// russh client handler that captures the server's host-key fingerprint into a
 /// shared `Arc<Mutex<Option<String>>>` so `RusshTransport` can read it after
@@ -40,6 +51,10 @@ impl russh::client::Handler for Handler {
 pub struct RusshTransport {
     handle: Option<russh::client::Handle<Handler>>,
     fp: Arc<Mutex<Option<String>>>,
+    /// When set, privileged commands run via `sudo -S` with this password fed on
+    /// stdin. `None` (default) runs `sudo` as-is — correct for root or a
+    /// passwordless-sudo (NOPASSWD) user.
+    sudo_password: Option<Zeroizing<String>>,
 }
 
 impl RusshTransport {
@@ -47,7 +62,14 @@ impl RusshTransport {
         Self {
             handle: None,
             fp: Arc::new(Mutex::new(None)),
+            sudo_password: None,
         }
+    }
+
+    /// Provide a sudo password so privileged commands escalate non-interactively.
+    /// Pass `None` to disable (the default).
+    pub fn set_sudo_password(&mut self, pw: Option<Zeroizing<String>>) {
+        self.sudo_password = pw;
     }
 }
 
@@ -114,6 +136,26 @@ impl Transport for RusshTransport {
     }
 
     async fn run(&mut self, cmd: &str) -> Result<CommandOutput> {
+        // In password-sudo mode, rewrite a leading `sudo` to read the password
+        // from stdin and stage that password (with trailing newline) to feed in
+        // after exec. Copy it out of `self` before borrowing `self.handle`.
+        let feed_pw = self.sudo_password.is_some() && cmd.starts_with("sudo ");
+        let final_cmd = if feed_pw {
+            sudoize(cmd)
+        } else {
+            cmd.to_string()
+        };
+        let pw_line: Option<Zeroizing<Vec<u8>>> = if feed_pw {
+            self.sudo_password.as_ref().map(|pw| {
+                let mut v = Vec::with_capacity(pw.len() + 1);
+                v.extend_from_slice(pw.as_bytes());
+                v.push(b'\n');
+                Zeroizing::new(v)
+            })
+        } else {
+            None
+        };
+
         let handle = self
             .handle
             .as_mut()
@@ -125,9 +167,18 @@ impl Transport for RusshTransport {
             .map_err(|e| Error::Ssh(e.to_string()))?;
 
         channel
-            .exec(true, cmd)
+            .exec(true, final_cmd.as_str())
             .await
             .map_err(|e| Error::Ssh(e.to_string()))?;
+
+        // Feed the sudo password on stdin, then EOF so the command can proceed.
+        if let Some(line) = &pw_line {
+            channel
+                .data(&line[..])
+                .await
+                .map_err(|e| Error::Ssh(e.to_string()))?;
+            channel.eof().await.map_err(|e| Error::Ssh(e.to_string()))?;
+        }
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -161,5 +212,29 @@ impl Transport for RusshTransport {
             "umask 077; printf %s '{b64}' | base64 -d > '{safe_path}' && chmod {mode:o} '{safe_path}'"
         );
         self.run(&cmd).await?.ok().map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sudoize;
+
+    #[test]
+    fn sudoize_rewrites_leading_sudo_for_stdin_password() {
+        assert_eq!(
+            sudoize("sudo docker pull img:1"),
+            "sudo -S -p '' docker pull img:1"
+        );
+        // Only the leading token is touched; the rest is preserved verbatim.
+        assert_eq!(
+            sudoize("sudo sh -c 'set -e; systemctl enable --now docker'"),
+            "sudo -S -p '' sh -c 'set -e; systemctl enable --now docker'"
+        );
+    }
+
+    #[test]
+    fn sudoize_leaves_non_sudo_commands_alone() {
+        let probe = "command -v docker >/dev/null 2>&1 && echo yes || echo no";
+        assert_eq!(sudoize(probe), probe);
     }
 }
