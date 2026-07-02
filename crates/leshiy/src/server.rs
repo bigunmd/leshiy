@@ -41,6 +41,18 @@ pub struct InitOptions<'a> {
     pub connector: Option<&'a str>,
 }
 
+/// Ensure a borrowed-site `dest` carries an explicit port, defaulting to 443.
+/// The REALITY server dials `dest` verbatim (`TcpStream::connect`) for every
+/// connection to borrow its TLS handshake, so a port-less `www.example.com`
+/// would fail to connect and break every handshake. Hostnames never contain a
+/// `:`, so "has a numeric suffix after the last `:`" reliably detects a port.
+pub fn ensure_dest_port(dest: &str) -> String {
+    match dest.rsplit_once(':') {
+        Some((_, p)) if p.parse::<u16>().is_ok() => dest.to_string(),
+        _ => format!("{dest}:443"),
+    }
+}
+
 pub fn init(opts: InitOptions<'_>) -> Result<InitOutput> {
     let InitOptions {
         host,
@@ -53,6 +65,10 @@ pub fn init(opts: InitOptions<'_>) -> Result<InitOutput> {
         quic_key,
         connector,
     } = opts;
+    // Borrowed sites are host:port; default the port so the REALITY server can
+    // dial dest even when the operator passed a bare hostname (`--dest host`).
+    let dest_owned = ensure_dest_port(dest);
+    let dest = dest_owned.as_str();
     // server static x25519 keypair (raw bytes zeroized on drop)
     let mut sk_bytes = Zeroizing::new([0u8; 32]);
     rand::rngs::OsRng.fill_bytes(&mut *sk_bytes);
@@ -509,6 +525,24 @@ mod boot_tests {
 
     fn env<'a>(m: &'a HashMap<&'a str, &'a str>) -> impl Fn(&str) -> Option<String> + 'a {
         move |k| m.get(k).map(|v| v.to_string())
+    }
+
+    #[test]
+    fn ensure_dest_port_defaults_to_443() {
+        // Bare hostname → append the standard HTTPS port.
+        assert_eq!(
+            super::ensure_dest_port("www.microsoft.com"),
+            "www.microsoft.com:443"
+        );
+        // Explicit port is preserved.
+        assert_eq!(
+            super::ensure_dest_port("www.microsoft.com:8443"),
+            "www.microsoft.com:8443"
+        );
+        assert_eq!(
+            super::ensure_dest_port("example.com:443"),
+            "example.com:443"
+        );
     }
 
     #[test]
