@@ -10,14 +10,24 @@ CFGDIR="/etc/leshiy"
 MINISIGN_PUB="RWTdtVTZBm+928JVtALfb1pBJf013uPjatAh3WwNV20EqaEoQmulZgXU"
 
 DOCKER=0; ASSUME_YES=0; HOST=""; DEST=""; QUIC=0; VERSION="latest"
-ROLE="single"; EXIT_URI=""; QUIC_SNI=""
+ROLE="single"; EXIT_URI=""; QUIC_SNI=""; PORT=443; QUIC_PORT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --docker) DOCKER=1 ;;
     --yes|-y) ASSUME_YES=1 ;;
     --host) HOST="$2"; shift ;;
     --dest) DEST="$2"; shift ;;
-    --quic) QUIC=1 ;;
+    --port) PORT="$2"; shift ;;
+    --quic)
+      QUIC=1
+      # Optional port arg: bare `--quic` enables QUIC on the REALITY port; `--quic 10560`
+      # picks the UDP port. Anything starting with `-` is the next flag, not our value.
+      case "${2:-}" in
+        ''|-*) ;;
+        *) QUIC_PORT="$2"; shift ;;
+      esac
+      ;;
+    --quic-port) QUIC_PORT="$2"; shift ;;
     --quic-sni) QUIC_SNI="$2"; shift ;;
     --version) VERSION="$2"; shift ;;
     --role) ROLE="$2"; shift ;;
@@ -26,6 +36,8 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+# Default the QUIC UDP port to the REALITY/TCP port once both are finalized.
+[ -n "$QUIC_PORT" ] || QUIC_PORT="$PORT"
 
 die() { echo "error: $*" >&2; exit 1; }
 need_root() { [ "$(id -u)" -eq 0 ] || die "run as root (sudo)"; }
@@ -117,14 +129,14 @@ install_leshiyctl() {  # day-2 dispatcher, published alongside install.sh in eac
 
 open_firewall() {
   if have ufw; then
-    ufw allow 443/tcp
-    if [ "$QUIC" -eq 1 ]; then ufw allow 443/udp; fi
+    ufw allow "$PORT/tcp"
+    if [ "$QUIC" -eq 1 ]; then ufw allow "$QUIC_PORT/udp"; fi
   elif have firewall-cmd; then
-    firewall-cmd --add-port=443/tcp --permanent
-    if [ "$QUIC" -eq 1 ]; then firewall-cmd --add-port=443/udp --permanent; fi
+    firewall-cmd --add-port="$PORT/tcp" --permanent
+    if [ "$QUIC" -eq 1 ]; then firewall-cmd --add-port="$QUIC_PORT/udp" --permanent; fi
     firewall-cmd --reload
   else
-    echo "no ufw/firewalld found — ensure 443/tcp (and 443/udp if QUIC) is open"
+    echo "no ufw/firewalld found — ensure $PORT/tcp (and $QUIC_PORT/udp if QUIC) is open"
   fi
 }
 
@@ -177,7 +189,7 @@ quic_sni_arg() {  # append the optional --quic-sni override (no-op when unset)
 }
 quic_args() {  # echo the quic flags (word-split intentionally by caller) when enabled
   if [ "$QUIC" -eq 1 ]; then
-    printf '%s' "--quic-listen 0.0.0.0:443"
+    printf '%s' "--quic-listen 0.0.0.0:$QUIC_PORT"
     quic_sni_arg
   fi
   return 0
@@ -189,7 +201,7 @@ role_args() {  # echo role/exit/quic flags (word-split intentionally by caller)
   # Exit role needs a QUIC carrier; bind all interfaces (NAT-friendly). The server advertises
   # it to clients on the public --host, so binding 0.0.0.0 here is correct.
   if [ "$ROLE" = "exit" ] && [ "$QUIC" -eq 0 ]; then
-    printf '%s' " --quic-listen 0.0.0.0:443"
+    printf '%s' " --quic-listen 0.0.0.0:$QUIC_PORT"
     quic_sni_arg
   fi
   return 0
@@ -202,7 +214,7 @@ role_args() {  # echo role/exit/quic flags (word-split intentionally by caller)
 main() {
   need_root
   have curl || install_pkg curl
-  [ -n "$HOST" ] || HOST="$(public_ip):443"
+  [ -n "$HOST" ] || HOST="$(public_ip):$PORT"
   [ -n "$DEST" ] || DEST="www.microsoft.com:443"
 
   if [ "$DOCKER" -eq 1 ]; then

@@ -161,6 +161,9 @@ URL=https://github.com/bigunmd/leshiy/releases/latest/download/install.sh
 # Also enable the QUIC/HTTP-3 transport (443/udp) alongside REALITY:
 curl -fsSL $URL | sh -s -- --quic
 
+# Run on non-default ports (REALITY/TCP + QUIC/UDP), e.g. behind a shared IP:
+curl -fsSL $URL | sh -s -- --port 10559 --quic 10560
+
 # Install as a Docker container instead of a native systemd service:
 curl -fsSL $URL | sh -s -- --docker
 
@@ -168,7 +171,8 @@ curl -fsSL $URL | sh -s -- --docker
 curl -fsSL $URL | sh -s -- --quic --quic-sni cdn.cloudflare.com
 ```
 
-Other flags: `--host <ip:port>`, `--dest <host:port>`, `--quic-sni <domain>`,
+Other flags: `--host <ip:port>`, `--dest <host:port>`, `--port <tcp-port>` (REALITY/TCP
+listen port, default 443), `--quic [udp-port]` (bare = same as `--port`), `--quic-sni <domain>`,
 `--role single|entry|exit`, `--exit-uri '<leshiy://…>'`, `--yes`. Prefer to inspect first? The script is short — read it
 at the URL above before piping to `sh`.
 
@@ -301,6 +305,11 @@ leshiy remote provision --host root@203.0.113.5 --dest www.microsoft.com:443
 # ... live progress, then your first client config:
 #   leshiy://...   (stdout)
 #   <QR code>      (stderr)
+
+# Non-root user with sudo — prompts for the sudo password (day-2 ops re-prompt):
+leshiy remote provision --host deploy@203.0.113.5 --dest www.microsoft.com:443 --sudo
+# Automate it (feed the sudo password on stdin instead of prompting):
+printf '%s' "$SUDO_PW" | leshiy remote provision --host deploy@HOST --dest D --sudo-password-stdin
 ```
 
 > **Note:** the server image must be built from this release for `--dest` and `--quic` to take effect.

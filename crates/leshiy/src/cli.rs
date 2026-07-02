@@ -372,6 +372,14 @@ pub enum RemoteCmd {
         /// Read the SSH password from stdin (first line).
         #[arg(long)]
         password_stdin: bool,
+        /// Connect as a non-root user and run privileged commands via sudo.
+        /// Prompts for the sudo password unless --sudo-password-stdin is set.
+        #[arg(long)]
+        sudo: bool,
+        /// Read the sudo password from stdin instead of prompting (implies --sudo).
+        /// Cannot be combined with --password-stdin.
+        #[arg(long, conflicts_with = "password_stdin")]
+        sudo_password_stdin: bool,
         /// Borrowed TLS site for REALITY, host:port.
         #[arg(long)]
         dest: String,
@@ -381,8 +389,9 @@ pub enum RemoteCmd {
         /// Enable QUIC on this UDP port.
         #[arg(long)]
         quic: Option<u16>,
-        /// Container image reference.
-        #[arg(long, default_value = "ghcr.io/leshiy/leshiy:1.5.0")]
+        /// Container image reference. Defaults to the release matching this CLI
+        /// (`ghcr.io/bigunmd/leshiy:v<CLI version>`), the tag CI publishes.
+        #[arg(long, default_value = concat!("ghcr.io/bigunmd/leshiy:v", env!("CARGO_PKG_VERSION")))]
         image: String,
         /// Friendly server label.
         #[arg(long)]
