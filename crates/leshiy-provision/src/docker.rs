@@ -34,9 +34,14 @@ pub fn run_cmd(
     quic_port: Option<u16>,
     envs: &[(String, String)],
 ) -> String {
+    // --user 0:0: the image's default `nonroot` user can't write the root-owned
+    // `leshiy-data` volume, so `boot` fails to emit server.toml + the sqlite DB
+    // and the --restart container crash-loops (later `docker exec` then races a
+    // restarting container → "No such exec instance"). Root in-container matches
+    // the install.sh docker path.
     let mut s = format!(
         "sudo docker run -d --name {container} --restart=unless-stopped \
-         --cap-add=NET_ADMIN -v leshiy-data:/etc/leshiy -p {listen_port}:{listen_port}"
+         --user 0:0 --cap-add=NET_ADMIN -v leshiy-data:/etc/leshiy -p {listen_port}:{listen_port}"
     );
     if let Some(q) = quic_port {
         s.push_str(&format!(" -p {q}:{q}/udp"));
@@ -103,6 +108,7 @@ mod tests {
         let run = run_cmd("leshiy", "img:1", 443, Some(8443), &envs);
         assert!(run.contains("--name leshiy"));
         assert!(run.contains("--restart=unless-stopped"));
+        assert!(run.contains("--user 0:0"));
         assert!(run.contains("--cap-add=NET_ADMIN"));
         assert!(run.contains("-p 443:443"));
         assert!(run.contains("-p 8443:8443/udp"));
