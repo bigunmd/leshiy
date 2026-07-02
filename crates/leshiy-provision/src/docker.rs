@@ -1,9 +1,19 @@
 //! Pure builders for the shell commands the engine runs over SSH. No I/O here,
 //! so every command shape is unit-tested.
 
+/// Named docker volume that holds the server identity + config (server.toml,
+/// the sqlite user DB, QUIC cert/key). Persists across container recreation, so
+/// `teardown --purge` must remove it explicitly to force a clean re-provision.
+pub const DATA_VOLUME: &str = "leshiy-data";
+
 /// Probe whether docker is on PATH. Prints `yes`/`no`.
 pub fn detect_docker_cmd() -> &'static str {
     "command -v docker >/dev/null 2>&1 && echo yes || echo no"
+}
+
+/// Remove the persistent data volume (used by `teardown --purge`).
+pub fn volume_rm_cmd() -> String {
+    format!("sudo docker volume rm {DATA_VOLUME}")
 }
 
 /// Install Docker by sniffing the available package manager. The whole script
@@ -41,7 +51,7 @@ pub fn run_cmd(
     // the install.sh docker path.
     let mut s = format!(
         "sudo docker run -d --name {container} --restart=unless-stopped \
-         --user 0:0 --cap-add=NET_ADMIN -v leshiy-data:/etc/leshiy -p {listen_port}:{listen_port}"
+         --user 0:0 --cap-add=NET_ADMIN -v {DATA_VOLUME}:/etc/leshiy -p {listen_port}:{listen_port}"
     );
     if let Some(q) = quic_port {
         s.push_str(&format!(" -p {q}:{q}/udp"));
