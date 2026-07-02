@@ -376,6 +376,13 @@ pub async fn teardown<T: Transport>(t: &mut T, rec: &ServerRecord, purge: bool) 
     t.run(&format!("sudo docker rm -f {}", rec.container))
         .await?;
     if purge {
+        // Remove the persistent data volume (server identity + config) so a
+        // subsequent provision regenerates from scratch — the container's `boot`
+        // skips config generation whenever server.toml already exists on the
+        // volume, so a surviving volume silently reuses the old dest/keys.
+        t.run(&docker::volume_rm_cmd()).await?;
+        // Also clear the native/install.sh bind-mount path, harmless for the
+        // docker path (nonexistent → no-op).
         t.run("sudo rm -rf /etc/leshiy").await?;
     }
     Ok(())
@@ -1015,6 +1022,11 @@ mod tests {
         };
         teardown(&mut t, &rec, true).await.unwrap();
         assert!(t.calls().iter().any(|c| c.contains("docker rm -f leshiy")));
+        assert!(
+            t.calls()
+                .iter()
+                .any(|c| c.contains("docker volume rm leshiy-data"))
+        );
         assert!(t.calls().iter().any(|c| c.contains("rm -rf /etc/leshiy")));
     }
 }
