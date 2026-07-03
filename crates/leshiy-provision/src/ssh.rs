@@ -61,6 +61,9 @@ pub trait Transport: Send {
 pub struct FakeTransport {
     host_key_fp: String,
     rules: Vec<(String, CommandOutput)>,
+    /// (needle, outputs, next_index): successive matches return successive
+    /// outputs; the last one repeats. Used to model transient-then-OK sequences.
+    seq_rules: Vec<(String, Vec<CommandOutput>, usize)>,
     calls: std::sync::Mutex<Vec<String>>,
     pub put_files: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
 }
@@ -81,6 +84,13 @@ impl FakeTransport {
         self.rules.push((contains.to_string(), out));
         self
     }
+    /// Register a sequence of outputs for commands matching `contains`: the first
+    /// match returns `outs[0]`, the next `outs[1]`, …, and the last repeats.
+    /// Checked before single-output rules, so it wins when both would match.
+    pub fn on_seq(&mut self, contains: &str, outs: Vec<CommandOutput>) -> &mut Self {
+        self.seq_rules.push((contains.to_string(), outs, 0));
+        self
+    }
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
@@ -93,6 +103,13 @@ impl Transport for FakeTransport {
     }
     async fn run(&mut self, cmd: &str) -> Result<CommandOutput> {
         self.calls.lock().unwrap().push(cmd.to_string());
+        for (needle, outs, idx) in &mut self.seq_rules {
+            if !outs.is_empty() && cmd.contains(needle.as_str()) {
+                let i = (*idx).min(outs.len() - 1);
+                *idx += 1;
+                return Ok(outs[i].clone());
+            }
+        }
         for (needle, out) in &self.rules {
             if cmd.contains(needle.as_str()) {
                 return Ok(out.clone());
