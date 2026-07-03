@@ -107,9 +107,20 @@ impl Transport for RusshTransport {
                 // Safety note: russh-keys errors do not embed credential bytes,
                 // so surfacing e.to_string() is safe. Re-verify on upgrade.
                 .map_err(|e| Error::Ssh(e.to_string()))?;
-                // russh 0.61: publickey auth takes a `PrivateKeyWithHashAlg`
-                // (None → SHA-1 for RSA, ignored for other key types).
-                let key = russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key), None);
+                // russh 0.61: publickey auth takes a `PrivateKeyWithHashAlg`.
+                // Passing `None` signs RSA keys with SHA-1 (`ssh-rsa`), which
+                // OpenSSH 8.8+ (2021) disables by default — so an RSA key that
+                // works with `ssh -i` fails here with a bare "auth failed". Ask
+                // the server which RSA hash it prefers (rsa-sha2-512/256 via its
+                // `server-sig-algs` extension) and sign with that. `.flatten()`
+                // yields `None` (SHA-1) only when the server advertises no
+                // rsa-sha2 support; the hash is ignored for ed25519/ecdsa keys.
+                let rsa_hash = handle
+                    .best_supported_rsa_hash()
+                    .await
+                    .map_err(|e| Error::Ssh(e.to_string()))?
+                    .flatten();
+                let key = russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key), rsa_hash);
                 handle
                     .authenticate_publickey(target.user.as_str(), key)
                     .await
