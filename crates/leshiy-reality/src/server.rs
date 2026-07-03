@@ -124,14 +124,20 @@ where
     // 1. read the client's first TLS record
     let first = read_record(&mut client).await?; // Err here = bare/garbage TCP open → drop
     let first_bytes = first.encode();
-    // 2. dial dest, forward the first record
-    let mut dest = match TcpStream::connect(&cfg.dest).await {
-        Ok(d) => d,
-        Err(_) => {
+    // 2. dial dest (bounded), forward the first record
+    let mut dest = match connect_dest(&cfg.dest, DEST_CONNECT_TIMEOUT).await {
+        Some(d) => d,
+        None => {
             // H4: a dest-dial failure must NOT produce an instant zero-byte close
             // — that is an active-probe distinguisher from a genuine TLS site.
             // Absorb client bytes for a bounded, per-connection-jittered period so
             // the failure resembles a stalled/overloaded server.
+            //
+            // The dial is bounded by DEST_CONNECT_TIMEOUT: a `dest` whose SYN (or
+            // DNS lookup) black-holes — e.g. a container that can't resolve/reach
+            // the borrowed site — must NOT hang the connection forever. Without the
+            // bound, `TcpStream::connect` blocks on the OS timeout (tens of seconds)
+            // and every client stalls with no response and no close.
             stall_then_drop(&mut client, &first_bytes).await;
             return Ok(());
         }
@@ -218,6 +224,22 @@ where
                 });
             }
         }
+    }
+}
+
+/// Upper bound on the dest dial (TCP connect + any DNS resolution). A slow or
+/// black-holed `dest` beyond this is treated as unreachable → `stall_then_drop`,
+/// so a connection can never hang indefinitely on the borrowed-site dial.
+const DEST_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Connect to `dest`, bounded by `timeout`. Returns `None` on either a connect
+/// error or a timeout — both mean "dest is not usable right now" and map to the
+/// same anti-probe stall path, so the caller need not distinguish them.
+async fn connect_dest(dest: &str, timeout: std::time::Duration) -> Option<TcpStream> {
+    match tokio::time::timeout(timeout, TcpStream::connect(dest)).await {
+        Ok(Ok(s)) => Some(s),
+        Ok(Err(_)) => None, // connect refused / unreachable
+        Err(_) => None,     // timed out (SYN or DNS black-holed)
     }
 }
 
@@ -582,6 +604,42 @@ mod tests {
             classify(&ch, &server_cfg([0x55; 32]), 1000),
             Classification::Unauthed
         ));
+    }
+
+    #[tokio::test]
+    async fn connect_dest_returns_some_on_live_listener() {
+        // A reachable dest connects well within the timeout → Some(stream).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let got = connect_dest(&addr, Duration::from_secs(2)).await;
+        assert!(got.is_some(), "live listener must connect");
+    }
+
+    #[tokio::test]
+    async fn connect_dest_returns_none_on_refused() {
+        // Bind then drop a listener so the port is closed → connect is refused
+        // fast. Refusal and timeout share the None branch (→ stall_then_drop).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let got = connect_dest(&addr, Duration::from_secs(2)).await;
+        assert!(got.is_none(), "refused dest must map to None");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dest_dial_timeout_maps_to_none() {
+        // Deterministically exercise connect_dest's timeout arm: a connect that
+        // never completes within the budget must yield None (→ stall_then_drop),
+        // NOT hang. A real black-holed socket can't be simulated reliably in a
+        // unit test, so mirror the exact arm with a never-completing future.
+        // `start_paused` auto-advances the clock, so the 5s budget elapses
+        // instantly rather than blocking the test.
+        let never = std::future::pending::<std::io::Result<TcpStream>>();
+        let out: Option<TcpStream> = match tokio::time::timeout(DEST_CONNECT_TIMEOUT, never).await {
+            Ok(Ok(s)) => Some(s),
+            _ => None,
+        };
+        assert!(out.is_none(), "an unfinishable dial must time out to None");
     }
 
     #[test]
