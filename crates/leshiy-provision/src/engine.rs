@@ -11,6 +11,7 @@ pub enum Step {
     Connect,
     Preflight,
     DockerReady,
+    Firewall,
     DetectExisting,
     PullImage,
     RunContainer,
@@ -188,6 +189,18 @@ async fn provision_inner<T: Transport>(
     }
     on_event(ev(Step::DockerReady, Status::Done, ""));
 
+    // 3b. Firewall: open the listen port(s) when ufw is active. Best-effort and
+    // idempotent — it runs on every provision (including idempotent re-runs, since
+    // an unreachable server is a common reason to re-run) and never aborts an
+    // otherwise-healthy provision. A firewall we can't manage must not fail the
+    // build, but we report the outcome so the operator isn't left guessing about
+    // reachability. Runs before the container so the port is open the moment it
+    // starts listening.
+    *current = Step::Firewall;
+    on_event(ev(Step::Firewall, Status::Started, ""));
+    let fw_detail = firewall_step(t, p.listen_port, p.quic_port).await;
+    on_event(ev(Step::Firewall, Status::Done, fw_detail));
+
     // 4. Detect existing container (idempotent re-run).
     *current = Step::DetectExisting;
     on_event(ev(Step::DetectExisting, Status::Started, ""));
@@ -208,6 +221,11 @@ async fn provision_inner<T: Transport>(
 
         *current = Step::RunContainer;
         on_event(ev(Step::RunContainer, Status::Started, ""));
+        // Detect a container-usable DNS server so the REALITY server can resolve
+        // `dest` from inside the container. Best-effort: on failure or no usable
+        // resolver we let Docker use its default (correct on hosts where that
+        // works), and the dest-dial timeout keeps a bad resolver from hanging.
+        let dns = detect_host_dns(t).await;
         let mut envs = vec![
             ("LESHIY_HOST".to_string(), p.public_host.clone()),
             ("LESHIY_DEST".to_string(), p.dest_sni.clone()),
@@ -227,11 +245,19 @@ async fn provision_inner<T: Transport>(
             &p.image_ref,
             p.listen_port,
             p.quic_port,
+            dns.as_deref(),
             &envs,
         ))
         .await?
         .ok()?;
-        on_event(ev(Step::RunContainer, Status::Done, ""));
+        on_event(ev(
+            Step::RunContainer,
+            Status::Done,
+            match &dns {
+                Some(ip) => format!("dns={ip}"),
+                None => "dns=docker-default".to_string(),
+            },
+        ));
     } else {
         on_event(ev(
             Step::PullImage,
@@ -388,14 +414,96 @@ pub async fn teardown<T: Transport>(t: &mut T, rec: &ServerRecord, purge: bool) 
     Ok(())
 }
 
-/// Run `docker exec ... user add` and return captured stdout.
+/// Detect a container-usable DNS server on the host (the real upstream, never a
+/// loopback stub). Returns `None` when nothing usable is found or on any
+/// transport hiccup — the caller then falls back to Docker's default resolver.
+/// The result is validated as a bare IP literal before it can reach a shell.
+async fn detect_host_dns<T: Transport>(t: &mut T) -> Option<String> {
+    let out = t.run(docker::detect_host_dns_cmd()).await.ok()?;
+    let candidate = out.stdout.trim();
+    if docker::valid_dns_addr(candidate) {
+        Some(candidate.to_string())
+    } else {
+        None
+    }
+}
+
+/// Detect ufw and, when it is active, open the listen (and QUIC) port(s).
+///
+/// Returns a human-readable detail describing what happened. Best-effort: any
+/// error (ufw absent, transport hiccup, or the `ufw allow` itself failing) is
+/// folded into the returned detail rather than propagated, so a firewall we
+/// can't manage never aborts an otherwise-successful provision.
+async fn firewall_step<T: Transport>(
+    t: &mut T,
+    listen_port: u16,
+    quic_port: Option<u16>,
+) -> String {
+    let active = match t.run(docker::detect_ufw_active_cmd()).await {
+        Ok(out) => out.stdout.trim() == "active",
+        // A transport-level failure here isn't fatal to firewalling; if the SSH
+        // channel is truly dead the next real step's `?` will surface it.
+        Err(e) => return format!("firewall check skipped ({e})"),
+    };
+    if !active {
+        return "ufw inactive or not installed — left unchanged".to_string();
+    }
+    let ports = match quic_port {
+        Some(q) => format!("{listen_port}/tcp, {q}/udp"),
+        None => format!("{listen_port}/tcp"),
+    };
+    match t.run(&docker::ufw_allow_cmd(listen_port, quic_port)).await {
+        Ok(out) if out.code == 0 => format!("ufw active — opened {ports}"),
+        Ok(out) => format!(
+            "ufw active but opening {ports} failed (exit {}): {}",
+            out.code,
+            out.stderr.trim()
+        ),
+        Err(e) => format!("ufw active but opening {ports} failed ({e})"),
+    }
+}
+
+/// A freshly `docker run` server takes a moment to generate its config and bind
+/// its control socket. `user add` issued too early fails with "connect to control
+/// socket … is the server running?". Bound the wait so a genuinely-broken boot
+/// still fails in reasonable time.
+const USER_ADD_ATTEMPTS: usize = 15;
+const USER_ADD_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether a `user add` failure is the transient "server not up yet" race
+/// (control socket missing) rather than a genuine error. Only these are retried,
+/// so a real misconfiguration fails fast instead of spinning for the full budget.
+fn is_control_socket_unready(stderr: &str) -> bool {
+    stderr.contains("control socket") || stderr.contains("is the server running")
+}
+
+/// Run `docker exec ... user add` and return captured stdout, retrying while the
+/// server's control socket is not yet up (fresh-container startup race).
 ///
 /// The `_label` parameter is intentionally unused here: it is stored locally in
 /// `ClientConfig.label` by the caller. The remote `leshiy user add` subcommand
 /// has no `--label` flag, so we must not pass it on the wire.
 async fn exec_user_add<T: Transport>(t: &mut T, container: &str, _label: &str) -> Result<String> {
     let cmd = docker::exec_user_add_cmd(container, "");
-    Ok(t.run(&cmd).await?.ok()?.stdout)
+    let mut last_err = None;
+    for attempt in 0..USER_ADD_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(USER_ADD_RETRY_DELAY).await;
+        }
+        // A transport-level error (`?`) is not retried — a dead SSH channel won't
+        // heal. Only a command failure whose stderr is the control-socket race is.
+        match t.run(&cmd).await?.ok() {
+            Ok(out) => return Ok(out.stdout),
+            Err(e) => {
+                let transient = matches!(&e, Error::Command { stderr, .. } if is_control_socket_unready(stderr));
+                if !transient {
+                    return Err(e);
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.expect("loop body runs at least once"))
 }
 
 #[cfg(test)]
@@ -476,6 +584,270 @@ mod tests {
         // --label must never be sent to the remote command (the server binary
         // has no such flag; label is a local-only annotation).
         assert!(!t.calls().iter().any(|c| c.contains("--label")));
+    }
+
+    #[test]
+    fn control_socket_unready_recognizes_the_startup_race() {
+        assert!(is_control_socket_unready(
+            "error: connect to control socket \"/etc/leshiy/leshiy.sock\" — is the server running?"
+        ));
+        assert!(is_control_socket_unready(
+            "connect to control socket failed"
+        ));
+        assert!(!is_control_socket_unready("error: invalid dest"));
+        assert!(!is_control_socket_unready("boom"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn provision_retries_user_add_until_control_socket_ready() {
+        // First `user add` races the not-yet-bound control socket; the second
+        // succeeds. `start_paused` makes the retry delay instant.
+        let mut t = FakeTransport::new();
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on_seq(
+            "docker exec",
+            vec![
+                CommandOutput {
+                    code: 1,
+                    stdout: String::new(),
+                    stderr: "error: connect to control socket \"/etc/leshiy/leshiy.sock\" — is the server running?\n  caused by: No such file or directory".into(),
+                },
+                CommandOutput {
+                    code: 0,
+                    stdout: format!("{}\n", issued_uri()),
+                    stderr: String::new(),
+                },
+            ],
+        );
+        let rec = provision(&mut t, &params(), &mut |_| {}).await.unwrap();
+        assert_eq!(rec.clients.len(), 1);
+        let execs = t
+            .calls()
+            .iter()
+            .filter(|c| c.contains("docker exec"))
+            .count();
+        assert_eq!(
+            execs, 2,
+            "must retry the socket race exactly once then succeed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn provision_does_not_retry_non_socket_user_add_errors() {
+        // A genuine (non-race) failure must fail immediately, not spin for the
+        // whole retry budget.
+        let mut t = FakeTransport::new();
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 1,
+                stdout: String::new(),
+                stderr: "error: some real failure".into(),
+            },
+        );
+        let err = provision(&mut t, &params(), &mut |_| {}).await.unwrap_err();
+        assert!(matches!(err, crate::error::Error::Command { .. }));
+        let execs = t
+            .calls()
+            .iter()
+            .filter(|c| c.contains("docker exec"))
+            .count();
+        assert_eq!(execs, 1, "non-transient error must not retry");
+    }
+
+    #[tokio::test]
+    async fn provision_passes_host_dns_to_docker_run() {
+        let mut t = FakeTransport::new();
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "systemd/resolve/resolv.conf",
+            CommandOutput {
+                code: 0,
+                stdout: "10.130.0.2\n".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 0,
+                stdout: format!("{}\n", issued_uri()),
+                stderr: String::new(),
+            },
+        );
+        provision(&mut t, &params(), &mut |_| {}).await.unwrap();
+        assert!(
+            t.calls()
+                .iter()
+                .any(|c| c.contains("docker run") && c.contains("--dns 10.130.0.2")),
+            "docker run must carry the detected host resolver"
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_omits_dns_when_host_has_no_usable_resolver() {
+        let mut t = FakeTransport::new();
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        // DNS probe returns empty (only loopback on host) → no --dns.
+        .on(
+            "systemd/resolve/resolv.conf",
+            CommandOutput {
+                code: 0,
+                stdout: "\n".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 0,
+                stdout: format!("{}\n", issued_uri()),
+                stderr: String::new(),
+            },
+        );
+        provision(&mut t, &params(), &mut |_| {}).await.unwrap();
+        assert!(t.calls().iter().any(|c| c.contains("docker run")));
+        assert!(!t.calls().iter().any(|c| c.contains("--dns")));
+    }
+
+    #[tokio::test]
+    async fn provision_opens_firewall_when_ufw_active() {
+        let mut t = FakeTransport::new();
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "ufw status",
+            CommandOutput {
+                code: 0,
+                stdout: "active".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 0,
+                stdout: format!("{}\n", issued_uri()),
+                stderr: String::new(),
+            },
+        );
+        let mut statuses = Vec::new();
+        provision(&mut t, &params(), &mut |e| {
+            statuses.push((e.step, e.status))
+        })
+        .await
+        .unwrap();
+        // ufw active → the listen port is opened.
+        assert!(
+            t.calls().iter().any(|c| c.contains("ufw allow 443/tcp")),
+            "expected a ufw allow for the listen port"
+        );
+        assert!(
+            statuses
+                .iter()
+                .any(|(s, st)| *s == Step::Firewall && *st == Status::Done)
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_skips_firewall_when_ufw_inactive() {
+        let mut t = FakeTransport::new();
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "ufw status",
+            CommandOutput {
+                code: 0,
+                stdout: "inactive".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 0,
+                stdout: format!("{}\n", issued_uri()),
+                stderr: String::new(),
+            },
+        );
+        provision(&mut t, &params(), &mut |_| {}).await.unwrap();
+        // ufw inactive → leave the firewall untouched.
+        assert!(!t.calls().iter().any(|c| c.contains("ufw allow")));
+    }
+
+    #[tokio::test]
+    async fn provision_opens_quic_udp_port_when_ufw_active_and_quic_set() {
+        let mut t = FakeTransport::new();
+        let uri = "leshiy://QUJD@1.2.3.4:443?sni=d&sid=0102030400000000&quic=1.2.3.4:8443&qsni=cdn&qcert=abc";
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "ufw status",
+            CommandOutput {
+                code: 0,
+                stdout: "active".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 0,
+                stdout: format!("{uri}\n"),
+                stderr: String::new(),
+            },
+        );
+        let mut p = params();
+        p.quic_port = Some(8443);
+        provision(&mut t, &p, &mut |_| {}).await.unwrap();
+        assert!(t.calls().iter().any(|c| c.contains("ufw allow 8443/udp")));
     }
 
     #[tokio::test]

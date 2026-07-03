@@ -49,6 +49,7 @@ fn step_name(s: Step) -> &'static str {
         Step::Connect => "connect",
         Step::Preflight => "preflight",
         Step::DockerReady => "docker",
+        Step::Firewall => "firewall",
         Step::DetectExisting => "detect",
         Step::PullImage => "pull",
         Step::RunContainer => "run",

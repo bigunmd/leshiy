@@ -20,4 +20,5 @@ async-trait = { workspace = true }
 russh = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full"] }
+# `test-util` (for `#[tokio::test(start_paused = true)]`) is NOT part of "full".
+tokio = { workspace = true, features = ["full", "test-util"] }

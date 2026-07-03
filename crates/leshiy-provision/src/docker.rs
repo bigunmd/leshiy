@@ -42,6 +42,7 @@ pub fn run_cmd(
     image_ref: &str,
     listen_port: u16,
     quic_port: Option<u16>,
+    dns: Option<&str>,
     envs: &[(String, String)],
 ) -> String {
     // --user 0:0: the image's default `nonroot` user can't write the root-owned
@@ -53,6 +54,13 @@ pub fn run_cmd(
         "sudo docker run -d --name {container} --restart=unless-stopped \
          --user 0:0 --cap-add=NET_ADMIN -v {DATA_VOLUME}:/etc/leshiy -p {listen_port}:{listen_port}"
     );
+    // --dns: the REALITY server must resolve `dest` from *inside* the container.
+    // Docker's default resolver (8.8.8.8, or the host's 127.0.0.53 systemd stub)
+    // is unreachable on many clouds (Yandex, GCP), so DNS silently black-holes and
+    // every handshake stalls. The engine passes the host's real upstream resolver.
+    if let Some(server) = dns {
+        s.push_str(&format!(" --dns {server}"));
+    }
     if let Some(q) = quic_port {
         s.push_str(&format!(" -p {q}:{q}/udp"));
     }
@@ -67,6 +75,51 @@ pub fn run_cmd(
 
 pub fn ps_names_cmd() -> &'static str {
     "sudo docker ps --format '{{.Names}}'"
+}
+
+/// Print the host's first container-usable DNS server (or nothing).
+///
+/// Prefers a non-loopback `nameserver` from `/etc/resolv.conf`; on
+/// systemd-resolved hosts that file points at the `127.0.0.53` stub (unreachable
+/// from a container), so we also read `/run/systemd/resolve/resolv.conf`, which
+/// carries the real upstreams. Loopback (`127.*`, `::1`) entries are dropped
+/// because the container can't reach them. No sudo: both files are world-readable.
+pub fn detect_host_dns_cmd() -> &'static str {
+    "grep -h '^nameserver' /etc/resolv.conf /run/systemd/resolve/resolv.conf 2>/dev/null \
+     | awk '{print $2}' | grep -vE '^(127\\.|::1$)' | head -n1"
+}
+
+/// Whether a detected DNS server string is a bare IP literal safe to splice into
+/// a `docker run` command. Rejects empty and anything with shell metacharacters.
+pub fn valid_dns_addr(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 45 // longest possible IPv6 textual form
+        && s.bytes()
+            .all(|b| b.is_ascii_hexdigit() || matches!(b, b'.' | b':'))
+}
+
+/// Probe whether `ufw` is installed AND active. Prints `active` / `inactive`.
+///
+/// Docker publishes ports by inserting its own iptables rules, which usually
+/// bypass ufw's INPUT chain — but not every host is configured that way, and an
+/// active ufw is a common reason a freshly provisioned server is unreachable, so
+/// we open the port explicitly when ufw is running. Wrapped in a single leading
+/// `sudo sh -c` (like `install_docker_cmd`): `ufw status` needs root, and only a
+/// LEADING `sudo` gets the password fed on stdin.
+pub fn detect_ufw_active_cmd() -> &'static str {
+    "sudo sh -c 'command -v ufw >/dev/null 2>&1 && \
+     ufw status 2>/dev/null | grep -qi \"^Status: active\" && echo active || echo inactive'"
+}
+
+/// Open the REALITY/TCP listen port (and the QUIC/UDP port, if any) in ufw.
+/// `ufw allow` is idempotent (a duplicate rule is skipped). Runs under one
+/// leading `sudo sh -c` so a single stdin password prime covers both calls.
+pub fn ufw_allow_cmd(listen_port: u16, quic_port: Option<u16>) -> String {
+    let mut inner = format!("ufw allow {listen_port}/tcp");
+    if let Some(q) = quic_port {
+        inner.push_str(&format!(" && ufw allow {q}/udp"));
+    }
+    format!("sudo sh -c '{inner}'")
 }
 
 pub fn exec_user_add_cmd(container: &str, extra_args: &str) -> String {
@@ -115,7 +168,7 @@ mod tests {
                 "www.microsoft.com:443".to_string(),
             ),
         ];
-        let run = run_cmd("leshiy", "img:1", 443, Some(8443), &envs);
+        let run = run_cmd("leshiy", "img:1", 443, Some(8443), None, &envs);
         assert!(run.contains("--name leshiy"));
         assert!(run.contains("--restart=unless-stopped"));
         assert!(run.contains("--user 0:0"));
@@ -130,7 +183,7 @@ mod tests {
 
     #[test]
     fn run_cmd_without_quic_has_no_udp() {
-        let run = run_cmd("leshiy", "img:1", 443, None, &[]);
+        let run = run_cmd("leshiy", "img:1", 443, None, None, &[]);
         assert!(!run.contains("/udp"));
         assert!(run.trim_end().ends_with("img:1 boot"));
     }
@@ -139,6 +192,75 @@ mod tests {
     fn parse_ps_extracts_names() {
         assert_eq!(parse_ps_names("leshiy\nother\n\n"), vec!["leshiy", "other"]);
         assert!(parse_ps_names("").is_empty());
+    }
+
+    #[test]
+    fn detect_host_dns_cmd_reads_resolv_and_skips_loopback() {
+        let c = detect_host_dns_cmd();
+        // No sudo: resolv files are world-readable, and a leading sudo would need
+        // a password prime it doesn't warrant.
+        assert!(!c.starts_with("sudo"), "dns probe needs no sudo: {c}");
+        assert!(c.contains("/etc/resolv.conf"));
+        // systemd-resolved boxes point /etc/resolv.conf at 127.0.0.53 (unreachable
+        // from a container); the real upstreams live here.
+        assert!(c.contains("/run/systemd/resolve/resolv.conf"));
+        // Must drop loopback nameservers — they're useless to the container.
+        assert!(c.contains("127") && c.contains("nameserver"));
+    }
+
+    #[test]
+    fn valid_dns_addr_accepts_ips_rejects_injection() {
+        assert!(valid_dns_addr("10.130.0.2"));
+        assert!(valid_dns_addr("8.8.8.8"));
+        assert!(valid_dns_addr("2a02:6b8::feed:0ff")); // IPv6
+        assert!(!valid_dns_addr(""));
+        assert!(!valid_dns_addr("10.0.0.1; reboot"));
+        assert!(!valid_dns_addr("$(whoami)"));
+        assert!(!valid_dns_addr("evil`id`"));
+        assert!(!valid_dns_addr("a b"));
+    }
+
+    #[test]
+    fn run_cmd_injects_dns_when_present() {
+        let run = run_cmd("leshiy", "img:1", 443, None, Some("10.130.0.2"), &[]);
+        assert!(run.contains("--dns 10.130.0.2"), "run: {run}");
+    }
+
+    #[test]
+    fn run_cmd_omits_dns_when_absent() {
+        let run = run_cmd("leshiy", "img:1", 443, None, None, &[]);
+        assert!(!run.contains("--dns"));
+    }
+
+    #[test]
+    fn detect_ufw_active_cmd_is_sudoized_and_probes_status() {
+        let c = detect_ufw_active_cmd();
+        // Must start with `sudo ` so the transport feeds the sudo password on
+        // stdin (only a LEADING sudo is rewritten to `sudo -S`). `ufw status`
+        // itself needs root.
+        assert!(c.starts_with("sudo "), "must be sudoized: {c}");
+        assert!(c.contains("command -v ufw"));
+        assert!(c.contains("ufw status"));
+        // Prints the sentinel the engine keys on.
+        assert!(c.contains("echo active"));
+        assert!(c.contains("echo inactive"));
+    }
+
+    #[test]
+    fn ufw_allow_cmd_opens_tcp_and_udp_under_one_sudo() {
+        let c = ufw_allow_cmd(443, Some(8443));
+        // One leading sudo wrapping an `sh -c` so a single stdin password prime
+        // covers every nested `ufw` call (matches install_docker_cmd's shape).
+        assert!(c.starts_with("sudo sh -c "), "single-sudo wrapper: {c}");
+        assert!(c.contains("ufw allow 443/tcp"));
+        assert!(c.contains("ufw allow 8443/udp"));
+    }
+
+    #[test]
+    fn ufw_allow_cmd_tcp_only_when_no_quic() {
+        let c = ufw_allow_cmd(443, None);
+        assert!(c.contains("ufw allow 443/tcp"));
+        assert!(!c.contains("/udp"), "no udp rule without quic: {c}");
     }
 
     #[test]
