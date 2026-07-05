@@ -15,4 +15,6 @@ pub enum BridgeError {
     Store { reason: String },
     #[error("no such profile")]
     NoSuchProfile,
+    #[error("provision failed: {reason}")]
+    Provision { reason: String },
 }

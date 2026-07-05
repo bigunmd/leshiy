@@ -10,6 +10,7 @@ mod ssh_russh;
 pub mod vault;
 
 pub use error::{Error, Result};
+pub use ssh_russh::RusshTransport;
 
 #[cfg(test)]
 mod smoke {

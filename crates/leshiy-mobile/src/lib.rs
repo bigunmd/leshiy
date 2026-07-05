@@ -5,12 +5,14 @@
 mod bridge;
 mod error;
 mod profiles;
+mod provision;
 mod runtime;
 mod status;
 
 pub use bridge::{LeshiyBridge, StatusListener};
 pub use error::BridgeError;
 pub use profiles::{ProfileInfo, ProfileManager};
+pub use provision::{ProvisionConfig, ProvisionListener, ProvisionUpdate, Provisioner};
 pub use status::{ConnState, Status};
 
 uniffi::setup_scaffolding!();

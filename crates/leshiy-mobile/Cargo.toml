@@ -17,7 +17,9 @@ path = "src/bin/uniffi_bindgen.rs"
 leshiy-client = { path = "../leshiy-client" }
 leshiy-tun = { path = "../leshiy-tun" }
 leshiy-reality = { path = "../leshiy-reality" }
+leshiy-provision = { path = "../leshiy-provision" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+zeroize = { workspace = true }
 uniffi = { workspace = true, features = ["cli"] }
