@@ -20,9 +20,13 @@ echo ">> cargo-ndk build (release) for arm64-v8a, armeabi-v7a, x86_64"
 cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o "$JNILIBS" \
   build -p leshiy-mobile --release
 
-echo ">> generate Kotlin bindings from the built cdylib"
+echo ">> build host cdylib for binding generation (uniffi --library can't read a"
+echo "   foreign-arch .so; the generated Kotlin is arch-independent regardless)"
+cargo build -q -p leshiy-mobile
+
+echo ">> generate Kotlin bindings from the host cdylib"
 cargo run -q -p leshiy-mobile --bin uniffi-bindgen -- generate \
-  --library target/aarch64-linux-android/release/libleshiy_mobile.so \
+  --library target/debug/libleshiy_mobile.so \
   --language kotlin --out-dir "$KOTLIN_OUT"
 
 echo ">> done: jniLibs in $JNILIBS, bindings in $KOTLIN_OUT/uniffi/leshiy_mobile/"
