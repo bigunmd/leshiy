@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
+import dev.leshiy.data.TunnelRepository
 import uniffi.leshiy_mobile.LeshiyBridge
 import uniffi.leshiy_mobile.Status
 import uniffi.leshiy_mobile.StatusListener
@@ -42,24 +43,23 @@ class LeshiyVpnService : VpnService() {
         // detachFd() transfers ownership of the fd to native code, which closes it on stop.
         bridge.start(tun.detachFd(), uri, object : StatusListener {
             override fun onStatus(status: Status) {
-                AppState.status.value = status
+                TunnelRepository.onStatus(status)
             }
         })
-        AppState.running.value = true
+        TunnelRepository.setRunning(true)
         return START_STICKY
     }
 
     private fun stopTunnel() {
         bridge.stop()
-        AppState.running.value = false
-        AppState.status.value = null
+        TunnelRepository.setRunning(false)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     override fun onDestroy() {
         bridge.stop()
-        AppState.running.value = false
+        TunnelRepository.setRunning(false)
         super.onDestroy()
     }
 
