@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -46,6 +48,7 @@ import dev.leshiy.ui.AppsViewModel
 import dev.leshiy.ui.ConnectUiState
 import dev.leshiy.ui.ConnectViewModel
 import dev.leshiy.ui.ProfilesViewModel
+import dev.leshiy.ui.ProvisionViewModel
 import dev.leshiy.ui.QrScanActivity
 import dev.leshiy.ui.theme.Dim
 import dev.leshiy.ui.theme.LeshiyTheme
@@ -54,7 +57,7 @@ import dev.leshiy.ui.theme.Wisp
 import uniffi.leshiy_mobile.ConnState
 import uniffi.leshiy_mobile.ProfileInfo
 
-private enum class Screen { Connect, Profiles, Split }
+private enum class Screen { Connect, Profiles, Split, Provision }
 
 /**
  * Phase 3: multiple servers + always-on. Two screens — Connect (drives the active profile) and
@@ -78,6 +81,7 @@ class MainActivity : ComponentActivity() {
                     val connectVm: ConnectViewModel = viewModel()
                     val profilesVm: ProfilesViewModel = viewModel()
                     val appsVm: AppsViewModel = viewModel()
+                    val provisionVm: ProvisionViewModel = viewModel()
                     val ui by connectVm.uiState.collectAsStateWithLifecycle()
                     val profiles by profilesVm.profiles.collectAsStateWithLifecycle()
                     var screen by remember { mutableStateOf(Screen.Connect) }
@@ -96,6 +100,7 @@ class MainActivity : ComponentActivity() {
                             TextButton(onClick = { screen = Screen.Connect }) { Text("Connect") }
                             TextButton(onClick = { screen = Screen.Profiles }) { Text("Profiles") }
                             TextButton(onClick = { screen = Screen.Split }) { Text("Split") }
+                            TextButton(onClick = { screen = Screen.Provision }) { Text("Deploy") }
                         }
                         when (screen) {
                             Screen.Connect -> ConnectScreen(
@@ -115,6 +120,13 @@ class MainActivity : ComponentActivity() {
                                 onRemove = profilesVm::remove,
                             )
                             Screen.Split -> SplitScreen(appsVm = appsVm)
+                            Screen.Provision -> ProvisionScreen(
+                                vm = provisionVm,
+                                onProvisioned = { uri, host ->
+                                    profilesVm.add(uri, host)
+                                    screen = Screen.Profiles
+                                },
+                            )
                         }
                     }
                 }
@@ -315,6 +327,45 @@ private fun SplitScreen(appsVm: AppsViewModel) {
                     Box(modifier = Modifier.weight(1f))
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ProvisionScreen(vm: ProvisionViewModel, onProvisioned: (String, String) -> Unit) {
+    val state by vm.state.collectAsStateWithLifecycle()
+    var host by remember { mutableStateOf("") }
+    var user by remember { mutableStateOf("root") }
+    var password by remember { mutableStateOf("") }
+    var dest by remember { mutableStateOf("www.microsoft.com:443") }
+    var port by remember { mutableStateOf("443") }
+
+    Column(
+        modifier = Modifier.fillMaxSize().padding(top = 16.dp).verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text("Provision a new server", style = MaterialTheme.typography.titleLarge)
+        OutlinedTextField(host, { host = it }, label = { Text("VPS host / IP") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(user, { user = it }, label = { Text("SSH user") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(password, { password = it }, label = { Text("SSH password") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(dest, { dest = it }, label = { Text("Camouflage dest (host:port)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(port, { port = it }, label = { Text("REALITY port") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+
+        Button(
+            onClick = {
+                vm.provision(host, user, password, dest, port.toIntOrNull() ?: 443) { uri ->
+                    onProvisioned(uri, host.trim())
+                }
+            },
+            enabled = !state.running && host.isNotBlank() && password.isNotBlank(),
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = Wisp),
+        ) { Text(if (state.running) "Provisioning…" else "Provision") }
+
+        state.error?.let { Text(it, color = Warn, style = MaterialTheme.typography.labelSmall) }
+
+        state.log.forEach { line ->
+            Text(line, color = Dim, style = MaterialTheme.typography.labelSmall)
         }
     }
 }
