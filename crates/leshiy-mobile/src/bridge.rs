@@ -16,6 +16,8 @@ struct Running {
     cancel: Arc<Notify>,
     // Keeping the runtime alive keeps the engine + poller tasks running; dropping it stops them.
     _rt: Runtime,
+    // Held so the state channel outlives the session (the poller clones its own receiver).
+    _state_rx: tokio::sync::watch::Receiver<ConnState>,
 }
 
 /// Control handle for a single VPN session (one per process).
@@ -61,6 +63,7 @@ impl LeshiyBridge {
             })?;
         let counters = Arc::new(ByteCounters::new());
         let cancel = Arc::new(Notify::new());
+        let (state_tx, state_rx) = tokio::sync::watch::channel(ConnState::Disconnected);
 
         // Engine driver task.
         let engine_uri = uri.clone();
@@ -68,15 +71,17 @@ impl LeshiyBridge {
         let engine_cancel = cancel.clone();
         rt.spawn(async move {
             if let Err(e) =
-                crate::runtime::run_engine(engine_uri, engine_counters, engine_cancel).await
+                crate::runtime::run_engine(engine_uri, engine_counters, engine_cancel, state_tx)
+                    .await
             {
                 tracing::warn!("engine stopped: {e}");
             }
         });
 
-        // Status poller (~1 Hz): read counters and notify the host.
+        // Status poller (~1 Hz): read live state + counters and notify the host.
         let poll_counters = counters.clone();
         let poll_cancel = cancel.clone();
+        let poll_state_rx = state_rx.clone();
         rt.spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
@@ -84,10 +89,8 @@ impl LeshiyBridge {
                     _ = poll_cancel.notified() => break,
                     _ = tick.tick() => {
                         let (up, down) = poll_counters.totals();
-                        // Phase 1 spike: report `Connected` as a placeholder. Real state comes
-                        // from wiring the supervisor's `watch::Receiver<State>` in Phase 2.
                         listener.on_status(Status {
-                            state: ConnState::Connected,
+                            state: *poll_state_rx.borrow(),
                             up_bytes: up,
                             down_bytes: down,
                         });
@@ -96,7 +99,11 @@ impl LeshiyBridge {
             }
         });
 
-        *guard = Some(Running { cancel, _rt: rt });
+        *guard = Some(Running {
+            cancel,
+            _rt: rt,
+            _state_rx: state_rx,
+        });
         Ok(())
     }
 

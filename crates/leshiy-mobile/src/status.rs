@@ -1,6 +1,4 @@
-use leshiy_client::State;
-
-/// Connection state exposed to the UI (mirrors `leshiy_client::State`, with `Error` -> `Failed`).
+/// Connection state exposed to the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum ConnState {
     Disconnected,
@@ -18,18 +16,14 @@ pub struct Status {
     pub down_bytes: u64,
 }
 
-/// Pure mapping from the supervisor's `State` to the FFI `ConnState`.
-///
-/// Tested now; wired into the status poller in Phase 2 when the bridge observes the
-/// supervisor's `watch::Receiver<State>` instead of reporting a placeholder.
-#[allow(dead_code)]
-pub fn map_state(s: State) -> ConnState {
-    match s {
-        State::Disconnected => ConnState::Disconnected,
-        State::Connecting => ConnState::Connecting,
-        State::Connected => ConnState::Connected,
-        State::Reconnecting => ConnState::Reconnecting,
-        State::Error => ConnState::Failed,
+/// The state to publish once the initial dial resolves. The mobile path runs `TunEngine`
+/// directly (not the supervisor `Machine`), so connection state is lifecycle-driven here
+/// rather than mapped from `leshiy_client::State`.
+pub fn next_on_dial_result(ok: bool) -> ConnState {
+    if ok {
+        ConnState::Connected
+    } else {
+        ConnState::Failed
     }
 }
 
@@ -38,17 +32,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_connected() {
-        assert_eq!(map_state(State::Connected), ConnState::Connected);
+    fn dial_ok_is_connected() {
+        assert_eq!(next_on_dial_result(true), ConnState::Connected);
     }
 
     #[test]
-    fn maps_disconnected() {
-        assert_eq!(map_state(State::Disconnected), ConnState::Disconnected);
-    }
-
-    #[test]
-    fn maps_error_to_failed() {
-        assert_eq!(map_state(State::Error), ConnState::Failed);
+    fn dial_err_is_failed() {
+        assert_eq!(next_on_dial_result(false), ConnState::Failed);
     }
 }
