@@ -93,10 +93,13 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn tmp() -> String {
+        // Unique per process + call, so parallel tests and leftover files from prior runs
+        // never collide (a reused path would reload a stale store).
         static N: AtomicU64 = AtomicU64::new(0);
         std::env::temp_dir()
             .join(format!(
-                "leshiy-pm-test-{}.json",
+                "leshiy-pm-test-{}-{}.json",
+                std::process::id(),
                 N.fetch_add(1, Ordering::Relaxed)
             ))
             .to_string_lossy()
