@@ -96,37 +96,7 @@ impl Provisioner {
             .map_err(|e| BridgeError::Provision {
                 reason: format!("runtime: {e}"),
             })?;
-        rt.block_on(self.run(cfg, listener))
-    }
-}
-
-impl Provisioner {
-    async fn run(
-        &self,
-        cfg: ProvisionConfig,
-        listener: Box<dyn ProvisionListener>,
-    ) -> Result<String, BridgeError> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let params = build_params(&cfg, now);
-        let mut transport = RusshTransport::new();
-        if let Some(pw) = cfg.sudo_password {
-            transport.set_sudo_password(Some(Zeroizing::new(pw)));
-        }
-        let mut on_event = |e: ProgressEvent| {
-            listener.on_update(ProvisionUpdate {
-                step: step_str(e.step),
-                status: status_str(e.status),
-                detail: e.detail,
-            });
-        };
-        let rec = engine::provision(&mut transport, &params, &mut on_event)
-            .await
-            .map_err(|e| BridgeError::Provision {
-                reason: e.to_string(),
-            })?;
+        let rec = rt.block_on(provision_record(&cfg, &*listener))?;
         rec.clients
             .first()
             .map(|c| c.uri.clone())
@@ -134,6 +104,36 @@ impl Provisioner {
                 reason: "no client issued".into(),
             })
     }
+}
+
+/// Provision core: dial + run the engine, forwarding progress. Returns the full `ServerRecord`
+/// so callers can persist it (management) or extract just the URI. Shared by `Provisioner` and
+/// `ServerManager`.
+pub(crate) async fn provision_record(
+    cfg: &ProvisionConfig,
+    listener: &dyn ProvisionListener,
+) -> Result<leshiy_provision::vault::ServerRecord, BridgeError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let params = build_params(cfg, now);
+    let mut transport = RusshTransport::new();
+    if let Some(pw) = &cfg.sudo_password {
+        transport.set_sudo_password(Some(Zeroizing::new(pw.clone())));
+    }
+    let mut on_event = |e: ProgressEvent| {
+        listener.on_update(ProvisionUpdate {
+            step: step_str(e.step),
+            status: status_str(e.status),
+            detail: e.detail,
+        });
+    };
+    engine::provision(&mut transport, &params, &mut on_event)
+        .await
+        .map_err(|e| BridgeError::Provision {
+            reason: e.to_string(),
+        })
 }
 
 #[cfg(test)]
