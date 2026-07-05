@@ -28,7 +28,10 @@ class LeshiyVpnService : VpnService() {
             }
         }
 
-        val uri = intent?.getStringExtra(EXTRA_URI) ?: return START_NOT_STICKY
+        // Explicit URI from the UI, or (always-on / boot) the persisted active profile.
+        val uri = intent?.getStringExtra(EXTRA_URI)
+            ?: dev.leshiy.data.Profiles.manager(applicationContext).activeUri()
+            ?: return START_NOT_STICKY
 
         val tun = Builder()
             .setSession("leshiy")
@@ -55,6 +58,11 @@ class LeshiyVpnService : VpnService() {
         TunnelRepository.setRunning(false)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    override fun onRevoke() {
+        // The system or another VPN app revoked our permission — tear down cleanly.
+        stopTunnel()
     }
 
     override fun onDestroy() {
