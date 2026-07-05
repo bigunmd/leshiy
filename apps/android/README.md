@@ -18,13 +18,26 @@ Native Kotlin + Jetpack Compose client. The UI drives the existing leshiy Rust d
 
 ## Build
 
+The system default JDK is 25; Gradle/AGP needs JDK 17. Point `JAVA_HOME` at it for the build
+only (don't change the global default):
+
 ```bash
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+export ANDROID_HOME=~/Android
+export ANDROID_NDK_HOME=~/Android/ndk/28.2.13676358
+
 # 1. Build the Rust bridge (.so per ABI) + generate Kotlin bindings.
 ../../scripts/build-android-jni.sh
 
-# 2. Build the APK. (Generate the Gradle wrapper once if missing: `gradle wrapper`.)
+# 2. Build the APK (the Gradle wrapper is committed; pinned to Gradle 8.11.1).
 ./gradlew assembleDebug
+# -> app/build/outputs/apk/debug/app-debug.apk
 ```
+
+Verified 2026-07-05: produces a ~25 MB debug APK with `libleshiy_mobile.so` for
+arm64-v8a/armeabi-v7a/x86_64. If Gradle itself isn't installed, fetch a binary dist once
+(`gradle-8.11.1-bin.zip` from services.gradle.org) and run `gradle wrapper` — after that
+`./gradlew` is self-contained.
 
 The bridge outputs (`app/src/main/jniLibs/`, `app/src/main/java/uniffi/`) are generated and
 git-ignored — regenerate them with the script, don't hand-edit.
