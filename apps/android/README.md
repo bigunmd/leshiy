@@ -9,8 +9,9 @@ Native Kotlin + Jetpack Compose client. The UI drives the existing leshiy Rust d
 ## Prerequisites
 
 - Android SDK (`ANDROID_HOME` set) + Platform 35, Build-Tools.
-- Android NDK: `sdkmanager "ndk;27.0.12077973"` then
-  `export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973`.
+- Android NDK: already installed at `~/Android/ndk/28.2.13676358` — just
+  `export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358` (else
+  `sdkmanager "ndk;28.2.13676358"`).
 - Rust Android targets (already installed): `aarch64/armv7/x86_64-linux-android`.
 - `cargo install cargo-ndk`.
 - JDK 17 (Gradle/AGP requirement).

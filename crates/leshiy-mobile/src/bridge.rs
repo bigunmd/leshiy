@@ -49,7 +49,7 @@ impl LeshiyBridge {
         crate::runtime::validate_uri(&uri)?;
 
         #[cfg(target_os = "android")]
-        leshiy_tun::sys::android::set_tun_fd(tun_fd);
+        leshiy_tun::sys::set_tun_fd(tun_fd);
         #[cfg(not(target_os = "android"))]
         let _ = tun_fd; // fd injection is android-only; host builds validate the plumbing.
 

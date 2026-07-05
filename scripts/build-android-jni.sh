@@ -4,8 +4,9 @@
 # Prerequisites:
 #   - Android Rust targets (already installed): aarch64/armv7/i686/x86_64-linux-android
 #   - cargo-ndk:            cargo install cargo-ndk
-#   - Android NDK:          sdkmanager "ndk;27.0.12077973"
-#                           export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973
+#   - Android NDK:          already installed at ~/Android/ndk/28.2.13676358 — just:
+#                           export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358
+#                           (else install one: sdkmanager "ndk;28.2.13676358")
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
