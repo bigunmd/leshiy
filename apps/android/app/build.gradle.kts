@@ -51,4 +51,5 @@ dependencies {
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
     // UniFFI-generated Kotlin needs the JNA runtime.
     implementation("net.java.dev.jna:jna:5.14.0@aar")
+    testImplementation("junit:junit:4.13.2")
 }
