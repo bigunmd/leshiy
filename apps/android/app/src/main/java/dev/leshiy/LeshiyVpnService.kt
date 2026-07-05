@@ -5,8 +5,11 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Intent
 import android.net.VpnService
+import android.content.Context
 import android.os.Build
+import dev.leshiy.data.PerAppStore
 import dev.leshiy.data.TunnelRepository
+import dev.leshiy.data.perAppPlan
 import uniffi.leshiy_mobile.LeshiyBridge
 import uniffi.leshiy_mobile.Status
 import uniffi.leshiy_mobile.StatusListener
@@ -39,6 +42,7 @@ class LeshiyVpnService : VpnService() {
             .addRoute("0.0.0.0", 0)
             .addDnsServer("1.1.1.1")
             .setMtu(1400)
+            .applyPerApp(applicationContext)
             .establish() ?: return START_NOT_STICKY
 
         startForeground(NOTIFICATION_ID, buildNotification())
@@ -58,6 +62,16 @@ class LeshiyVpnService : VpnService() {
         TunnelRepository.setRunning(false)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    /** Apply the persisted per-app split-tunnel rules to the tunnel Builder. */
+    private fun Builder.applyPerApp(ctx: Context): Builder {
+        val store = PerAppStore(ctx)
+        val plan = perAppPlan(store.mode(), store.packages(), ctx.packageName)
+        // runCatching guards NameNotFoundException for a since-uninstalled package.
+        plan.allowed.forEach { runCatching { addAllowedApplication(it) } }
+        plan.disallowed.forEach { runCatching { addDisallowedApplication(it) } }
+        return this
     }
 
     override fun onRevoke() {

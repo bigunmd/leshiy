@@ -40,6 +40,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import dev.leshiy.data.PerAppMode
+import dev.leshiy.ui.AppRow
+import dev.leshiy.ui.AppsViewModel
 import dev.leshiy.ui.ConnectUiState
 import dev.leshiy.ui.ConnectViewModel
 import dev.leshiy.ui.ProfilesViewModel
@@ -51,7 +54,7 @@ import dev.leshiy.ui.theme.Wisp
 import uniffi.leshiy_mobile.ConnState
 import uniffi.leshiy_mobile.ProfileInfo
 
-private enum class Screen { Connect, Profiles }
+private enum class Screen { Connect, Profiles, Split }
 
 /**
  * Phase 3: multiple servers + always-on. Two screens — Connect (drives the active profile) and
@@ -74,6 +77,7 @@ class MainActivity : ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     val connectVm: ConnectViewModel = viewModel()
                     val profilesVm: ProfilesViewModel = viewModel()
+                    val appsVm: AppsViewModel = viewModel()
                     val ui by connectVm.uiState.collectAsStateWithLifecycle()
                     val profiles by profilesVm.profiles.collectAsStateWithLifecycle()
                     var screen by remember { mutableStateOf(Screen.Connect) }
@@ -91,6 +95,7 @@ class MainActivity : ComponentActivity() {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             TextButton(onClick = { screen = Screen.Connect }) { Text("Connect") }
                             TextButton(onClick = { screen = Screen.Profiles }) { Text("Profiles") }
+                            TextButton(onClick = { screen = Screen.Split }) { Text("Split") }
                         }
                         when (screen) {
                             Screen.Connect -> ConnectScreen(
@@ -109,6 +114,7 @@ class MainActivity : ComponentActivity() {
                                 onActivate = profilesVm::activate,
                                 onRemove = profilesVm::remove,
                             )
+                            Screen.Split -> SplitScreen(appsVm = appsVm)
                         }
                     }
                 }
@@ -259,5 +265,56 @@ private fun ProfilesScreen(
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.buttonColors(containerColor = Wisp),
         ) { Text("Add server") }
+    }
+}
+
+@Composable
+private fun SplitScreen(appsVm: AppsViewModel) {
+    val mode by appsVm.mode.collectAsStateWithLifecycle()
+    val apps by appsVm.apps.collectAsStateWithLifecycle()
+
+    Column(
+        modifier = Modifier.fillMaxSize().padding(top = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            PerAppMode.entries.forEach { m ->
+                TextButton(onClick = { appsVm.setMode(m) }) {
+                    Text(
+                        text = m.name.lowercase(),
+                        color = if (m == mode) Wisp else Dim,
+                    )
+                }
+            }
+        }
+        Text(
+            text = when (mode) {
+                PerAppMode.OFF -> "All apps tunneled"
+                PerAppMode.INCLUDE -> "Only checked apps tunneled"
+                PerAppMode.EXCLUDE -> "Checked apps bypass the tunnel"
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = Dim,
+        )
+
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            items(apps, key = { it.pkg }) { row ->
+                val enabled = mode != PerAppMode.OFF
+                TextButton(
+                    onClick = { appsVm.toggle(row.pkg) },
+                    enabled = enabled,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        text = (if (row.checked) "☑ " else "☐ ") + row.label,
+                        color = if (row.checked && enabled) Wisp else Dim,
+                    )
+                    Box(modifier = Modifier.weight(1f))
+                }
+            }
+        }
     }
 }
