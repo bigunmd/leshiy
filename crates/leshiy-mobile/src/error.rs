@@ -11,4 +11,8 @@ pub enum BridgeError {
     AlreadyRunning,
     #[error("bridge not running")]
     NotRunning,
+    #[error("profile store: {reason}")]
+    Store { reason: String },
+    #[error("no such profile")]
+    NoSuchProfile,
 }
