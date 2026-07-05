@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import dev.leshiy.data.VaultHolder
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.leshiy_mobile.ProvisionConfig
@@ -53,9 +54,13 @@ class ProvisionViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             }
-            // provision() is a blocking bridge call — run it off the main thread.
+            // provision() is a blocking bridge call — run it off the main thread. When the vault
+            // is unlocked, provision through it so the server record is saved for management.
             val result = withContext(Dispatchers.IO) {
-                runCatching { Provisioner().provision(cfg, listener) }
+                runCatching {
+                    VaultHolder.get()?.provision(cfg, listener)
+                        ?: Provisioner().provision(cfg, listener)
+                }
             }
             result.fold(
                 onSuccess = { uri ->

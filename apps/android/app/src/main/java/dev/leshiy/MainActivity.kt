@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
@@ -43,13 +44,16 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.leshiy.data.PerAppMode
+import dev.leshiy.data.VaultHolder
 import dev.leshiy.ui.AppRow
 import dev.leshiy.ui.AppsViewModel
 import dev.leshiy.ui.ConnectUiState
 import dev.leshiy.ui.ConnectViewModel
+import dev.leshiy.ui.ManageViewModel
 import dev.leshiy.ui.ProfilesViewModel
 import dev.leshiy.ui.ProvisionViewModel
 import dev.leshiy.ui.QrScanActivity
+import uniffi.leshiy_mobile.ServerInfo
 import dev.leshiy.ui.theme.Dim
 import dev.leshiy.ui.theme.LeshiyTheme
 import dev.leshiy.ui.theme.Warn
@@ -57,7 +61,7 @@ import dev.leshiy.ui.theme.Wisp
 import uniffi.leshiy_mobile.ConnState
 import uniffi.leshiy_mobile.ProfileInfo
 
-private enum class Screen { Connect, Profiles, Split, Provision }
+private enum class Screen { Connect, Profiles, Split, Provision, Manage }
 
 /**
  * Phase 3: multiple servers + always-on. Two screens — Connect (drives the active profile) and
@@ -82,6 +86,7 @@ class MainActivity : ComponentActivity() {
                     val profilesVm: ProfilesViewModel = viewModel()
                     val appsVm: AppsViewModel = viewModel()
                     val provisionVm: ProvisionViewModel = viewModel()
+                    val manageVm: ManageViewModel = viewModel()
                     val ui by connectVm.uiState.collectAsStateWithLifecycle()
                     val profiles by profilesVm.profiles.collectAsStateWithLifecycle()
                     var screen by remember { mutableStateOf(Screen.Connect) }
@@ -96,11 +101,15 @@ class MainActivity : ComponentActivity() {
                     }
 
                     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
                             TextButton(onClick = { screen = Screen.Connect }) { Text("Connect") }
                             TextButton(onClick = { screen = Screen.Profiles }) { Text("Profiles") }
                             TextButton(onClick = { screen = Screen.Split }) { Text("Split") }
                             TextButton(onClick = { screen = Screen.Provision }) { Text("Deploy") }
+                            TextButton(onClick = { screen = Screen.Manage }) { Text("Manage") }
                         }
                         when (screen) {
                             Screen.Connect -> ConnectScreen(
@@ -126,6 +135,10 @@ class MainActivity : ComponentActivity() {
                                     profilesVm.add(uri, host)
                                     screen = Screen.Profiles
                                 },
+                            )
+                            Screen.Manage -> ManageScreen(
+                                vm = manageVm,
+                                onUserUri = { uri, label -> profilesVm.add(uri, label) },
                             )
                         }
                     }
@@ -366,6 +379,102 @@ private fun ProvisionScreen(vm: ProvisionViewModel, onProvisioned: (String, Stri
 
         state.log.forEach { line ->
             Text(line, color = Dim, style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+@Composable
+private fun ManageScreen(vm: ManageViewModel, onUserUri: (String, String) -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var unlocked by remember { mutableStateOf(VaultHolder.unlocked) }
+
+    if (!unlocked) {
+        var pass by remember { mutableStateOf("") }
+        var failed by remember { mutableStateOf(false) }
+        Column(
+            modifier = Modifier.fillMaxSize().padding(top = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("Unlock server vault", style = MaterialTheme.typography.titleLarge)
+            Text(
+                "Sets or opens an encrypted vault holding SSH credentials for provisioned servers.",
+                style = MaterialTheme.typography.labelSmall,
+                color = Dim,
+            )
+            OutlinedTextField(pass, { pass = it }, label = { Text("Passphrase") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            Button(
+                onClick = {
+                    if (VaultHolder.unlock(context, pass)) {
+                        unlocked = true
+                        vm.refreshServers()
+                    } else {
+                        failed = true
+                    }
+                },
+                enabled = pass.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = Wisp),
+            ) { Text("Unlock") }
+            if (failed) Text("Wrong passphrase", color = Warn, style = MaterialTheme.typography.labelSmall)
+        }
+        return
+    }
+
+    val servers by vm.servers.collectAsStateWithLifecycle()
+    val users by vm.users.collectAsStateWithLifecycle()
+    val selected by vm.selected.collectAsStateWithLifecycle()
+    val busy by vm.busy.collectAsStateWithLifecycle()
+    val message by vm.message.collectAsStateWithLifecycle()
+    var addLabel by remember { mutableStateOf("") }
+
+    Column(
+        modifier = Modifier.fillMaxSize().padding(top = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        message?.let { Text(it, color = Dim, style = MaterialTheme.typography.labelSmall) }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            items(servers, key = { it.id }) { s ->
+                val open = s.id == selected
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        TextButton(onClick = { vm.select(s.id) }) {
+                            Text((if (open) "▾ " else "▸ ") + s.label, color = if (open) Wisp else Dim)
+                        }
+                        Box(modifier = Modifier.weight(1f))
+                        TextButton(onClick = { vm.status(s.id) }, enabled = !busy) { Text("status", color = Dim) }
+                    }
+                    if (open) {
+                        users.forEach { u ->
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    "  ${u.label ?: "(orphan)"}  ${u.shortId}",
+                                    color = if (u.enabled) Dim else Warn,
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                                Box(modifier = Modifier.weight(1f))
+                                TextButton(onClick = { vm.deleteUser(s.id, u.shortId) }, enabled = !busy) { Text("✕", color = Warn) }
+                            }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            OutlinedTextField(
+                                addLabel, { addLabel = it }, label = { Text("New user label") },
+                                singleLine = true, modifier = Modifier.weight(1f),
+                            )
+                            TextButton(
+                                onClick = { vm.addUser(s.id, addLabel) { uri -> onUserUri(uri, addLabel.ifBlank { "phone" }); addLabel = "" } },
+                                enabled = !busy,
+                            ) { Text("add", color = Wisp) }
+                        }
+                        TextButton(onClick = { vm.teardown(s.id, false) }, enabled = !busy) {
+                            Text("teardown server", color = Warn)
+                        }
+                    }
+                }
+            }
         }
     }
 }
