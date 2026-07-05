@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/leshiy-core", "crates/leshiy", "crates/leshiy-tls", "crates/leshiy-reality", "crates/leshiy-quic", "crates/leshiy-client", "crates/leshiy-tun", "crates/leshiy-helper", "crates/leshiy-provision"]
+members = ["crates/leshiy-core", "crates/leshiy", "crates/leshiy-tls", "crates/leshiy-reality", "crates/leshiy-quic", "crates/leshiy-client", "crates/leshiy-tun", "crates/leshiy-helper", "crates/leshiy-provision", "crates/leshiy-mobile"]
 exclude = ["apps/gui/src-tauri"]
 
 [workspace.package]
@@ -16,6 +16,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 anyhow = "1"
+uniffi = "0.28"
 zeroize = { version = "1", features = ["derive", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

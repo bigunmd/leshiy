@@ -1,0 +1,23 @@
+[package]
+name = "leshiy-mobile"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "leshiy_mobile"
+
+# In-repo bindgen so Kotlin/Swift generation uses the exact pinned uniffi version.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi_bindgen.rs"
+
+[dependencies]
+leshiy-client = { path = "../leshiy-client" }
+leshiy-tun = { path = "../leshiy-tun" }
+leshiy-reality = { path = "../leshiy-reality" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uniffi = { workspace = true, features = ["cli"] }
