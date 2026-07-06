@@ -76,6 +76,9 @@ pub struct ProvisionParams {
     /// Persist that this server escalates via sudo, so day-2 ops prompt for the
     /// sudo password. The password itself is never stored.
     pub sudo: bool,
+    /// Operator override for the container's DNS resolver (`--dns`). When set and
+    /// valid it is used verbatim, skipping host detection and the public fallback.
+    pub dns_override: Option<String>,
 }
 
 fn ev(step: Step, status: Status, detail: impl Into<String>) -> ProgressEvent {
@@ -221,11 +224,14 @@ async fn provision_inner<T: Transport>(
 
         *current = Step::RunContainer;
         on_event(ev(Step::RunContainer, Status::Started, ""));
-        // Detect a container-usable DNS server so the REALITY server can resolve
-        // `dest` from inside the container. Best-effort: on failure or no usable
-        // resolver we let Docker use its default (correct on hosts where that
-        // works), and the dest-dial timeout keeps a bad resolver from hanging.
-        let dns = detect_host_dns(t).await;
+        // Compose the container's DNS resolvers so the REALITY server can resolve
+        // `dest` from inside the container. Prefer the host's IPv4 upstream (works
+        // on clouds that block external DNS), always backed by a public IPv4
+        // fallback so an IPv6-only-resolver host still resolves on the IPv4-only
+        // bridge (the v1.6.4 outage). An explicit `--dns` override wins outright.
+        let host_dns = detect_host_dns(t).await;
+        let dns = dns_servers(host_dns, p.dns_override.as_deref());
+        let dns_refs: Vec<&str> = dns.iter().map(String::as_str).collect();
         let mut envs = vec![
             ("LESHIY_HOST".to_string(), p.public_host.clone()),
             ("LESHIY_DEST".to_string(), p.dest_sni.clone()),
@@ -245,7 +251,7 @@ async fn provision_inner<T: Transport>(
             &p.image_ref,
             p.listen_port,
             p.quic_port,
-            dns.as_deref(),
+            &dns_refs,
             &envs,
         ))
         .await?
@@ -253,10 +259,7 @@ async fn provision_inner<T: Transport>(
         on_event(ev(
             Step::RunContainer,
             Status::Done,
-            match &dns {
-                Some(ip) => format!("dns={ip}"),
-                None => "dns=docker-default".to_string(),
-            },
+            format!("dns={}", dns.join(",")),
         ));
     } else {
         on_event(ev(
@@ -414,10 +417,10 @@ pub async fn teardown<T: Transport>(t: &mut T, rec: &ServerRecord, purge: bool) 
     Ok(())
 }
 
-/// Detect a container-usable DNS server on the host (the real upstream, never a
-/// loopback stub). Returns `None` when nothing usable is found or on any
-/// transport hiccup — the caller then falls back to Docker's default resolver.
-/// The result is validated as a bare IP literal before it can reach a shell.
+/// Detect a container-usable **IPv4** DNS server on the host (the real upstream,
+/// never a loopback stub). Returns `None` when nothing usable is found or on any
+/// transport hiccup — [`dns_servers`] then relies on the public fallback. The
+/// result is validated as a bare IP literal before it can reach a shell.
 async fn detect_host_dns<T: Transport>(t: &mut T) -> Option<String> {
     let out = t.run(docker::detect_host_dns_cmd()).await.ok()?;
     let candidate = out.stdout.trim();
@@ -426,6 +429,25 @@ async fn detect_host_dns<T: Transport>(t: &mut T) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Compose the ordered `--dns` list Docker will try in order.
+///
+/// - A valid explicit operator override wins outright (no fallback appended).
+/// - Otherwise the host's detected IPv4 resolver (if any) leads, always backed by
+///   the public IPv4 fallback(s) so resolution works even when the host has no
+///   container-usable IPv4 resolver (an IPv6-only `resolv.conf` on the IPv4-only
+///   bridge — the v1.6.4 outage).
+fn dns_servers(host_ipv4: Option<String>, override_dns: Option<&str>) -> Vec<String> {
+    if let Some(o) = override_dns
+        && docker::valid_dns_addr(o)
+    {
+        return vec![o.to_string()];
+    }
+    let mut list = Vec::new();
+    list.extend(host_ipv4);
+    list.extend(docker::DNS_PUBLIC_FALLBACK.iter().map(|s| s.to_string()));
+    list
 }
 
 /// Detect ufw and, when it is active, open the listen (and QUIC) port(s).
@@ -534,6 +556,7 @@ mod tests {
             connector: None,
             downstream: None,
             sudo: false,
+            dns_override: None,
         }
     }
 
@@ -698,16 +721,17 @@ mod tests {
             },
         );
         provision(&mut t, &params(), &mut |_| {}).await.unwrap();
+        // The detected host resolver leads, always backed by the public fallback.
         assert!(
-            t.calls()
-                .iter()
-                .any(|c| c.contains("docker run") && c.contains("--dns 10.130.0.2")),
-            "docker run must carry the detected host resolver"
+            t.calls().iter().any(|c| c.contains("docker run")
+                && c.contains("--dns 10.130.0.2")
+                && c.contains("--dns 1.1.1.1")),
+            "docker run must carry the detected host resolver and a public fallback"
         );
     }
 
     #[tokio::test]
-    async fn provision_omits_dns_when_host_has_no_usable_resolver() {
+    async fn provision_falls_back_to_public_dns_when_host_has_no_resolver() {
         let mut t = FakeTransport::new();
         t.on(
             super::super::docker::detect_docker_cmd(),
@@ -717,7 +741,9 @@ mod tests {
                 stderr: String::new(),
             },
         )
-        // DNS probe returns empty (only loopback on host) → no --dns.
+        // DNS probe returns empty (host resolv.conf is IPv6-only or loopback-only,
+        // the v1.6.4 incident) → the container still gets a public IPv4 fallback so
+        // it can resolve `dest` on the IPv4-only bridge.
         .on(
             "systemd/resolve/resolv.conf",
             CommandOutput {
@@ -735,8 +761,74 @@ mod tests {
             },
         );
         provision(&mut t, &params(), &mut |_| {}).await.unwrap();
-        assert!(t.calls().iter().any(|c| c.contains("docker run")));
-        assert!(!t.calls().iter().any(|c| c.contains("--dns")));
+        assert!(
+            t.calls()
+                .iter()
+                .any(|c| c.contains("docker run") && c.contains("--dns 1.1.1.1")),
+            "docker run must carry the public DNS fallback when the host has none"
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_dns_override_wins_and_skips_fallback() {
+        let mut t = FakeTransport::new();
+        let mut p = params();
+        p.dns_override = Some("9.9.9.9".into());
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 0,
+                stdout: format!("{}\n", issued_uri()),
+                stderr: String::new(),
+            },
+        );
+        provision(&mut t, &p, &mut |_| {}).await.unwrap();
+        assert!(
+            t.calls()
+                .iter()
+                .any(|c| c.contains("docker run") && c.contains("--dns 9.9.9.9")),
+            "an explicit --dns override must be used"
+        );
+        // The override is authoritative — no fallback is appended.
+        assert!(!t.calls().iter().any(|c| c.contains("--dns 1.1.1.1")));
+    }
+
+    #[test]
+    fn dns_servers_prefers_host_then_fallback() {
+        let list = dns_servers(Some("10.0.0.1".to_string()), None);
+        assert_eq!(list[0], "10.0.0.1");
+        assert!(list[1..].contains(&"1.1.1.1".to_string()));
+    }
+
+    #[test]
+    fn dns_servers_uses_only_fallback_when_no_host() {
+        let list = dns_servers(None, None);
+        assert_eq!(list, docker::DNS_PUBLIC_FALLBACK);
+    }
+
+    #[test]
+    fn dns_servers_override_wins() {
+        assert_eq!(
+            dns_servers(Some("10.0.0.1".to_string()), Some("9.9.9.9")),
+            vec!["9.9.9.9".to_string()]
+        );
+    }
+
+    #[test]
+    fn dns_servers_ignores_invalid_override() {
+        // A garbage override (shell metachars) is dropped; we fall back to the
+        // safe host+public list rather than splice something dangerous.
+        let list = dns_servers(Some("10.0.0.1".to_string()), Some("bad; rm -rf /"));
+        assert_eq!(list[0], "10.0.0.1");
+        assert!(list.iter().all(|s| s != "bad; rm -rf /"));
     }
 
     #[tokio::test]

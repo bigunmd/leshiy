@@ -6,6 +6,14 @@
 /// `teardown --purge` must remove it explicitly to force a clean re-provision.
 pub const DATA_VOLUME: &str = "leshiy-data";
 
+/// Public IPv4 resolvers appended after any host-detected IPv4 resolver. Docker
+/// tries `--dns` servers in order, so the host's own resolver (respecting
+/// cloud-internal DNS that blocks external egress, e.g. Yandex/GCP) is used first
+/// and these are the safety net. Both are IPv4 so they are reachable on the
+/// IPv4-only default bridge — the exact reachability the v1.6.4 incident lacked
+/// when an IPv6-only resolver was spliced in and every handshake black-holed.
+pub const DNS_PUBLIC_FALLBACK: &[&str] = &["1.1.1.1", "8.8.8.8"];
+
 /// Probe whether docker is on PATH. Prints `yes`/`no`.
 pub fn detect_docker_cmd() -> &'static str {
     "command -v docker >/dev/null 2>&1 && echo yes || echo no"
@@ -42,7 +50,7 @@ pub fn run_cmd(
     image_ref: &str,
     listen_port: u16,
     quic_port: Option<u16>,
-    dns: Option<&str>,
+    dns: &[&str],
     envs: &[(String, String)],
 ) -> String {
     // --user 0:0: the image's default `nonroot` user can't write the root-owned
@@ -57,8 +65,10 @@ pub fn run_cmd(
     // --dns: the REALITY server must resolve `dest` from *inside* the container.
     // Docker's default resolver (8.8.8.8, or the host's 127.0.0.53 systemd stub)
     // is unreachable on many clouds (Yandex, GCP), so DNS silently black-holes and
-    // every handshake stalls. The engine passes the host's real upstream resolver.
-    if let Some(server) = dns {
+    // every handshake stalls. The engine passes the host's real IPv4 upstream
+    // first, then a public IPv4 fallback; Docker tries them in order. Multiple
+    // `--dns` are emitted so an unreachable lead resolver falls through.
+    for server in dns {
         s.push_str(&format!(" --dns {server}"));
     }
     if let Some(q) = quic_port {
@@ -77,16 +87,20 @@ pub fn ps_names_cmd() -> &'static str {
     "sudo docker ps --format '{{.Names}}'"
 }
 
-/// Print the host's first container-usable DNS server (or nothing).
+/// Print the host's first container-usable **IPv4** DNS server (or nothing).
 ///
 /// Prefers a non-loopback `nameserver` from `/etc/resolv.conf`; on
 /// systemd-resolved hosts that file points at the `127.0.0.53` stub (unreachable
 /// from a container), so we also read `/run/systemd/resolve/resolv.conf`, which
-/// carries the real upstreams. Loopback (`127.*`, `::1`) entries are dropped
-/// because the container can't reach them. No sudo: both files are world-readable.
+/// carries the real upstreams. We positively match an IPv4 dotted-quad and drop
+/// `127.*` loopback: an IPv6 resolver is unreachable on the IPv4-only default
+/// bridge (`EnableIPv6=false`), so selecting one black-holes every in-container
+/// lookup — the v1.6.4 outage. IPv6 and `::1` are excluded by the IPv4 match. No
+/// sudo: both files are world-readable. Empty output → the engine uses the public
+/// IPv4 fallback (see [`DNS_PUBLIC_FALLBACK`]).
 pub fn detect_host_dns_cmd() -> &'static str {
     "grep -h '^nameserver' /etc/resolv.conf /run/systemd/resolve/resolv.conf 2>/dev/null \
-     | awk '{print $2}' | grep -vE '^(127\\.|::1$)' | head -n1"
+     | awk '{print $2}' | grep -E '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$' | grep -vE '^127\\.' | head -n1"
 }
 
 /// Whether a detected DNS server string is a bare IP literal safe to splice into
@@ -168,7 +182,7 @@ mod tests {
                 "www.microsoft.com:443".to_string(),
             ),
         ];
-        let run = run_cmd("leshiy", "img:1", 443, Some(8443), None, &envs);
+        let run = run_cmd("leshiy", "img:1", 443, Some(8443), &[], &envs);
         assert!(run.contains("--name leshiy"));
         assert!(run.contains("--restart=unless-stopped"));
         assert!(run.contains("--user 0:0"));
@@ -183,7 +197,7 @@ mod tests {
 
     #[test]
     fn run_cmd_without_quic_has_no_udp() {
-        let run = run_cmd("leshiy", "img:1", 443, None, None, &[]);
+        let run = run_cmd("leshiy", "img:1", 443, None, &[], &[]);
         assert!(!run.contains("/udp"));
         assert!(run.trim_end().ends_with("img:1 boot"));
     }
@@ -206,6 +220,35 @@ mod tests {
         assert!(c.contains("/run/systemd/resolve/resolv.conf"));
         // Must drop loopback nameservers — they're useless to the container.
         assert!(c.contains("127") && c.contains("nameserver"));
+        // Must select an IPv4 dotted-quad only: an IPv6 resolver is unreachable on
+        // the IPv4-only default bridge (the v1.6.4 incident), so the pipeline
+        // positively matches `d.d.d.d` and never yields an IPv6 literal.
+        assert!(
+            c.contains(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"),
+            "must positively match an IPv4 dotted-quad: {c}"
+        );
+        assert!(c.contains("head -n1"));
+    }
+
+    #[test]
+    fn run_cmd_injects_multiple_dns_in_order() {
+        // Docker tries `--dns` servers in order, so the host resolver must precede
+        // the public fallback.
+        let run = run_cmd("leshiy", "img:1", 443, None, &["10.130.0.2", "1.1.1.1"], &[]);
+        let host_at = run.find("--dns 10.130.0.2").expect("host --dns present");
+        let fb_at = run.find("--dns 1.1.1.1").expect("fallback --dns present");
+        assert!(host_at < fb_at, "host resolver must come before fallback: {run}");
+    }
+
+    #[test]
+    fn dns_public_fallback_are_ipv4_literals() {
+        // The fallback must be usable on an IPv4-only bridge: valid, non-loopback,
+        // and IPv4 (dotted, never a `:` IPv6 literal).
+        assert!(!DNS_PUBLIC_FALLBACK.is_empty());
+        for f in DNS_PUBLIC_FALLBACK {
+            assert!(valid_dns_addr(f), "fallback must be a valid dns addr: {f}");
+            assert!(f.contains('.') && !f.contains(':'), "fallback must be IPv4: {f}");
+        }
     }
 
     #[test]
@@ -222,13 +265,13 @@ mod tests {
 
     #[test]
     fn run_cmd_injects_dns_when_present() {
-        let run = run_cmd("leshiy", "img:1", 443, None, Some("10.130.0.2"), &[]);
+        let run = run_cmd("leshiy", "img:1", 443, None, &["10.130.0.2"], &[]);
         assert!(run.contains("--dns 10.130.0.2"), "run: {run}");
     }
 
     #[test]
     fn run_cmd_omits_dns_when_absent() {
-        let run = run_cmd("leshiy", "img:1", 443, None, None, &[]);
+        let run = run_cmd("leshiy", "img:1", 443, None, &[], &[]);
         assert!(!run.contains("--dns"));
     }
 
