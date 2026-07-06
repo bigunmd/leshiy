@@ -22,15 +22,23 @@ use std::net::{IpAddr, SocketAddr};
 /// `allow_private` permits loopback / RFC 1918 / IPv6 unique-local targets.
 /// Link-local (incl. cloud metadata 169.254.169.254), unspecified, broadcast
 /// and multicast are forbidden regardless of `allow_private`.
-fn check_ip(addr: IpAddr, allow_private: bool) -> Result<()> {
-    // Canonicalize IPv4-mapped IPv6 to IPv4 so the v4 rules apply uniformly.
-    let addr = match addr {
+/// Canonicalize an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to its IPv4 form, leaving other
+/// addresses unchanged. A dual-stack listener reports v4 peers in the mapped form, so per-IP
+/// bookkeeping (connection limits, rate limits, logs) must normalize to avoid treating the same
+/// client's v4 and v4-mapped forms as distinct.
+pub fn canonical_ip(addr: IpAddr) -> IpAddr {
+    match addr {
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
             Some(v4) => IpAddr::V4(v4),
             None => IpAddr::V6(v6),
         },
         v4 => v4,
-    };
+    }
+}
+
+fn check_ip(addr: IpAddr, allow_private: bool) -> Result<()> {
+    // Canonicalize IPv4-mapped IPv6 to IPv4 so the v4 rules apply uniformly.
+    let addr = canonical_ip(addr);
 
     let forbidden = match addr {
         IpAddr::V4(v4) => {
@@ -168,6 +176,13 @@ mod tests {
         assert!(check_ip(ip("1.1.1.1"), false).is_ok());
         assert!(check_ip(ip("8.8.8.8"), false).is_ok());
         assert!(check_ip(ip("2606:4700:4700::1111"), false).is_ok());
+    }
+
+    #[test]
+    fn canonical_ip_unmaps_v4_mapped() {
+        assert_eq!(canonical_ip(ip("::ffff:1.2.3.4")), ip("1.2.3.4"));
+        assert_eq!(canonical_ip(ip("1.2.3.4")), ip("1.2.3.4"));
+        assert_eq!(canonical_ip(ip("2001:db8::1")), ip("2001:db8::1"));
     }
 
     #[tokio::test]
