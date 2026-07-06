@@ -26,27 +26,10 @@ class ProvisionViewModel(app: Application) : AndroidViewModel(app) {
     private val _state = MutableStateFlow(ProvisionState())
     val state: StateFlow<ProvisionState> = _state.asStateFlow()
 
-    fun provision(
-        host: String,
-        sshUser: String,
-        sshPassword: String,
-        dest: String,
-        listenPort: Int,
-        onDone: (String) -> Unit,
-    ) {
+    fun provision(cfg: ProvisionConfig, onDone: (String) -> Unit) {
         if (_state.value.running) return
         _state.value = ProvisionState(running = true)
         viewModelScope.launch {
-            val cfg = ProvisionConfig(
-                host = host.trim(),
-                sshPort = 22u,
-                sshUser = sshUser.trim().ifBlank { "root" },
-                sshPassword = sshPassword,
-                dest = dest.trim(),
-                listenPort = listenPort.toUShort(),
-                label = null,
-                sudoPassword = null,
-            )
             val listener = object : ProvisionListener {
                 override fun onUpdate(update: ProvisionUpdate) {
                     _state.value = _state.value.copy(

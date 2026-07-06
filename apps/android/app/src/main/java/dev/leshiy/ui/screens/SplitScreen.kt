@@ -54,6 +54,7 @@ import dev.leshiy.ui.theme.Dim
 import dev.leshiy.ui.theme.PlexMono
 import dev.leshiy.ui.theme.Wisp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -123,6 +124,26 @@ private fun ColumnScope.NetSplit(vm: SplitViewModel) {
     val excludeUnsupported = mode == PerAppMode.EXCLUDE && Build.VERSION.SDK_INT < 33
     val s = LocalStrings.current
 
+    val context = LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var importMsg by remember { mutableStateOf<String?>(null) }
+    val fileLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) scope.launch {
+            importMsg = runCatching {
+                val added = withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)!!.bufferedReader().useLines { lines ->
+                        lines.map { it.substringBefore('#').trim() }
+                            .filter { it.isNotEmpty() }
+                            .count { vm.addEntry(it) }
+                    }
+                }
+                s.importedCount.format(added)
+            }.getOrDefault(s.importFailed)
+        }
+    }
+
     ModeSelector(mode) { vm.setNetMode(it) }
     Spacer(Modifier.size(8.dp))
     Hint(
@@ -156,13 +177,25 @@ private fun ColumnScope.NetSplit(vm: SplitViewModel) {
     }
     Field(input, { input = it; error = false }, s.ipCidrDomain)
     if (error) Text(s.invalidRule, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+    importMsg?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = Wisp) }
     Spacer(Modifier.size(8.dp))
-    PrimaryButton(
-        s.addRule,
-        onClick = { if (vm.addEntry(input)) input = "" else error = true },
-        enabled = input.isNotBlank(),
-        modifier = Modifier.fillMaxWidth(),
-    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        PrimaryButton(
+            s.addRule,
+            onClick = { if (vm.addEntry(input)) input = "" else error = true },
+            enabled = input.isNotBlank(),
+            modifier = Modifier.weight(1f),
+        )
+        androidx.compose.material3.OutlinedButton(
+            onClick = { fileLauncher.launch(arrayOf("text/*", "application/octet-stream", "*/*")) },
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        ) {
+            Icon(LeshiyIcons.File, null, tint = Wisp, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(s.importFile, color = Wisp, style = MaterialTheme.typography.labelLarge)
+        }
+    }
     Spacer(Modifier.size(8.dp))
 }
 
