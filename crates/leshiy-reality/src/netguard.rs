@@ -58,21 +58,31 @@ fn check_ip(addr: IpAddr, allow_private: bool) -> Result<()> {
     Ok(())
 }
 
-/// Resolve `target` (e.g. `"example.com:443"` or `"127.0.0.1:80"`) and
-/// return the first resolved `SocketAddr` after verifying it against the
-/// egress policy (see [`check_ip`]).
-pub async fn resolve_checked(target: &str, allow_private: bool) -> Result<SocketAddr> {
-    let mut addrs = tokio::net::lookup_host(target)
+/// Resolve `target` (e.g. `"example.com:443"`, `"[2001:db8::1]:443"`, or
+/// `"127.0.0.1:80"`) and return **all** resolved `SocketAddr`s that pass the
+/// egress policy (see [`check_ip`]), in resolver order.
+///
+/// Forbidden addresses are filtered out rather than aborting the whole target, so
+/// a legitimate dual-stack host whose result mixes families still connects, while
+/// a policy-violating address is never dialed. Callers try the returned addresses
+/// in turn — a leading unreachable one (e.g. an AAAA on an IPv4-only network) then
+/// falls through to the next instead of failing the dial. Returning resolved
+/// addresses (never re-resolving) preserves the DNS-rebinding guarantee. Errors if
+/// nothing resolves or every result is forbidden.
+pub async fn resolve_all_checked(target: &str, allow_private: bool) -> Result<Vec<SocketAddr>> {
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host(target)
         .await
-        .map_err(RealityError::Io)?;
+        .map_err(RealityError::Io)?
+        .filter(|a| check_ip(a.ip(), allow_private).is_ok())
+        .collect();
 
-    let addr = addrs
-        .next()
-        .ok_or_else(|| RealityError::Malformed(format!("no address resolved for {target}")))?;
+    if addrs.is_empty() {
+        return Err(RealityError::Malformed(format!(
+            "no allowed address resolved for {target}"
+        )));
+    }
 
-    check_ip(addr.ip(), allow_private)?;
-
-    Ok(addr)
+    Ok(addrs)
 }
 
 #[cfg(test)]
@@ -161,13 +171,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_checked_blocks_loopback_by_default() {
-        assert!(resolve_checked("127.0.0.1:80", false).await.is_err());
+    async fn resolve_all_checked_blocks_loopback_by_default() {
+        // Loopback is filtered out under the default policy → nothing left → error.
+        assert!(resolve_all_checked("127.0.0.1:80", false).await.is_err());
     }
 
     #[tokio::test]
-    async fn resolve_checked_allows_loopback_on_opt_in() {
-        let addr = resolve_checked("127.0.0.1:80", true).await.unwrap();
-        assert_eq!(addr.ip(), ip("127.0.0.1"));
+    async fn resolve_all_checked_allows_loopback_on_opt_in() {
+        let addrs = resolve_all_checked("127.0.0.1:80", true).await.unwrap();
+        assert!(addrs.iter().any(|a| a.ip() == ip("127.0.0.1")));
+    }
+
+    #[tokio::test]
+    async fn resolve_all_checked_keeps_public_addr() {
+        let addrs = resolve_all_checked("1.1.1.1:443", false).await.unwrap();
+        assert_eq!(addrs, vec!["1.1.1.1:443".parse::<SocketAddr>().unwrap()]);
     }
 }

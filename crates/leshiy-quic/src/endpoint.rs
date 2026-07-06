@@ -1,6 +1,7 @@
 //! quinn endpoint construction: BBR server + a client with SHA-256 cert pinning or webpki roots.
 use crate::Result;
 use sha2::{Digest, Sha256};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use quinn::{Endpoint, ServerConfig, TransportConfig};
@@ -62,12 +63,24 @@ pub fn server_endpoint(
     Endpoint::server(cfg, listen).map_err(Into::into)
 }
 
-/// Client endpoint using the specified certificate verification strategy.
-pub fn client_endpoint(verification: CertVerification) -> Result<Endpoint> {
+/// Wildcard client bind matching the family of the QUIC server target: a v4 UDP
+/// socket cannot reach a v6 server endpoint (and vice versa), so the client
+/// socket must be bound in the target's address family.
+fn client_bind_wildcard(target: SocketAddr) -> SocketAddr {
+    if target.is_ipv6() {
+        (Ipv6Addr::UNSPECIFIED, 0).into()
+    } else {
+        (Ipv4Addr::UNSPECIFIED, 0).into()
+    }
+}
+
+/// Client endpoint using the specified certificate verification strategy, its UDP
+/// socket bound in the same address family as `target`.
+pub fn client_endpoint(verification: CertVerification, target: SocketAddr) -> Result<Endpoint> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .ok();
-    let mut ep = Endpoint::client("0.0.0.0:0".parse().unwrap())?;
+    let mut ep = Endpoint::client(client_bind_wildcard(target))?;
     let mut crypto = match verification {
         CertVerification::Roots => {
             let mut roots = rustls::RootCertStore::empty();
@@ -154,5 +167,32 @@ impl rustls::client::danger::ServerCertVerifier for PinnedVerifier {
         rustls::crypto::aws_lc_rs::default_provider()
             .signature_verification_algorithms
             .supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn client_bind_wildcard_matches_target_family() {
+        let v4: SocketAddr = "1.2.3.4:443".parse().unwrap();
+        let v6: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+        assert_eq!(client_bind_wildcard(v4), "0.0.0.0:0".parse().unwrap());
+        assert_eq!(client_bind_wildcard(v6), "[::]:0".parse().unwrap());
+    }
+
+    #[tokio::test]
+    async fn client_endpoint_binds_target_family() {
+        // The client UDP socket must match the server's family — a v4 socket cannot
+        // reach a v6 QUIC endpoint. Verified via the bound local address.
+        let v4: SocketAddr = "1.2.3.4:443".parse().unwrap();
+        let ep4 = client_endpoint(CertVerification::Roots, v4).unwrap();
+        assert!(ep4.local_addr().unwrap().is_ipv4());
+
+        let v6: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+        let ep6 = client_endpoint(CertVerification::Roots, v6).unwrap();
+        assert!(ep6.local_addr().unwrap().is_ipv6());
     }
 }
