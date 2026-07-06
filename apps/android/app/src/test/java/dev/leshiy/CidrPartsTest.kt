@@ -1,8 +1,11 @@
 package dev.leshiy
 
 import dev.leshiy.data.cidrParts
+import dev.leshiy.data.isValidDomain
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CidrPartsTest {
@@ -37,5 +40,18 @@ class CidrPartsTest {
 
     @Test fun rejects_empty() {
         assertNull(cidrParts("   "))
+    }
+
+    @Test fun domain_accepts_host_and_wildcard() {
+        assertTrue(isValidDomain("example.com"))
+        assertTrue(isValidDomain("sub.example.com"))
+        assertTrue(isValidDomain("*.netflix.com"))
+    }
+
+    @Test fun domain_rejects_ip_and_garbage() {
+        assertFalse(isValidDomain("1.2.3.4"))
+        assertFalse(isValidDomain("nodot"))
+        assertFalse(isValidDomain("bad_underscore.com"))
+        assertFalse(isValidDomain(""))
     }
 }

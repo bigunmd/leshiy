@@ -93,6 +93,10 @@ object LeshiyIcons {
         sw = 1.7f,
     )
     val Shield = stroked("M12 3 l7 3 v5 c0 4.5 -3 7.5 -7 9 c-4 -1.5 -7 -4.5 -7 -9 V6 z", sw = 1.7f)
+    val Globe = stroked(
+        "M12 3 a9 9 0 1 0 0.001 0 z M3.5 12 H20.5 M12 3 c3 3 3 15 0 18 M12 3 c-3 3 -3 15 0 18",
+        sw = 1.6f,
+    )
     val Rocket = stroked(
         "M12 3 c3 2 4.5 5.5 4.5 9 l-2 2 h-5 l-2 -2 c0 -3.5 1.5 -7 4.5 -9 z " +
             "M9.5 16 l-2 3 M14.5 16 l2 3 M12 8.5 a1.4 1.4 0 1 0 0.001 0 z",

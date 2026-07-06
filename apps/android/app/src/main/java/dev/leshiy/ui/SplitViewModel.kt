@@ -22,6 +22,9 @@ class SplitViewModel(app: Application) : AndroidViewModel(app) {
     private val _cidrs = MutableStateFlow(store.cidrs())
     val cidrs: StateFlow<List<String>> = _cidrs.asStateFlow()
 
+    private val _domains = MutableStateFlow(store.domains())
+    val domains: StateFlow<List<String>> = _domains.asStateFlow()
+
     fun setKind(k: SplitKind) {
         store.setKind(k)
         _kind.value = k
@@ -32,15 +35,26 @@ class SplitViewModel(app: Application) : AndroidViewModel(app) {
         _netMode.value = m
     }
 
-    /** Returns false if the CIDR was malformed. */
-    fun addCidr(input: String): Boolean {
-        val ok = store.addCidr(input)
-        if (ok) _cidrs.value = store.cidrs()
-        return ok
+    /** Add an IP/CIDR or a domain, auto-detected. Returns false if it's neither. */
+    fun addEntry(input: String): Boolean {
+        if (store.addCidr(input)) {
+            _cidrs.value = store.cidrs()
+            return true
+        }
+        if (store.addDomain(input)) {
+            _domains.value = store.domains()
+            return true
+        }
+        return false
     }
 
     fun removeCidr(cidr: String) {
         store.removeCidr(cidr)
         _cidrs.value = store.cidrs()
+    }
+
+    fun removeDomain(domain: String) {
+        store.removeDomain(domain)
+        _domains.value = store.domains()
     }
 }
