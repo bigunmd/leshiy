@@ -36,9 +36,11 @@ pub fn parse_ssh_host(spec: &str) -> Result<(String, String, u16)> {
     let (user, rest) = spec
         .split_once('@')
         .context("--host must be user@host[:port]")?;
-    let (host, port) = match rest.rsplit_once(':') {
-        Some((h, p)) => (h.to_string(), p.parse().context("bad port")?),
-        None => (rest.to_string(), 22u16),
+    // Bracket-aware so `user@[2001:db8::1]:22` and bare `user@2001:db8::1` both parse; the host
+    // is returned without brackets (used for the SSH dial + re-joined for LESHIY_HOST).
+    let (host, port) = match leshiy_reality::addr::split_host_port(rest) {
+        (h, Some(p)) => (h.to_string(), p.parse().context("bad port")?),
+        (h, None) => (h.to_string(), 22u16),
     };
     anyhow::ensure!(!user.is_empty() && !host.is_empty(), "empty user or host");
     Ok((user.to_string(), host, port))
@@ -219,7 +221,8 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
             let listen_port = resolve_listen_port(cli_port)?;
             let id = format!("{h}-{port}");
             let label = label.unwrap_or_else(|| h.clone());
-            let public_host = format!("{h}:{listen_port}");
+            // Bracket a bare IPv6 host so LESHIY_HOST is a valid `[v6]:port`.
+            let public_host = leshiy_reality::addr::join_host_port(&h, listen_port);
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -518,6 +521,19 @@ mod tests {
         assert_eq!(
             parse_ssh_host("root@1.2.3.4:2222").unwrap(),
             ("root".into(), "1.2.3.4".into(), 2222)
+        );
+        // IPv6: bracketed (with/without port) and bare — host returned without brackets.
+        assert_eq!(
+            parse_ssh_host("root@[2001:db8::1]:2222").unwrap(),
+            ("root".into(), "2001:db8::1".into(), 2222)
+        );
+        assert_eq!(
+            parse_ssh_host("root@[2001:db8::1]").unwrap(),
+            ("root".into(), "2001:db8::1".into(), 22)
+        );
+        assert_eq!(
+            parse_ssh_host("root@2001:db8::1").unwrap(),
+            ("root".into(), "2001:db8::1".into(), 22)
         );
         assert!(parse_ssh_host("no-at-sign").is_err());
     }

@@ -17,6 +17,24 @@ pub fn join_host_port(host: &str, port: u16) -> String {
     }
 }
 
+/// Split a `host:port` / `[v6]:port` / bare-host string into `(host, Option<port>)`. The host is
+/// returned **without** brackets. A bare IPv6 literal is treated as host-only (no port), since its
+/// colons are part of the address.
+pub fn split_host_port(s: &str) -> (&str, Option<&str>) {
+    if let Some(rest) = s.strip_prefix('[')
+        && let Some((host, after)) = rest.split_once(']')
+    {
+        return (host, after.strip_prefix(':').filter(|p| !p.is_empty()));
+    }
+    if s.parse::<Ipv6Addr>().is_ok() {
+        return (s, None); // bare IPv6 literal — the colons aren't a port separator
+    }
+    match s.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => (h, Some(p)),
+        _ => (s, None),
+    }
+}
+
 /// Return `hostport` unchanged if it already carries a port (bracket-aware),
 /// otherwise append `:default_port` — bracketing a bare IPv6 literal in the
 /// process.
@@ -78,5 +96,18 @@ mod tests {
     #[test]
     fn ensure_port_brackets_v6_literal_without_port() {
         assert_eq!(ensure_port("[2001:db8::1]", 443), "[2001:db8::1]:443");
+    }
+
+    #[test]
+    fn split_host_port_handles_all_forms() {
+        assert_eq!(split_host_port("example.com:22"), ("example.com", Some("22")));
+        assert_eq!(split_host_port("1.2.3.4:22"), ("1.2.3.4", Some("22")));
+        assert_eq!(split_host_port("example.com"), ("example.com", None));
+        // Bracketed v6, with and without a port — host comes back unbracketed.
+        assert_eq!(split_host_port("[2001:db8::1]:22"), ("2001:db8::1", Some("22")));
+        assert_eq!(split_host_port("[2001:db8::1]"), ("2001:db8::1", None));
+        // Bare v6 literal: the colons are the address, not a port separator.
+        assert_eq!(split_host_port("2001:db8::1"), ("2001:db8::1", None));
+        assert_eq!(split_host_port("::1"), ("::1", None));
     }
 }
