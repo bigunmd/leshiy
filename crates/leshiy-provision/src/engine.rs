@@ -232,16 +232,28 @@ async fn provision_inner<T: Transport>(
         let host_dns = detect_host_dns(t).await;
         let dns = dns_servers(host_dns, p.dns_override.as_deref());
         let dns_refs: Vec<&str> = dns.iter().map(String::as_str).collect();
+        // Publish the container port on the host's IPv6 wildcard too, but only when the host
+        // has IPv6 — `-p '[::]:…'` otherwise fails the whole `docker run`. Best-effort: on any
+        // probe hiccup we skip the v6 publish (v4 still works).
+        let publish_v6 = matches!(
+            t.run(docker::detect_host_ipv6_cmd()).await,
+            Ok(o) if o.stdout.trim() == "yes"
+        );
+        // Bind dual-stack (`[::]`) so the server accepts both IPv4 (v4-mapped) and IPv6 clients
+        // on one socket — but only when the host has IPv6, since binding `[::]` fails inside the
+        // container on a kernel with IPv6 disabled (same kernel as the host). Fall back to
+        // `0.0.0.0` there.
+        let listen_host = if publish_v6 { "[::]" } else { "0.0.0.0" };
         let mut envs = vec![
             ("LESHIY_HOST".to_string(), p.public_host.clone()),
             ("LESHIY_DEST".to_string(), p.dest_sni.clone()),
             (
                 "LESHIY_LISTEN".to_string(),
-                format!("0.0.0.0:{}", p.listen_port),
+                format!("{listen_host}:{}", p.listen_port),
             ),
         ];
         if let Some(q) = p.quic_port {
-            envs.push(("LESHIY_QUIC_LISTEN".to_string(), format!("0.0.0.0:{q}")));
+            envs.push(("LESHIY_QUIC_LISTEN".to_string(), format!("{listen_host}:{q}")));
         }
         if let Some(conn) = &p.connector {
             envs.push(("LESHIY_CONNECTOR".to_string(), conn.clone()));
@@ -251,6 +263,7 @@ async fn provision_inner<T: Transport>(
             &p.image_ref,
             p.listen_port,
             p.quic_port,
+            publish_v6,
             &dns_refs,
             &envs,
         ))
@@ -799,6 +812,73 @@ mod tests {
         );
         // The override is authoritative — no fallback is appended.
         assert!(!t.calls().iter().any(|c| c.contains("--dns 1.1.1.1")));
+    }
+
+    #[tokio::test]
+    async fn provision_binds_and_publishes_dual_stack_when_host_has_ipv6() {
+        let mut t = FakeTransport::new();
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "if_inet6", // the host-IPv6 probe reads /proc/net/if_inet6
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 0,
+                stdout: format!("{}\n", issued_uri()),
+                stderr: String::new(),
+            },
+        );
+        provision(&mut t, &params(), &mut |_| {}).await.unwrap();
+        let run = t
+            .calls()
+            .into_iter()
+            .find(|c| c.contains("docker run"))
+            .expect("a docker run");
+        assert!(run.contains("-p '[::]:443:443'"), "v6 publish: {run}");
+        assert!(run.contains("LESHIY_LISTEN='[::]:443'"), "dual-stack bind: {run}");
+    }
+
+    #[tokio::test]
+    async fn provision_stays_v4_only_when_host_has_no_ipv6() {
+        let mut t = FakeTransport::new();
+        // detect_host_ipv6 is not mocked → empty → treated as no IPv6.
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 0,
+                stdout: format!("{}\n", issued_uri()),
+                stderr: String::new(),
+            },
+        );
+        provision(&mut t, &params(), &mut |_| {}).await.unwrap();
+        let run = t
+            .calls()
+            .into_iter()
+            .find(|c| c.contains("docker run"))
+            .expect("a docker run");
+        assert!(!run.contains("[::]"), "must stay IPv4-only: {run}");
+        assert!(run.contains("LESHIY_LISTEN='0.0.0.0:443'"), "v4 bind: {run}");
     }
 
     #[test]
