@@ -33,7 +33,7 @@ pub async fn connect_quic(
     short_id: [u8; 8],
     verification: crate::endpoint::CertVerification,
 ) -> Result<QuicConn> {
-    let ep = crate::endpoint::client_endpoint(verification)?;
+    let ep = crate::endpoint::client_endpoint(verification, server_addr)?;
     let conn = ep
         .connect(server_addr, server_name)
         .map_err(|e| QuicError::Conn(e.to_string()))?
