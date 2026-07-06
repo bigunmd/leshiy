@@ -7,66 +7,32 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import dev.leshiy.data.PerAppMode
-import dev.leshiy.data.VaultHolder
-import dev.leshiy.ui.AppRow
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
 import dev.leshiy.ui.AppsViewModel
-import dev.leshiy.ui.ConnectUiState
 import dev.leshiy.ui.ConnectViewModel
 import dev.leshiy.ui.ManageViewModel
 import dev.leshiy.ui.ProfilesViewModel
 import dev.leshiy.ui.ProvisionViewModel
 import dev.leshiy.ui.QrScanActivity
-import uniffi.leshiy_mobile.ServerInfo
-import dev.leshiy.ui.theme.Dim
+import dev.leshiy.ui.components.Atmosphere
+import dev.leshiy.ui.screens.ConnectScreen
+import dev.leshiy.ui.screens.DeployScreen
+import dev.leshiy.ui.screens.ManageScreen
+import dev.leshiy.ui.screens.ServersScreen
+import dev.leshiy.ui.screens.SettingsScreen
+import dev.leshiy.ui.screens.SplitScreen
 import dev.leshiy.ui.theme.LeshiyTheme
-import dev.leshiy.ui.theme.Warn
-import dev.leshiy.ui.theme.Wisp
-import uniffi.leshiy_mobile.ConnState
-import uniffi.leshiy_mobile.ProfileInfo
 
-private enum class Screen { Connect, Profiles, Split, Provision, Manage }
-
-/**
- * Phase 3: multiple servers + always-on. Two screens — Connect (drives the active profile) and
- * Profiles (add/select/delete). The active profile URI is also what always-on/boot connects.
- */
 class MainActivity : ComponentActivity() {
 
     private var pendingUri: String? = null
@@ -79,79 +45,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         setContent {
             LeshiyTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
-                    val connectVm: ConnectViewModel = viewModel()
-                    val profilesVm: ProfilesViewModel = viewModel()
-                    val appsVm: AppsViewModel = viewModel()
-                    val provisionVm: ProvisionViewModel = viewModel()
-                    val manageVm: ManageViewModel = viewModel()
-                    val ui by connectVm.uiState.collectAsStateWithLifecycle()
-                    val profiles by profilesVm.profiles.collectAsStateWithLifecycle()
-                    var screen by remember { mutableStateOf(Screen.Connect) }
-
-                    val qrLauncher = rememberLauncherForActivityResult(
-                        ActivityResultContracts.StartActivityForResult(),
-                    ) { result ->
-                        if (result.resultCode == Activity.RESULT_OK) {
-                            result.data?.getStringExtra(QrScanActivity.EXTRA_URI)
-                                ?.let { scannedUri.value = it }
-                        }
-                    }
-
-                    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-                        Row(
-                            modifier = Modifier.horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            TextButton(onClick = { screen = Screen.Connect }) { Text("Connect") }
-                            TextButton(onClick = { screen = Screen.Profiles }) { Text("Profiles") }
-                            TextButton(onClick = { screen = Screen.Split }) { Text("Split") }
-                            TextButton(onClick = { screen = Screen.Provision }) { Text("Deploy") }
-                            TextButton(onClick = { screen = Screen.Manage }) { Text("Manage") }
-                        }
-                        when (screen) {
-                            Screen.Connect -> ConnectScreen(
-                                ui = ui,
-                                activeName = profiles.firstOrNull { it.isActive }?.name,
-                                onConnect = { connect(profilesVm.activeUri()) },
-                                onDisconnect = ::disconnect,
-                            )
-                            Screen.Profiles -> ProfilesScreen(
-                                profiles = profiles,
-                                scannedUri = scannedUri,
-                                onScan = {
-                                    qrLauncher.launch(Intent(this@MainActivity, QrScanActivity::class.java))
-                                },
-                                onAdd = { uri, name -> profilesVm.add(uri, name) },
-                                onActivate = profilesVm::activate,
-                                onRemove = profilesVm::remove,
-                            )
-                            Screen.Split -> SplitScreen(appsVm = appsVm)
-                            Screen.Provision -> ProvisionScreen(
-                                vm = provisionVm,
-                                onProvisioned = { uri, host ->
-                                    profilesVm.add(uri, host)
-                                    screen = Screen.Profiles
-                                },
-                            )
-                            Screen.Manage -> ManageScreen(
-                                vm = manageVm,
-                                onUserUri = { uri, label -> profilesVm.add(uri, label) },
-                            )
-                        }
-                    }
+                Atmosphere {
+                    AppNav(onConnect = ::connect, onDisconnect = ::disconnect)
                 }
             }
         }
     }
 
-    // Holds a URI captured by the QR scanner until the Add form consumes it.
-    private val scannedUri = androidx.compose.runtime.mutableStateOf("")
-
-    private fun connect(uri: String?) {
-        if (uri.isNullOrEmpty()) return
+    private fun connect(uri: String) {
+        if (uri.isEmpty()) return
         val consent = VpnService.prepare(this)
         if (consent != null) {
             pendingUri = uri
@@ -162,319 +67,88 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startTunnel(uri: String) {
-        startService(
-            Intent(this, LeshiyVpnService::class.java).putExtra(LeshiyVpnService.EXTRA_URI, uri),
-        )
+        startService(Intent(this, LeshiyVpnService::class.java).putExtra(LeshiyVpnService.EXTRA_URI, uri))
     }
 
     private fun disconnect() {
-        startService(
-            Intent(this, LeshiyVpnService::class.java).setAction(LeshiyVpnService.ACTION_STOP),
-        )
+        startService(Intent(this, LeshiyVpnService::class.java).setAction(LeshiyVpnService.ACTION_STOP))
     }
 }
 
-private fun stateColor(s: ConnState): Color = when (s) {
-    ConnState.CONNECTED -> Wisp
-    ConnState.FAILED -> Warn
-    else -> Dim
+private object Route {
+    const val CONNECT = "connect"
+    const val SETTINGS = "settings"
+    const val SERVERS = "servers"
+    const val SPLIT = "split"
+    const val DEPLOY = "deploy"
+    const val MANAGE = "manage"
 }
 
 @Composable
-private fun ConnectScreen(
-    ui: ConnectUiState,
-    activeName: String?,
-    onConnect: () -> Unit,
-    onDisconnect: () -> Unit,
-) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(top = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text(activeName ?: "No server selected", style = MaterialTheme.typography.titleLarge)
+private fun AppNav(onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
+    val nav = rememberNavController()
+    val connectVm: ConnectViewModel = viewModel()
+    val profilesVm: ProfilesViewModel = viewModel()
+    val appsVm: AppsViewModel = viewModel()
+    val provisionVm: ProvisionViewModel = viewModel()
+    val manageVm: ManageViewModel = viewModel()
 
-        Box(
-            modifier = Modifier.size(140.dp).clip(CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = ui.state.name.lowercase(),
-                color = stateColor(ui.state),
-                style = MaterialTheme.typography.titleLarge,
-                textAlign = TextAlign.Center,
-            )
-        }
-
-        if (ui.running) {
-            OutlinedButton(onClick = onDisconnect, modifier = Modifier.fillMaxWidth()) {
-                Text("Disconnect")
-            }
-        } else {
-            Button(
-                onClick = onConnect,
-                enabled = activeName != null,
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = Wisp),
-            ) { Text(if (activeName == null) "Select a server first" else "Connect") }
-        }
-
-        Text(
-            text = "↑ ${ui.upBytes} B   ↓ ${ui.downBytes} B",
-            style = MaterialTheme.typography.labelSmall,
-            color = Dim,
-        )
-    }
-}
-
-@Composable
-private fun ProfilesScreen(
-    profiles: List<ProfileInfo>,
-    scannedUri: androidx.compose.runtime.MutableState<String>,
-    onScan: () -> Unit,
-    onAdd: (String, String) -> Boolean,
-    onActivate: (String) -> Unit,
-    onRemove: (String) -> Unit,
-) {
-    var name by remember { mutableStateOf("") }
-
-    Column(
-        modifier = Modifier.fillMaxSize().padding(top = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        LazyColumn(
-            modifier = Modifier.fillMaxWidth().weight(1f),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            items(profiles, key = { it.id }) { p ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    TextButton(onClick = { onActivate(p.id) }) {
-                        Text(
-                            text = (if (p.isActive) "● " else "○ ") + p.name,
-                            color = if (p.isActive) Wisp else Dim,
-                        )
-                    }
-                    Box(modifier = Modifier.weight(1f))
-                    TextButton(onClick = { onRemove(p.id) }) { Text("✕", color = Warn) }
-                }
-            }
-        }
-
-        // Add form: name + URI (paste or QR).
-        OutlinedTextField(
-            value = name,
-            onValueChange = { name = it },
-            label = { Text("Name") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = scannedUri.value,
-            onValueChange = { scannedUri.value = it },
-            label = { Text("leshiy:// URI") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-            trailingIcon = { TextButton(onClick = onScan) { Text("QR") } },
-        )
-        Button(
-            onClick = {
-                if (onAdd(scannedUri.value, name)) {
-                    scannedUri.value = ""
-                    name = ""
-                }
-            },
-            enabled = scannedUri.value.isNotBlank(),
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(containerColor = Wisp),
-        ) { Text("Add server") }
-    }
-}
-
-@Composable
-private fun SplitScreen(appsVm: AppsViewModel) {
-    val mode by appsVm.mode.collectAsStateWithLifecycle()
-    val apps by appsVm.apps.collectAsStateWithLifecycle()
-
-    Column(
-        modifier = Modifier.fillMaxSize().padding(top = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            PerAppMode.entries.forEach { m ->
-                TextButton(onClick = { appsVm.setMode(m) }) {
-                    Text(
-                        text = m.name.lowercase(),
-                        color = if (m == mode) Wisp else Dim,
-                    )
-                }
-            }
-        }
-        Text(
-            text = when (mode) {
-                PerAppMode.OFF -> "All apps tunneled"
-                PerAppMode.INCLUDE -> "Only checked apps tunneled"
-                PerAppMode.EXCLUDE -> "Checked apps bypass the tunnel"
-            },
-            style = MaterialTheme.typography.labelSmall,
-            color = Dim,
-        )
-
-        LazyColumn(
-            modifier = Modifier.fillMaxWidth().weight(1f),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            items(apps, key = { it.pkg }) { row ->
-                val enabled = mode != PerAppMode.OFF
-                TextButton(
-                    onClick = { appsVm.toggle(row.pkg) },
-                    enabled = enabled,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(
-                        text = (if (row.checked) "☑ " else "☐ ") + row.label,
-                        color = if (row.checked && enabled) Wisp else Dim,
-                    )
-                    Box(modifier = Modifier.weight(1f))
-                }
-            }
+    // Holds a URI captured by the QR scanner until the Servers form consumes it.
+    var scannedUri by remember { mutableStateOf("") }
+    val qrLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            result.data?.getStringExtra(QrScanActivity.EXTRA_URI)?.let { scannedUri = it }
         }
     }
-}
-
-@Composable
-private fun ProvisionScreen(vm: ProvisionViewModel, onProvisioned: (String, String) -> Unit) {
-    val state by vm.state.collectAsStateWithLifecycle()
-    var host by remember { mutableStateOf("") }
-    var user by remember { mutableStateOf("root") }
-    var password by remember { mutableStateOf("") }
-    var dest by remember { mutableStateOf("www.microsoft.com:443") }
-    var port by remember { mutableStateOf("443") }
-
-    Column(
-        modifier = Modifier.fillMaxSize().padding(top = 16.dp).verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Text("Provision a new server", style = MaterialTheme.typography.titleLarge)
-        OutlinedTextField(host, { host = it }, label = { Text("VPS host / IP") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(user, { user = it }, label = { Text("SSH user") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(password, { password = it }, label = { Text("SSH password") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(dest, { dest = it }, label = { Text("Camouflage dest (host:port)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(port, { port = it }, label = { Text("REALITY port") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-
-        Button(
-            onClick = {
-                vm.provision(host, user, password, dest, port.toIntOrNull() ?: 443) { uri ->
-                    onProvisioned(uri, host.trim())
-                }
-            },
-            enabled = !state.running && host.isNotBlank() && password.isNotBlank(),
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(containerColor = Wisp),
-        ) { Text(if (state.running) "Provisioning…" else "Provision") }
-
-        state.error?.let { Text(it, color = Warn, style = MaterialTheme.typography.labelSmall) }
-
-        state.log.forEach { line ->
-            Text(line, color = Dim, style = MaterialTheme.typography.labelSmall)
-        }
-    }
-}
-
-@Composable
-private fun ManageScreen(vm: ManageViewModel, onUserUri: (String, String) -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    var unlocked by remember { mutableStateOf(VaultHolder.unlocked) }
 
-    if (!unlocked) {
-        var pass by remember { mutableStateOf("") }
-        var failed by remember { mutableStateOf(false) }
-        Column(
-            modifier = Modifier.fillMaxSize().padding(top = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text("Unlock server vault", style = MaterialTheme.typography.titleLarge)
-            Text(
-                "Sets or opens an encrypted vault holding SSH credentials for provisioned servers.",
-                style = MaterialTheme.typography.labelSmall,
-                color = Dim,
+    NavHost(nav, startDestination = Route.CONNECT) {
+        composable(Route.CONNECT) {
+            ConnectScreen(
+                connectVm = connectVm,
+                profilesVm = profilesVm,
+                onConnect = onConnect,
+                onDisconnect = onDisconnect,
+                onOpenSettings = { nav.navigate(Route.SETTINGS) },
+                onOpenServers = { nav.navigate(Route.SERVERS) },
             )
-            OutlinedTextField(pass, { pass = it }, label = { Text("Passphrase") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            Button(
-                onClick = {
-                    if (VaultHolder.unlock(context, pass)) {
-                        unlocked = true
-                        vm.refreshServers()
-                    } else {
-                        failed = true
-                    }
-                },
-                enabled = pass.isNotBlank(),
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = Wisp),
-            ) { Text("Unlock") }
-            if (failed) Text("Wrong passphrase", color = Warn, style = MaterialTheme.typography.labelSmall)
         }
-        return
-    }
-
-    val servers by vm.servers.collectAsStateWithLifecycle()
-    val users by vm.users.collectAsStateWithLifecycle()
-    val selected by vm.selected.collectAsStateWithLifecycle()
-    val busy by vm.busy.collectAsStateWithLifecycle()
-    val message by vm.message.collectAsStateWithLifecycle()
-    var addLabel by remember { mutableStateOf("") }
-
-    Column(
-        modifier = Modifier.fillMaxSize().padding(top = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        message?.let { Text(it, color = Dim, style = MaterialTheme.typography.labelSmall) }
-
-        LazyColumn(
-            modifier = Modifier.fillMaxWidth().weight(1f),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            items(servers, key = { it.id }) { s ->
-                val open = s.id == selected
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                        TextButton(onClick = { vm.select(s.id) }) {
-                            Text((if (open) "▾ " else "▸ ") + s.label, color = if (open) Wisp else Dim)
-                        }
-                        Box(modifier = Modifier.weight(1f))
-                        TextButton(onClick = { vm.status(s.id) }, enabled = !busy) { Text("status", color = Dim) }
-                    }
-                    if (open) {
-                        users.forEach { u ->
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                                Text(
-                                    "  ${u.label ?: "(orphan)"}  ${u.shortId}",
-                                    color = if (u.enabled) Dim else Warn,
-                                    style = MaterialTheme.typography.labelSmall,
-                                )
-                                Box(modifier = Modifier.weight(1f))
-                                TextButton(onClick = { vm.deleteUser(s.id, u.shortId) }, enabled = !busy) { Text("✕", color = Warn) }
-                            }
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                            OutlinedTextField(
-                                addLabel, { addLabel = it }, label = { Text("New user label") },
-                                singleLine = true, modifier = Modifier.weight(1f),
-                            )
-                            TextButton(
-                                onClick = { vm.addUser(s.id, addLabel) { uri -> onUserUri(uri, addLabel.ifBlank { "phone" }); addLabel = "" } },
-                                enabled = !busy,
-                            ) { Text("add", color = Wisp) }
-                        }
-                        TextButton(onClick = { vm.teardown(s.id, false) }, enabled = !busy) {
-                            Text("teardown server", color = Warn)
-                        }
-                    }
-                }
-            }
+        composable(Route.SETTINGS) {
+            SettingsScreen(
+                onBack = { nav.popBackStack() },
+                onServers = { nav.navigate(Route.SERVERS) },
+                onSplit = { nav.navigate(Route.SPLIT) },
+                onDeploy = { nav.navigate(Route.DEPLOY) },
+                onManage = { nav.navigate(Route.MANAGE) },
+            )
+        }
+        composable(Route.SERVERS) {
+            ServersScreen(
+                vm = profilesVm,
+                scannedUri = scannedUri,
+                onScan = { qrLauncher.launch(Intent(context, QrScanActivity::class.java)) },
+                onConsumeScan = { scannedUri = "" },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable(Route.SPLIT) {
+            SplitScreen(vm = appsVm, onBack = { nav.popBackStack() })
+        }
+        composable(Route.DEPLOY) {
+            DeployScreen(
+                vm = provisionVm,
+                onProvisioned = { uri, host -> profilesVm.add(uri, host); nav.popBackStack() },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable(Route.MANAGE) {
+            ManageScreen(
+                vm = manageVm,
+                onUserUri = { uri, label -> profilesVm.add(uri, label) },
+                onBack = { nav.popBackStack() },
+            )
         }
     }
 }
