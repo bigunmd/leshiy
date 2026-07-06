@@ -420,21 +420,37 @@ pub async fn run(config: &str) -> Result<()> {
                 Some(p) => leshiy_quic::endpoint::CertVerification::Pinned(p),
                 None => leshiy_quic::endpoint::CertVerification::Roots,
             };
-            let addr = tokio::net::lookup_host(&q.addr)
-                .await?
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("resolve connector addr {}", q.addr))?;
+            let addrs: Vec<std::net::SocketAddr> =
+                tokio::net::lookup_host(&q.addr).await?.collect();
+            if addrs.is_empty() {
+                return Err(anyhow::anyhow!("resolve connector addr {}", q.addr));
+            }
             tracing::info!(exit = %q.addr, "connector enabled");
-            Arc::new(
-                leshiy_quic::connector::ConnectorEgress::connect(
+            // Try each resolved address (e.g. AAAA then A) until the exit connects, so a
+            // leading unreachable address doesn't fail the whole connector chain.
+            let mut egress = None;
+            let mut last_err = None;
+            for addr in addrs {
+                match leshiy_quic::connector::ConnectorEgress::connect(
                     addr,
                     &q.sni,
                     u.client.short_id,
-                    v,
+                    v.clone(),
                 )
                 .await
-                .context("connect to exit")?,
-            ) as Arc<dyn Egress>
+                {
+                    Ok(c) => {
+                        egress = Some(c);
+                        break;
+                    }
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            Arc::new(egress.ok_or_else(|| {
+                last_err
+                    .map(|e| anyhow::anyhow!("connect to exit: {e}"))
+                    .unwrap_or_else(|| anyhow::anyhow!("connect to exit"))
+            })?) as Arc<dyn Egress>
         }
         None => {
             if cfg.allow_private_egress {
