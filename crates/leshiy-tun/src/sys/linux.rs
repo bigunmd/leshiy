@@ -280,6 +280,7 @@ mod tests {
             "203.0.113.7".parse().unwrap(),
             "127.0.0.1".parse().unwrap(), // harmless gateway for the smoke
             "10.71.0.2".parse().unwrap(),
+            None,
         )
         .unwrap();
         let sess = LinuxOps
