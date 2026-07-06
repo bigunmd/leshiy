@@ -173,6 +173,20 @@ pub(crate) fn mac_route_del_args(dest: &str, prefix: u8) -> Vec<String> {
     ]
 }
 
+/// `ifconfig <iface> inet6 <v6> prefixlen 64 alias` — add an IPv6 address to the utun so IPv6
+/// can ride the tunnel (the `tun` crate assigns only the v4 address at creation).
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn mac_ifconfig_v6_add_args(iface: &str, v6: &str) -> Vec<String> {
+    vec![
+        iface.to_string(),
+        "inet6".into(),
+        v6.to_string(),
+        "prefixlen".into(),
+        "64".into(),
+        "alias".into(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,5 +295,14 @@ mod tests {
     fn mac_route_del_args_builds() {
         let args = mac_route_del_args("198.51.100.0", 24);
         assert_eq!(args, vec!["-n", "delete", "-net", "198.51.100.0/24"]);
+    }
+
+    #[test]
+    fn mac_ifconfig_v6_add_args_builds() {
+        let args = mac_ifconfig_v6_add_args("utun7", "fd00:71::2");
+        assert_eq!(
+            args,
+            vec!["utun7", "inet6", "fd00:71::2", "prefixlen", "64", "alias"]
+        );
     }
 }
