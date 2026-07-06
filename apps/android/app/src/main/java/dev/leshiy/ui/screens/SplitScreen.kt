@@ -115,6 +115,7 @@ private fun ColumnScope.AppSplit(vm: AppsViewModel) {
 private fun ColumnScope.NetSplit(vm: SplitViewModel) {
     val mode by vm.netMode.collectAsStateWithLifecycle()
     val cidrs by vm.cidrs.collectAsStateWithLifecycle()
+    val domains by vm.domains.collectAsStateWithLifecycle()
     var input by remember { mutableStateOf("") }
     var error by remember { mutableStateOf(false) }
     val excludeUnsupported = mode == PerAppMode.EXCLUDE && Build.VERSION.SDK_INT < 33
@@ -124,41 +125,52 @@ private fun ColumnScope.NetSplit(vm: SplitViewModel) {
     Hint(
         when (mode) {
             PerAppMode.OFF -> "All traffic goes through the VPN."
-            PerAppMode.INCLUDE -> "Only traffic to these networks goes through the VPN."
-            PerAppMode.EXCLUDE -> "Traffic to these networks bypasses the VPN; everything else is tunneled."
+            PerAppMode.INCLUDE -> "Only traffic to these networks and domains goes through the VPN."
+            PerAppMode.EXCLUDE -> "Traffic to these networks and domains bypasses the VPN; everything else is tunneled."
         },
     )
     if (excludeUnsupported) {
         Spacer(Modifier.size(4.dp))
         Text("Exclude by IP needs Android 13+. On this device it falls back to full tunnel.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
     }
-    SectionLabel("Networks")
+    SectionLabel("Rules")
 
     LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        if (cidrs.isEmpty()) {
-            item { Hint("No ranges yet. Add an IP or CIDR like 10.0.0.0/8 or 1.2.3.4 below.") }
+        if (cidrs.isEmpty() && domains.isEmpty()) {
+            item { Hint("Nothing yet. Add an IP/CIDR (10.0.0.0/8) or a domain (netflix.com) below.") }
         }
-        items(cidrs, key = { it }) { c ->
-            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(LeshiyIcons.Shield, null, tint = Wisp, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(12.dp))
-                Text(c, modifier = Modifier.weight(1f), fontFamily = PlexMono, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onBackground)
-                IconBtn(LeshiyIcons.Trash, "Remove", tint = MaterialTheme.colorScheme.error) { vm.removeCidr(c) }
-            }
+        items(cidrs, key = { "c:$it" }) { c ->
+            RuleRow(LeshiyIcons.Shield, c) { vm.removeCidr(c) }
+        }
+        items(domains, key = { "d:$it" }) { d ->
+            RuleRow(LeshiyIcons.Globe, d) { vm.removeDomain(d) }
         }
     }
 
-    Spacer(Modifier.size(8.dp))
-    Field(input, { input = it; error = false }, "IP or CIDR (e.g. 10.0.0.0/8)")
-    if (error) Text("Not a valid IP or CIDR", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+    if (domains.isNotEmpty()) {
+        Hint("Domains are resolved to IP addresses when you connect. CDNs with changing IPs may not fully match.")
+        Spacer(Modifier.size(6.dp))
+    }
+    Field(input, { input = it; error = false }, "IP, CIDR or domain")
+    if (error) Text("Not a valid IP, CIDR or domain", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
     Spacer(Modifier.size(8.dp))
     PrimaryButton(
-        "Add range",
-        onClick = { if (vm.addCidr(input)) input = "" else error = true },
+        "Add rule",
+        onClick = { if (vm.addEntry(input)) input = "" else error = true },
         enabled = input.isNotBlank(),
         modifier = Modifier.fillMaxWidth(),
     )
     Spacer(Modifier.size(8.dp))
+}
+
+@Composable
+private fun RuleRow(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String, onRemove: () -> Unit) {
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, tint = Wisp, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(12.dp))
+        Text(text, modifier = Modifier.weight(1f), fontFamily = PlexMono, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onBackground, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        IconBtn(LeshiyIcons.Trash, "Remove", tint = MaterialTheme.colorScheme.error, onClick = onRemove)
+    }
 }
 
 /* ---------- shared ---------- */

@@ -5,6 +5,20 @@ import android.content.Context
 /** Which split-tunnel scheme is active. The two are mutually exclusive at establish() time. */
 enum class SplitKind { APP, NETWORK }
 
+private val DOMAIN_RE = Regex("^(\\*\\.)?([a-z0-9-]+\\.)+[a-z]{2,}$", RegexOption.IGNORE_CASE)
+
+/**
+ * True for a host like `example.com`, `sub.example.com`, or a `*.example.com` wildcard. Rejects
+ * bare IPs (those take the CIDR path) and malformed hosts. Pure — unit-tested.
+ */
+fun isValidDomain(input: String): Boolean {
+    val s = input.trim()
+    if (s.isEmpty() || ':' in s) return false
+    // An all-numeric-and-dots string is an IP attempt, not a domain.
+    if (s.removePrefix("*.").all { it.isDigit() || it == '.' }) return false
+    return DOMAIN_RE.matches(s)
+}
+
 /**
  * Parse "1.2.3.0/24" (or a bare "1.2.3.4", treated as /32 // /128) into `(address, prefixLength)`.
  * Returns null if malformed. Pure — unit-tested.
@@ -64,5 +78,22 @@ class SplitStore(context: Context) {
     fun removeCidr(cidr: String) {
         val next = cidrs().toMutableSet().apply { remove(cidr) }
         prefs.edit().putStringSet("cidrs", next).apply()
+    }
+
+    fun domains(): List<String> =
+        (prefs.getStringSet("domains", emptySet()) ?: emptySet()).sorted()
+
+    /** Validate + add a domain rule. Returns false if malformed. */
+    fun addDomain(input: String): Boolean {
+        val d = input.trim().lowercase()
+        if (!isValidDomain(d)) return false
+        val next = domains().toMutableSet().apply { add(d) }
+        prefs.edit().putStringSet("domains", next).apply()
+        return true
+    }
+
+    fun removeDomain(domain: String) {
+        val next = domains().toMutableSet().apply { remove(domain) }
+        prefs.edit().putStringSet("domains", next).apply()
     }
 }

@@ -16,6 +16,12 @@ import dev.leshiy.data.SplitStore
 import dev.leshiy.data.TunnelRepository
 import dev.leshiy.data.cidrParts
 import dev.leshiy.data.perAppPlan
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import uniffi.leshiy_mobile.LeshiyBridge
 import uniffi.leshiy_mobile.Status
 import uniffi.leshiy_mobile.StatusListener
@@ -28,6 +34,7 @@ import uniffi.leshiy_mobile.StatusListener
 class LeshiyVpnService : VpnService() {
 
     private val bridge = LeshiyBridge()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -42,15 +49,23 @@ class LeshiyVpnService : VpnService() {
             ?: dev.leshiy.data.Profiles.manager(applicationContext).activeUri()
             ?: return START_NOT_STICKY
 
+        // Foreground promptly; domain resolution + establish run async so DNS never blocks the UI.
+        startForeground(NOTIFICATION_ID, buildNotification())
+        scope.launch { buildAndStart(uri) }
+        return START_STICKY
+    }
+
+    private suspend fun buildAndStart(uri: String) {
+        // Network-mode domain rules → resolved IPs (off the main thread; bounded).
+        val domainRoutes = withContext(Dispatchers.IO) { resolveDomainRoutes(applicationContext) }
+
         val builder = Builder()
             .setSession("leshiy")
             .addAddress("10.71.0.2", 32)
             .addDnsServer("1.1.1.1")
             .setMtu(1400)
-        configureSplit(builder, applicationContext)
-        val tun = builder.establish() ?: return START_NOT_STICKY
-
-        startForeground(NOTIFICATION_ID, buildNotification())
+        configureSplit(builder, applicationContext, domainRoutes)
+        val tun = builder.establish() ?: run { stopTunnel(); return }
 
         // detachFd() transfers ownership of the fd to native code, which closes it on stop.
         bridge.start(tun.detachFd(), uri, object : StatusListener {
@@ -59,7 +74,21 @@ class LeshiyVpnService : VpnService() {
             }
         })
         TunnelRepository.setRunning(true)
-        return START_STICKY
+    }
+
+    /** Resolve network-mode domain rules to `(ip, prefix)` routes. Best-effort, bounded. */
+    private fun resolveDomainRoutes(ctx: Context): List<Pair<String, Int>> {
+        val split = SplitStore(ctx)
+        if (split.kind() != SplitKind.NETWORK || split.netMode() == PerAppMode.OFF) return emptyList()
+        return split.domains().flatMap { domain ->
+            val host = domain.removePrefix("*.")
+            runCatching {
+                java.net.InetAddress.getAllByName(host).take(8).map { addr ->
+                    val prefix = if (addr is java.net.Inet6Address) 128 else 32
+                    addr.hostAddress!! to prefix
+                }
+            }.getOrDefault(emptyList())
+        }
     }
 
     private fun stopTunnel() {
@@ -74,11 +103,11 @@ class LeshiyVpnService : VpnService() {
      * network-based uses routes (include = route only these CIDRs; exclude = full tunnel minus
      * these, Android 13+). Our own app is always kept off the tunnel to avoid a routing loop.
      */
-    private fun configureSplit(b: Builder, ctx: Context) {
+    private fun configureSplit(b: Builder, ctx: Context, domainRoutes: List<Pair<String, Int>>) {
         when (SplitStore(ctx).kind()) {
             SplitKind.NETWORK -> {
                 val split = SplitStore(ctx)
-                val cidrs = split.cidrs().mapNotNull { cidrParts(it) }
+                val cidrs = split.cidrs().mapNotNull { cidrParts(it) } + domainRoutes
                 when {
                     split.netMode() == PerAppMode.INCLUDE && cidrs.isNotEmpty() ->
                         cidrs.forEach { (a, p) -> runCatching { b.addRoute(a, p) } }
@@ -114,6 +143,7 @@ class LeshiyVpnService : VpnService() {
     override fun onDestroy() {
         bridge.stop()
         TunnelRepository.setRunning(false)
+        scope.cancel()
         super.onDestroy()
     }
 
