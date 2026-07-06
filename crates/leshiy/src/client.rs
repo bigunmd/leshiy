@@ -83,11 +83,11 @@ async fn connect_quic_from(
             ));
         }
     };
-    let addr = tokio::net::lookup_host(&q.addr)
-        .await?
-        .next()
-        .ok_or_else(|| anyhow!("resolve quic addr {}", q.addr))?;
-    leshiy_quic::client::connect_quic(addr, &q.sni, short_id, verification)
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host(&q.addr).await?.collect();
+    if addrs.is_empty() {
+        return Err(anyhow!("resolve quic addr {}", q.addr));
+    }
+    leshiy_quic::client::connect_quic_multi(&addrs, &q.sni, short_id, verification)
         .await
         .map_err(|e| anyhow!("quic connect: {e}"))
 }

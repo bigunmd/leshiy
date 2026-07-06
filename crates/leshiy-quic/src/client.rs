@@ -56,6 +56,25 @@ pub async fn connect_quic(
     })
 }
 
+/// Try each resolved address in turn (e.g. AAAA then A), returning the first QUIC connection
+/// that establishes. A leading unreachable address — an AAAA on an IPv4-only host — then falls
+/// through to the next instead of failing the whole dial.
+pub async fn connect_quic_multi(
+    addrs: &[SocketAddr],
+    server_name: &str,
+    short_id: [u8; 8],
+    verification: crate::endpoint::CertVerification,
+) -> Result<QuicConn> {
+    let mut last: Option<QuicError> = None;
+    for &addr in addrs {
+        match connect_quic(addr, server_name, short_id, verification.clone()).await {
+            Ok(c) => return Ok(c),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| QuicError::Conn("no address resolved".into())))
+}
+
 /// Bind a SOCKS5 listener on `socks_addr` and forward every CONNECT request
 /// over the established QUIC connection.
 pub async fn serve_socks5(conn: QuicConn, socks_addr: SocketAddr) -> Result<()> {
