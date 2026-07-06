@@ -47,10 +47,8 @@ pub struct InitOptions<'a> {
 /// would fail to connect and break every handshake. Hostnames never contain a
 /// `:`, so "has a numeric suffix after the last `:`" reliably detects a port.
 pub fn ensure_dest_port(dest: &str) -> String {
-    match dest.rsplit_once(':') {
-        Some((_, p)) if p.parse::<u16>().is_ok() => dest.to_string(),
-        _ => format!("{dest}:443"),
-    }
+    // Bracket-aware so a bare IPv6 `dest` becomes `[v6]:443`, not `v6:443`.
+    leshiy_reality::addr::ensure_port(dest, 443)
 }
 
 /// Bind the REALITY/TCP listener. For a v6 wildcard/literal (`[::]`), enable
@@ -572,6 +570,15 @@ mod boot_tests {
         assert_eq!(
             super::ensure_dest_port("example.com:443"),
             "example.com:443"
+        );
+        // Bare IPv6 literal is bracketed before the port is appended.
+        assert_eq!(
+            super::ensure_dest_port("2001:db8::1"),
+            "[2001:db8::1]:443"
+        );
+        assert_eq!(
+            super::ensure_dest_port("[2001:db8::1]:8443"),
+            "[2001:db8::1]:8443"
         );
     }
 
