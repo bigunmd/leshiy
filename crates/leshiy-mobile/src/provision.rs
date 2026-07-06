@@ -15,7 +15,12 @@ pub struct ProvisionConfig {
     pub host: String,
     pub ssh_port: u16,
     pub ssh_user: String,
-    pub ssh_password: String,
+    /// SSH password auth. Used when `ssh_private_key` is empty/None.
+    pub ssh_password: Option<String>,
+    /// SSH private key (PEM). Takes precedence over the password when present.
+    pub ssh_private_key: Option<String>,
+    /// Passphrase protecting `ssh_private_key`, if any.
+    pub ssh_key_passphrase: Option<String>,
     pub dest: String,
     pub listen_port: u16,
     pub label: Option<String>,
@@ -50,6 +55,25 @@ fn status_str(s: Status) -> String {
     format!("{s:?}")
 }
 
+/// Pick SSH auth: a private key (with optional passphrase) if present, else a password.
+fn ssh_secret(cfg: &ProvisionConfig) -> SshSecret {
+    match cfg
+        .ssh_private_key
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        Some(pem) => SshSecret::PrivateKey {
+            pem: Zeroizing::new(pem.clone()),
+            passphrase: cfg
+                .ssh_key_passphrase
+                .clone()
+                .filter(|s| !s.is_empty())
+                .map(Zeroizing::new),
+        },
+        None => SshSecret::Password(Zeroizing::new(cfg.ssh_password.clone().unwrap_or_default())),
+    }
+}
+
 /// Map the flat config to engine params (single-role, CLI-matching defaults). Pure + testable.
 pub fn build_params(cfg: &ProvisionConfig, now: u64) -> ProvisionParams {
     let label = cfg.label.clone().unwrap_or_else(|| cfg.host.clone());
@@ -61,7 +85,7 @@ pub fn build_params(cfg: &ProvisionConfig, now: u64) -> ProvisionParams {
             port: cfg.ssh_port,
             user: cfg.ssh_user.clone(),
         },
-        secret: SshSecret::Password(Zeroizing::new(cfg.ssh_password.clone())),
+        secret: ssh_secret(cfg),
         public_host: format!("{}:{}", cfg.host, cfg.listen_port),
         dest_sni: cfg.dest.clone(),
         image_ref: cfg
@@ -164,7 +188,9 @@ mod tests {
             host: "1.2.3.4".into(),
             ssh_port: 22,
             ssh_user: "root".into(),
-            ssh_password: "pw".into(),
+            ssh_password: Some("pw".into()),
+            ssh_private_key: None,
+            ssh_key_passphrase: None,
             dest: "www.microsoft.com:443".into(),
             listen_port: 443,
             label: None,
@@ -174,6 +200,24 @@ mod tests {
             user_label: None,
             dns_override: None,
         }
+    }
+
+    #[test]
+    fn key_auth_selected_when_pem_present() {
+        let mut c = cfg();
+        c.ssh_private_key = Some("-----BEGIN OPENSSH PRIVATE KEY-----".into());
+        assert!(matches!(
+            super::ssh_secret(&c),
+            leshiy_provision::vault::SshSecret::PrivateKey { .. }
+        ));
+    }
+
+    #[test]
+    fn password_auth_when_no_key() {
+        assert!(matches!(
+            super::ssh_secret(&cfg()),
+            leshiy_provision::vault::SshSecret::Password(_)
+        ));
     }
 
     #[test]
