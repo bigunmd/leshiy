@@ -62,6 +62,10 @@ class LeshiyVpnService : VpnService() {
         val builder = Builder()
             .setSession("leshiy")
             .addAddress("10.71.0.2", 32)
+            // ULA so IPv6 routes are acceptable on the TUN. Android's tun backend does NOT carry
+            // v6 through the tunnel (CARRIES_V6 = false), so in full-tunnel mode we route ::/0
+            // here to fail closed — the engine drops v6, preventing an IPv6 leak. See configureSplit.
+            .addAddress("fd00:71::2", 128)
             .addDnsServer("1.1.1.1")
             .setMtu(1400)
         configureSplit(builder, applicationContext, domainRoutes)
@@ -102,6 +106,11 @@ class LeshiyVpnService : VpnService() {
      * Apply the active split-tunnel scheme to the Builder. App-based uses allow/disallow apps;
      * network-based uses routes (include = route only these CIDRs; exclude = full tunnel minus
      * these, Android 13+). Our own app is always kept off the tunnel to avoid a routing loop.
+     *
+     * Whenever the base is a full tunnel, `killV6` routes all IPv6 into the tunnel so it fails
+     * closed (Android's backend doesn't egress v6) — the IPv6 leak guard the Rust engine expects
+     * the Kotlin service to own. Network-include is the one case we don't full-tunnel, so v6 is
+     * only routed if the user added a v6 range there.
      */
     private fun configureSplit(b: Builder, ctx: Context, domainRoutes: List<Pair<String, Int>>) {
         when (SplitStore(ctx).kind()) {
@@ -110,22 +119,28 @@ class LeshiyVpnService : VpnService() {
                 val cidrs = split.cidrs().mapNotNull { cidrParts(it) } + domainRoutes
                 when {
                     split.netMode() == PerAppMode.INCLUDE && cidrs.isNotEmpty() ->
+                        // Only the listed ranges (v4 or v6) are tunneled; no v6 kill-switch here.
                         cidrs.forEach { (a, p) -> runCatching { b.addRoute(a, p) } }
                     split.netMode() == PerAppMode.EXCLUDE -> {
                         b.addRoute("0.0.0.0", 0)
+                        killV6(b)
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                             cidrs.forEach { (a, p) ->
                                 runCatching { b.excludeRoute(IpPrefix(InetAddresses.parseNumericAddress(a), p)) }
                             }
                         }
                     }
-                    else -> b.addRoute("0.0.0.0", 0)
+                    else -> {
+                        b.addRoute("0.0.0.0", 0)
+                        killV6(b)
+                    }
                 }
                 // Loop avoidance: our own dial must bypass the tunnel.
                 runCatching { b.addDisallowedApplication(ctx.packageName) }
             }
             SplitKind.APP -> {
                 b.addRoute("0.0.0.0", 0)
+                killV6(b)
                 val store = PerAppStore(ctx)
                 val plan = perAppPlan(store.mode(), store.packages(), ctx.packageName)
                 // runCatching guards NameNotFoundException for a since-uninstalled package.
@@ -133,6 +148,11 @@ class LeshiyVpnService : VpnService() {
                 plan.disallowed.forEach { runCatching { b.addDisallowedApplication(it) } }
             }
         }
+    }
+
+    /** Route all IPv6 into the tunnel so it can't leak out the physical interface. */
+    private fun killV6(b: Builder) {
+        runCatching { b.addRoute("::", 0) }
     }
 
     override fun onRevoke() {
