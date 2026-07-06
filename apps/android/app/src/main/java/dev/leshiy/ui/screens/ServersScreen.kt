@@ -19,6 +19,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -43,6 +44,7 @@ fun ServersScreen(
     onBack: () -> Unit,
 ) {
     val profiles by vm.profiles.collectAsStateWithLifecycle()
+    val clipboard = LocalClipboardManager.current
     var name by remember { mutableStateOf("") }
     var uri by remember { mutableStateOf("") }
     // Absorb a QR scan into the URI field.
@@ -93,7 +95,14 @@ fun ServersScreen(
                     Field(name, { name = it }, "Name (optional)")
                     Field(
                         uri, { uri = it }, "leshiy:// link",
-                        trailing = { IconBtn(LeshiyIcons.Qr, "Scan QR", tint = Wisp, onClick = onScan) },
+                        trailing = {
+                            Row {
+                                IconBtn(LeshiyIcons.Clipboard, "Paste from clipboard", tint = Wisp) {
+                                    clipboard.getText()?.text?.trim()?.let { if (it.isNotEmpty()) uri = it }
+                                }
+                                IconBtn(LeshiyIcons.Qr, "Scan QR", tint = Wisp, onClick = onScan)
+                            }
+                        },
                     )
                     PrimaryButton(
                         "Add server",
