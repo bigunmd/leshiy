@@ -48,7 +48,7 @@ fun ScreenFrame(
     title: String,
     onBack: (() -> Unit)? = null,
     trailing: @Composable (() -> Unit)? = null,
-    content: @Composable () -> Unit,
+    content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
 ) {
     Column(
         modifier = Modifier

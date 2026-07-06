@@ -19,7 +19,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -33,6 +36,7 @@ import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.leshiy.data.PerAppMode
 import dev.leshiy.ui.AppsViewModel
+import dev.leshiy.ui.components.Field
 import dev.leshiy.ui.components.ScreenFrame
 import dev.leshiy.ui.components.SectionLabel
 import dev.leshiy.ui.icons.LeshiyIcons
@@ -47,27 +51,35 @@ fun SplitScreen(vm: AppsViewModel, onBack: () -> Unit) {
     val mode by vm.mode.collectAsStateWithLifecycle()
     val apps by vm.apps.collectAsStateWithLifecycle()
     val enabled = mode != PerAppMode.OFF
+    var query by remember { mutableStateOf("") }
+    val shown = remember(apps, query) {
+        if (query.isBlank()) apps else apps.filter { it.label.contains(query.trim(), ignoreCase = true) }
+    }
 
     ScreenFrame("Split tunnel", onBack = onBack) {
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            item {
-                Column {
-                    SegmentedMode(mode) { vm.setMode(it) }
-                    Spacer(Modifier.size(8.dp))
-                    Text(
-                        when (mode) {
-                            PerAppMode.OFF -> "All apps go through the VPN."
-                            PerAppMode.INCLUDE -> "Only the checked apps go through the VPN."
-                            PerAppMode.EXCLUDE -> "Checked apps bypass the VPN; everything else is tunneled."
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Dim,
-                    )
-                    Spacer(Modifier.size(4.dp))
-                    SectionLabel("Apps")
-                }
-            }
-            items(apps, key = { it.pkg }) { row ->
+        // Pinned controls.
+        SegmentedMode(mode) { vm.setMode(it) }
+        Spacer(Modifier.size(8.dp))
+        Text(
+            when (mode) {
+                PerAppMode.OFF -> "All apps go through the VPN."
+                PerAppMode.INCLUDE -> "Only the checked apps go through the VPN."
+                PerAppMode.EXCLUDE -> "Checked apps bypass the VPN; everything else is tunneled."
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = Dim,
+        )
+        Spacer(Modifier.size(10.dp))
+        Field(
+            value = query,
+            onValueChange = { query = it },
+            label = "Search apps",
+            trailing = { Icon(LeshiyIcons.Search, null, tint = Dim, modifier = Modifier.size(18.dp)) },
+        )
+        SectionLabel("Apps${if (query.isNotBlank()) " · ${shown.size}" else ""}")
+
+        LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(shown, key = { it.pkg }) { row ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
