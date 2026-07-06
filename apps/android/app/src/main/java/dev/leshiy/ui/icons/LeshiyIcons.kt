@@ -73,6 +73,16 @@ object LeshiyIcons {
 
     val Check = stroked("M5 12 l4 4 L19 7", sw = 2.4f)
     val Search = stroked("M11 4 a7 7 0 1 0 0.001 0 z M16.5 16.5 L20.5 20.5", sw = 1.8f)
+    val Info = mixed(
+        strokeD = "M12 3 a9 9 0 1 0 0.001 0 z M12 11 V16.5",
+        fillD = "M12 7.2 a1.1 1.1 0 1 0 0.001 0 z",
+        sw = 1.6f,
+    )
+    val File = stroked(
+        "M13 3 H7 a1.5 1.5 0 0 0 -1.5 1.5 v15 a1.5 1.5 0 0 0 1.5 1.5 h10 " +
+            "a1.5 1.5 0 0 0 1.5 -1.5 V8.5 z M13 3 v5.5 h5.5",
+        sw = 1.6f,
+    )
     val Plus = stroked("M12 5 V19 M5 12 H19", sw = 2f)
     val Clipboard = stroked(
         rr(8f, 3f, 8f, 4f, 1f) +
