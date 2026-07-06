@@ -148,6 +148,12 @@ impl EngineRunner {
             leshiy_tun::discover::default_gateway_v6().await
         }
         .map_err(|e| HelperError::Engine(format!("discover default gateway: {e}")))?;
+        // Best-effort v6 gateway for IPv6 split-tunnel excludes (v4-reached server).
+        let orig_gateway6 = if server_ip.is_ipv6() {
+            None
+        } else {
+            leshiy_tun::discover::default_gateway_v6().await.ok()
+        };
 
         tracing::info!(server = %parsed.server_addr, %server_ip, %orig_gateway, "dialing server");
         // Bound the dial so a stuck handshake fails (and resets state) instead of pinning the GUI
@@ -179,6 +185,7 @@ impl EngineRunner {
             mtu: params.mtu,
             server_ip,
             orig_gateway,
+            orig_gateway6,
             dns: vec![
                 params
                     .dns

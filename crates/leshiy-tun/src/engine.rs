@@ -27,8 +27,12 @@ pub struct TunConfig {
     pub tun_addr6: Option<IpAddr>,
     /// The VPN server's own IP (excepted from the tunnel to avoid a routing loop).
     pub server_ip: IpAddr,
-    /// The original default gateway, captured before routes are changed.
+    /// The original default gateway (server-family), captured before routes are changed.
     pub orig_gateway: IpAddr,
+    /// The original IPv6 default gateway, for routing IPv6 split-tunnel excludes (bypass) around
+    /// the tunnel when the server is reached over IPv4. `None` = no v6 gateway (v6 excludes then
+    /// ride the tunnel).
+    pub orig_gateway6: Option<IpAddr>,
     /// DNS resolver(s) forced while the tunnel is up (queries ride the tunnel).
     pub dns: Vec<IpAddr>,
     /// Two-directional split-tunnel plan (manual rules + subscriptions, merged). Empty (the
@@ -48,6 +52,7 @@ impl Default for TunConfig {
             tun_addr6: Some("fd00:71::2".parse().unwrap()),
             server_ip: "0.0.0.0".parse().unwrap(),
             orig_gateway: "0.0.0.0".parse().unwrap(),
+            orig_gateway6: None,
             dns: vec!["1.1.1.1".parse().unwrap()],
             split: leshiy_client::SplitPlan::default(),
         }
@@ -131,6 +136,7 @@ impl TunEngine {
             &exclude_cidrs,
             cfg.server_ip,
             cfg.orig_gateway,
+            cfg.orig_gateway6,
             cfg.tun_addr,
             cfg.tun_addr6,
         )

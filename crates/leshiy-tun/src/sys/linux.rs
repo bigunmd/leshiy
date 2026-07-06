@@ -86,8 +86,13 @@ impl PrivilegedOps for LinuxOps {
                 tracing::warn!(cidr = %c, "skipping IPv6 via_tun route (IPv6 not carried)");
             }
         }
-        // Bypass is IPv4-only (the planner drops v6 excludes); each escapes via the orig gateway.
+        // Bypass routes escape via the family-appropriate gateway the planner chose for each.
+        // A v6 bypass needs IPv6 carried; otherwise skip it (it then rides the tunnel — safe).
         for b in &plan.bypass {
+            if b.dest.addr.is_ipv6() && !carry_v6 {
+                tracing::warn!(cidr = %b.dest, "skipping IPv6 split-tunnel bypass (IPv6 not carried)");
+                continue;
+            }
             batch.push_str(&format!("route add {} via {}\n", b.dest, b.gateway));
             installed_bypass.lock().unwrap().push(b.dest.clone());
         }

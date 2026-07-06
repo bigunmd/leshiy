@@ -107,6 +107,7 @@ impl RoutePlan {
                 static_cidrs,
                 server_ip,
                 orig_gateway,
+                None,
                 tun_addr,
                 tun_addr6,
             ),
@@ -116,6 +117,7 @@ impl RoutePlan {
                 &[],
                 server_ip,
                 orig_gateway,
+                None,
                 tun_addr,
                 tun_addr6,
             ),
@@ -132,12 +134,14 @@ impl RoutePlan {
     /// The server exception is always emitted. Overlaps are resolved by the kernel's
     /// longest-prefix-match. `server_ip`/`orig_gateway` must share a family; IPv6 CIDRs are
     /// retained for the per-OS backends to filter.
+    #[allow(clippy::too_many_arguments)] // a routing plan legitimately needs all of these
     pub fn from_split(
         base_mode: leshiy_client::SplitMode,
         include_cidrs: &[Cidr],
         exclude_cidrs: &[Cidr],
         server_ip: IpAddr,
         orig_gateway: IpAddr,
+        orig_gateway6: Option<IpAddr>,
         tun_addr: IpAddr,
         tun_addr6: Option<IpAddr>,
     ) -> Result<RoutePlan, RoutePlanError> {
@@ -184,16 +188,28 @@ impl RoutePlan {
             Vec::new()
         };
         via_tun.extend(include_cidrs.iter().cloned());
-        // Bypass routes escape via the original gateway, which we only have for IPv4 here.
-        // An IPv6 exclude is dropped rather than routed via a v4 gateway: under a dual-stack
-        // Exclude base it then rides the `::/1` override *through* the tunnel (fail-safe,
-        // never leaked); a v6-gateway-aware bypass is a later refinement.
+        // Each bypass escapes via the original gateway of its OWN family. `orig_gateway` is the
+        // server-family gateway; `orig_gateway6` is the v6 gateway (used for v6 excludes when the
+        // server is reached over v4). A v6 exclude with no v6 gateway is dropped rather than
+        // routed via a v4 gateway — under a dual-stack Exclude base it then rides the `::/1`
+        // override through the tunnel (fail-safe, never leaked).
+        let v6_gateway = if orig_gateway.is_ipv6() {
+            Some(orig_gateway)
+        } else {
+            orig_gateway6
+        };
         let bypass = exclude_cidrs
             .iter()
-            .filter(|c| c.addr.is_ipv4())
-            .map(|c| ServerException {
-                dest: c.clone(),
-                gateway: orig_gateway,
+            .filter_map(|c| {
+                let gw = if c.addr.is_ipv4() {
+                    orig_gateway.is_ipv4().then_some(orig_gateway)
+                } else {
+                    v6_gateway
+                };
+                gw.map(|gateway| ServerException {
+                    dest: c.clone(),
+                    gateway,
+                })
             })
             .collect();
         Ok(RoutePlan {
@@ -296,6 +312,28 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_exclude_bypasses_via_v6_gateway_when_present() {
+        // With a v6 gateway supplied, a v6 exclude escapes the tunnel via it (v4 server).
+        let plan = RoutePlan::from_split(
+            SplitMode::Exclude,
+            &[],
+            &[Cidr {
+                addr: "2001:db8::".parse().unwrap(),
+                prefix: 32,
+            }],
+            "203.0.113.7".parse().unwrap(),       // v4 server
+            Ipv4Addr::new(192, 168, 1, 1).into(), // v4 gateway
+            Some("fe80::1".parse().unwrap()),     // v6 gateway
+            "10.71.0.2".parse().unwrap(),
+            Some("fd00:71::2".parse().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(plan.bypass.len(), 1);
+        assert_eq!(plan.bypass[0].dest.to_string(), "2001:db8::/32");
+        assert_eq!(plan.bypass[0].gateway, "fe80::1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
     fn dual_stack_full_tunnel_adds_v6_override() {
         // With a v6 TUN address, the Exclude base also overrides all IPv6 via the tunnel.
         let plan = RoutePlan::from_split(
@@ -304,6 +342,7 @@ mod tests {
             &[],
             "203.0.113.7".parse().unwrap(),
             Ipv4Addr::new(192, 168, 1, 1).into(),
+            None,
             "10.71.0.2".parse().unwrap(),
             Some("fd00:71::2".parse().unwrap()),
         )
@@ -343,6 +382,7 @@ mod tests {
             &exc,
             "203.0.113.7".parse().unwrap(),
             Ipv4Addr::new(192, 168, 1, 1).into(),
+            None,
             "10.71.0.2".parse().unwrap(),
             None,
         )
@@ -368,6 +408,7 @@ mod tests {
             &[],
             "203.0.113.7".parse().unwrap(),
             Ipv4Addr::new(192, 168, 1, 1).into(),
+            None,
             "10.71.0.2".parse().unwrap(),
             None,
         )
