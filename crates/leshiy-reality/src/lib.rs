@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 //! REALITY-style auth + prober passthrough for Leshiy (server front door + client embed).
+pub mod addr;
 pub mod auth;
 pub mod client;
 pub mod config;

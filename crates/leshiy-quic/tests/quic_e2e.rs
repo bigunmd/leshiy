@@ -501,7 +501,7 @@ async fn prober_get_gets_masquerade() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Raw h3 client: connect, GET "/", expect 200 + body containing "It works".
-    let ep = leshiy_quic::endpoint::client_endpoint(CertVerification::Pinned(pin)).unwrap();
+    let ep = leshiy_quic::endpoint::client_endpoint(CertVerification::Pinned(pin), server).unwrap();
     let conn = ep.connect(server, "example.test").unwrap().await.unwrap();
     let (mut driver, mut send_req) = h3::client::new(h3_quinn::Connection::new(conn))
         .await
@@ -558,7 +558,7 @@ async fn unauthorized_connect_no_tunnel() {
     // Wait briefly for the server to start listening.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let ep = leshiy_quic::endpoint::client_endpoint(CertVerification::Pinned(pin)).unwrap();
+    let ep = leshiy_quic::endpoint::client_endpoint(CertVerification::Pinned(pin), server).unwrap();
     let conn = ep.connect(server, "example.test").unwrap().await.unwrap();
     let (mut driver, mut send_req) = h3::client::new(h3_quinn::Connection::new(conn))
         .await

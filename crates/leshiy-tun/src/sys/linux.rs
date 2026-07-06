@@ -3,7 +3,7 @@
 use super::{PrivilegedOps, RouteController, TunSession};
 use crate::route_plan::{Cidr, RoutePlan};
 use net_route::{Handle, Route};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
 
 pub struct LinuxOps;
@@ -17,6 +17,8 @@ const IP: &str = "ip";
 
 #[async_trait::async_trait]
 impl PrivilegedOps for LinuxOps {
+    const CARRIES_V6: bool = true;
+
     async fn start(
         &self,
         tun_name: &str,
@@ -26,11 +28,12 @@ impl PrivilegedOps for LinuxOps {
         force_dns: bool,
         ipv6_killswitch: bool,
     ) -> std::io::Result<TunSession> {
-        // MVP carries IPv4 through the tunnel; IPv6 is disabled below (fail-closed).
+        // The TUN interface always carries an IPv4 address; IPv6 is dual-stacked on top when
+        // `plan.tun_addr6` is set (else it stays fail-closed via the kill-switch below).
         let IpAddr::V4(tun4) = plan.tun_addr else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "tun_addr must be IPv4 in this phase",
+                "tun_addr must be IPv4",
             ));
         };
 
@@ -46,6 +49,20 @@ impl PrivilegedOps for LinuxOps {
         });
         let device = tun::create_as_async(&cfg).map_err(to_io)?;
 
+        // 1b. Dual-stack: assign the IPv6 TUN address so IPv6 can ride the tunnel. Best-effort —
+        //     if the host has IPv6 disabled the `ip -6 addr add` fails; we then fall closed to
+        //     the kill-switch (below) rather than leave IPv6 leaking around a half-set-up tunnel.
+        let carry_v6 = match plan.tun_addr6 {
+            Some(IpAddr::V6(v6)) => match add_v6_addr(tun_name, v6).await {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::error!(%v6, "failed to assign IPv6 TUN address ({e}); failing closed to the IPv6 kill-switch");
+                    false
+                }
+            },
+            _ => false,
+        };
+
         // 2. Routes — applied in ONE `ip -batch` process: the server-host exception (so
         //    encrypted packets to the server escape the tunnel), the via-TUN routes (default
         //    override and/or include CIDRs, routed through the device), and the bypass routes
@@ -56,24 +73,28 @@ impl PrivilegedOps for LinuxOps {
         let ifindex = ifindex_of(tun_name)?;
         let installed_bypass: Arc<Mutex<Vec<Cidr>>> = Arc::new(Mutex::new(Vec::new()));
         let mut batch = String::new();
+        // `ip -batch` infers the address family from each route's address, so v4 and v6 lines
+        // coexist in one batch. IPv6 routes are only emitted when v6 is actually carried.
         let exc = &plan.server_exception;
-        if exc.dest.addr.is_ipv4() {
+        if exc.dest.addr.is_ipv4() || carry_v6 {
             batch.push_str(&format!("route add {} via {}\n", exc.dest, exc.gateway));
         }
         for c in &plan.via_tun {
-            if c.addr.is_ipv4() {
+            if c.addr.is_ipv4() || carry_v6 {
                 batch.push_str(&format!("route add {} dev {}\n", c, tun_name));
             } else {
-                tracing::warn!(cidr = %c, "skipping IPv6 via_tun route (IPv6 disabled this phase)");
+                tracing::warn!(cidr = %c, "skipping IPv6 via_tun route (IPv6 not carried)");
             }
         }
+        // Bypass routes escape via the family-appropriate gateway the planner chose for each.
+        // A v6 bypass needs IPv6 carried; otherwise skip it (it then rides the tunnel — safe).
         for b in &plan.bypass {
-            if b.dest.addr.is_ipv4() {
-                batch.push_str(&format!("route add {} via {}\n", b.dest, b.gateway));
-                installed_bypass.lock().unwrap().push(b.dest.clone());
-            } else {
-                tracing::warn!(cidr = %b.dest, "skipping IPv6 split-tunnel bypass (IPv6 disabled this phase)");
+            if b.dest.addr.is_ipv6() && !carry_v6 {
+                tracing::warn!(cidr = %b.dest, "skipping IPv6 split-tunnel bypass (IPv6 not carried)");
+                continue;
             }
+            batch.push_str(&format!("route add {} via {}\n", b.dest, b.gateway));
+            installed_bypass.lock().unwrap().push(b.dest.clone());
         }
         ip_batch(&batch).await?;
 
@@ -88,9 +109,12 @@ impl PrivilegedOps for LinuxOps {
             None
         };
 
-        // 4. IPv6 kill-switch (fail-closed): disable v6 so it can't leak around the v4 tunnel.
-        //    Skipped in Include mode (the un-tunneled majority, including IPv6, stays direct).
-        let (ipv6_all_backup, ipv6_default_backup) = if ipv6_killswitch {
+        // 4. IPv6 kill-switch (fail-closed): disable v6 so it can't leak around the tunnel.
+        //    Applied when the caller asked for it (IPv4-only session) OR when we intended to
+        //    carry v6 but couldn't assign the address (so v6 would otherwise leak). Skipped when
+        //    v6 is genuinely carried, and in Include mode (the un-tunneled majority stays direct).
+        let apply_killswitch = ipv6_killswitch || (plan.tun_addr6.is_some() && !carry_v6);
+        let (ipv6_all_backup, ipv6_default_backup) = if apply_killswitch {
             let all = std::fs::read_to_string(IPV6_ALL).ok();
             let def = std::fs::read_to_string(IPV6_DEFAULT).ok();
             let _ = std::fs::write(IPV6_ALL, "1");
@@ -104,6 +128,7 @@ impl PrivilegedOps for LinuxOps {
             handle: Handle::new()?,
             gateway: plan.server_exception.gateway,
             ifindex,
+            carry_v6,
             installed_bypass: installed_bypass.clone(),
         });
         let guard = LinuxTeardown {
@@ -128,14 +153,19 @@ struct LinuxController {
     handle: Handle,
     gateway: IpAddr,
     ifindex: u32,
+    /// Whether IPv6 is carried through the tunnel this session. When false, resolved v6 domain
+    /// routes are ignored (v6 is either fail-closed or out of scope).
+    carry_v6: bool,
     installed_bypass: Arc<Mutex<Vec<Cidr>>>,
 }
 
 #[async_trait::async_trait]
 impl RouteController for LinuxController {
     async fn add_bypass(&self, c: &Cidr) -> std::io::Result<()> {
+        // Bypass rides the original gateway, which we only have for IPv4 (see the planner's
+        // v6-exclude drop). A resolved v6 domain rule therefore stays in the tunnel.
         let IpAddr::V4(_) = c.addr else {
-            return Ok(()); // IPv4-only this phase
+            return Ok(());
         };
         self.handle
             .add(&Route::new(c.addr, c.prefix).with_gateway(self.gateway))
@@ -155,22 +185,42 @@ impl RouteController for LinuxController {
         Ok(())
     }
     async fn add_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
-        let IpAddr::V4(_) = c.addr else {
+        // A v6 via-tun route only makes sense when v6 is carried (the TUN has a v6 address).
+        if c.addr.is_ipv6() && !self.carry_v6 {
             return Ok(());
-        };
+        }
         self.handle
             .add(&Route::new(c.addr, c.prefix).with_ifindex(self.ifindex))
             .await
     }
     async fn remove_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
-        let IpAddr::V4(_) = c.addr else {
+        if c.addr.is_ipv6() && !self.carry_v6 {
             return Ok(());
-        };
+        }
         let _ = self
             .handle
             .delete(&Route::new(c.addr, c.prefix).with_ifindex(self.ifindex))
             .await;
         Ok(())
+    }
+}
+
+/// Assign an IPv6 address to the TUN interface (`ip -6 addr add <v6>/64 dev <name>`). The
+/// interface's IPv4 address is set by rust-tun at creation; rust-tun's config carries only one
+/// address, so the v6 one is added out-of-band here. Fails if the host has IPv6 disabled.
+async fn add_v6_addr(tun_name: &str, v6: Ipv6Addr) -> std::io::Result<()> {
+    let status = tokio::process::Command::new(IP)
+        .args(["-6", "addr", "add", &format!("{v6}/64"), "dev", tun_name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "ip -6 addr add {v6}/64 dev {tun_name} exited {status}"
+        )))
     }
 }
 
@@ -280,6 +330,7 @@ mod tests {
             "203.0.113.7".parse().unwrap(),
             "127.0.0.1".parse().unwrap(), // harmless gateway for the smoke
             "10.71.0.2".parse().unwrap(),
+            None,
         )
         .unwrap();
         let sess = LinuxOps

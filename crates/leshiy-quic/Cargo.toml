@@ -18,6 +18,7 @@ hex.workspace = true
 sha2.workspace = true
 webpki-roots.workspace = true
 async-trait.workspace = true
+socket2 = { workspace = true }
 
 [dev-dependencies]
 rcgen.workspace = true

@@ -142,7 +142,7 @@ pub async fn socks5_accept<S: AsyncRead + AsyncWrite + Unpin>(
     io.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
         .await
         .map_err(RealityError::Io)?;
-    Ok((format!("{host}:{port}"), io))
+    Ok((crate::addr::join_host_port(&host, port), io))
 }
 
 /// An established REALITY tunnel, ready for SOCKS5 serving.
