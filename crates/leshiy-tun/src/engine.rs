@@ -21,6 +21,10 @@ pub struct TunConfig {
     /// TUN MTU — kept below the transport's to absorb TLS + mux framing overhead.
     pub mtu: u16,
     pub tun_addr: IpAddr,
+    /// IPv6 address for the TUN interface. `Some` carries IPv6 *through* the tunnel
+    /// (dual-stack); `None` keeps the session IPv4-only with the v6 kill-switch. Best-effort
+    /// on the host side — a backend that can't assign it fails closed to the kill-switch.
+    pub tun_addr6: Option<IpAddr>,
     /// The VPN server's own IP (excepted from the tunnel to avoid a routing loop).
     pub server_ip: IpAddr,
     /// The original default gateway, captured before routes are changed.
@@ -38,6 +42,9 @@ impl Default for TunConfig {
             tun_name: "leshiy0".into(),
             mtu: 1400,
             tun_addr: "10.71.0.2".parse().unwrap(),
+            // IPv4-only until every backend carries IPv6 (then this flips to a ULA). Keeping it
+            // None preserves the fail-closed kill-switch and changes no current behavior.
+            tun_addr6: None,
             server_ip: "0.0.0.0".parse().unwrap(),
             orig_gateway: "0.0.0.0".parse().unwrap(),
             dns: vec!["1.1.1.1".parse().unwrap()],
@@ -54,19 +61,20 @@ impl TunConfig {
         matches!(self.split.base_mode, leshiy_client::SplitMode::Exclude)
     }
 
-    /// Apply the IPv6 fail-closed kill-switch? Same rationale as [`force_dns`](Self::force_dns):
-    /// under an Include base the un-tunneled majority (incl. IPv6) must stay reachable.
+    /// Apply the IPv6 fail-closed kill-switch? Only when we are **not** carrying IPv6 through
+    /// the tunnel (`tun_addr6` is `None`) AND the base mode tunnels the default route (Exclude).
+    /// With a v6 TUN address, IPv6 rides the tunnel via the `::/1` override, so killing it would
+    /// break connectivity; under an Include base the un-tunneled majority must stay reachable.
     pub fn ipv6_killswitch(&self) -> bool {
-        matches!(self.split.base_mode, leshiy_client::SplitMode::Exclude)
+        self.tun_addr6.is_none() && matches!(self.split.base_mode, leshiy_client::SplitMode::Exclude)
     }
 }
 
-/// Format a destination as the `host:port` target the egress expects.
+/// Format a destination as the `host:port` target the egress expects. `SocketAddr`'s Display
+/// brackets IPv6 correctly (`[2001:db8::1]:443`), which the egress/resolver parse; the old V6
+/// arm emitted an unbracketed, unresolvable `2001:db8::1:443`.
 pub(crate) fn target_of(dst: SocketAddr) -> String {
-    match dst {
-        SocketAddr::V4(_) => dst.to_string(),
-        SocketAddr::V6(a) => format!("{}:{}", a.ip(), a.port()),
-    }
+    dst.to_string()
 }
 
 /// Idle timeout for a UDP association (no teardown signal on UDP). Kept short so an
@@ -116,6 +124,7 @@ impl TunEngine {
             cfg.server_ip,
             cfg.orig_gateway,
             cfg.tun_addr,
+            cfg.tun_addr6,
         )
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
         // Large rule sets bloat the routing table — and on macOS/Windows each route is a
@@ -327,6 +336,12 @@ mod tests {
     }
 
     #[test]
+    fn target_string_ipv6_is_bracketed() {
+        let dst: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+        assert_eq!(target_of(dst), "[2001:db8::1]:443");
+    }
+
+    #[test]
     fn default_mtu_is_1400() {
         assert_eq!(TunConfig::default().mtu, 1400);
     }
@@ -339,10 +354,22 @@ mod tests {
     }
 
     #[test]
-    fn exclude_mode_keeps_dns_and_ipv6_killswitch() {
-        let c = TunConfig::default(); // default mode is Exclude
+    fn ipv4_only_default_forces_dns_and_killswitch() {
+        // Default is Exclude + IPv4-only (tun_addr6 None): DNS forced, IPv6 fail-closed.
+        let c = TunConfig::default();
         assert!(c.force_dns());
         assert!(c.ipv6_killswitch());
+    }
+
+    #[test]
+    fn dual_stack_disables_killswitch() {
+        // A v6 TUN address means IPv6 is carried through the tunnel, so it is NOT killed.
+        let c = TunConfig {
+            tun_addr6: Some("fd00:71::2".parse().unwrap()),
+            ..TunConfig::default()
+        };
+        assert!(c.force_dns());
+        assert!(!c.ipv6_killswitch());
     }
 
     #[test]
