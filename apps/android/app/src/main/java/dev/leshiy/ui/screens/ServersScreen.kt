@@ -30,6 +30,7 @@ import dev.leshiy.ui.components.PanelCard
 import dev.leshiy.ui.components.PrimaryButton
 import dev.leshiy.ui.components.ScreenFrame
 import dev.leshiy.ui.components.SectionLabel
+import dev.leshiy.ui.i18n.LocalStrings
 import dev.leshiy.ui.icons.LeshiyIcons
 import dev.leshiy.ui.theme.Dim
 import dev.leshiy.ui.theme.Moss
@@ -43,6 +44,7 @@ fun ServersScreen(
     onConsumeScan: () -> Unit,
     onBack: () -> Unit,
 ) {
+    val s = LocalStrings.current
     val profiles by vm.profiles.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
     var name by remember { mutableStateOf("") }
@@ -55,13 +57,13 @@ fun ServersScreen(
         }
     }
 
-    ScreenFrame("Servers", onBack = onBack) {
+    ScreenFrame(s.servers, onBack = onBack) {
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            item { SectionLabel("Saved servers") }
+            item { SectionLabel(s.savedServers) }
             if (profiles.isEmpty()) {
                 item {
                     Text(
-                        "No servers yet. Paste a leshiy:// link or scan a QR code below.",
+                        s.noServers,
                         style = MaterialTheme.typography.labelSmall,
                         color = Dim,
                     )
@@ -79,33 +81,33 @@ fun ServersScreen(
                         Column(Modifier.weight(1f)) {
                             Text(p.name, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onBackground, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(
-                                if (p.isActive) "active" else "tap to select",
+                                if (p.isActive) s.active else s.tapToSelect,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = if (p.isActive) Wisp else Dim,
                             )
                         }
-                        IconBtn(LeshiyIcons.Trash, "Remove", tint = MaterialTheme.colorScheme.error) { vm.remove(p.id) }
+                        IconBtn(LeshiyIcons.Trash, s.remove, tint = MaterialTheme.colorScheme.error) { vm.remove(p.id) }
                     }
                 }
             }
 
-            item { Spacer(Modifier.size(8.dp)); SectionLabel("Add a server") }
+            item { Spacer(Modifier.size(8.dp)); SectionLabel(s.addServer) }
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Field(name, { name = it }, "Name (optional)")
+                    Field(name, { name = it }, s.nameOptional)
                     Field(
-                        uri, { uri = it }, "leshiy:// link",
+                        uri, { uri = it }, s.leshiyLink,
                         trailing = {
                             Row {
-                                IconBtn(LeshiyIcons.Clipboard, "Paste from clipboard", tint = Wisp) {
+                                IconBtn(LeshiyIcons.Clipboard, s.pasteClipboard, tint = Wisp) {
                                     clipboard.getText()?.text?.trim()?.let { if (it.isNotEmpty()) uri = it }
                                 }
-                                IconBtn(LeshiyIcons.Qr, "Scan QR", tint = Wisp, onClick = onScan)
+                                IconBtn(LeshiyIcons.Qr, s.scanQr, tint = Wisp, onClick = onScan)
                             }
                         },
                     )
                     PrimaryButton(
-                        "Add server",
+                        s.addServerBtn,
                         onClick = {
                             if (vm.add(uri, name)) { uri = ""; name = "" }
                         },

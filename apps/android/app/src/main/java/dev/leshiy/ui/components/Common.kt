@@ -61,7 +61,7 @@ fun ScreenFrame(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (onBack != null) {
-                IconBtn(LeshiyIcons.Back, "Back", tint = Dim, onClick = onBack)
+                IconBtn(LeshiyIcons.Back, dev.leshiy.ui.i18n.LocalStrings.current.back, tint = Dim, onClick = onBack)
                 Spacer(Modifier.width(6.dp))
             }
             Text(

@@ -32,6 +32,7 @@ import dev.leshiy.ui.components.PanelCard
 import dev.leshiy.ui.components.PrimaryButton
 import dev.leshiy.ui.components.ScreenFrame
 import dev.leshiy.ui.components.SectionLabel
+import dev.leshiy.ui.i18n.LocalStrings
 import dev.leshiy.ui.icons.LeshiyIcons
 import dev.leshiy.ui.theme.Dim
 import dev.leshiy.ui.theme.Moss
@@ -44,28 +45,29 @@ fun ManageScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
+    val s = LocalStrings.current
     var unlocked by remember { mutableStateOf(VaultHolder.unlocked) }
 
-    ScreenFrame("Manage servers", onBack = onBack) {
+    ScreenFrame(s.manage, onBack = onBack) {
         if (!unlocked) {
             var pass by remember { mutableStateOf("") }
             var failed by remember { mutableStateOf(false) }
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
-                    "Unlock the server vault — an encrypted store holding SSH credentials for the servers you provision. Set a passphrase the first time; enter it to unlock later.",
+                    s.unlockVault,
                     style = MaterialTheme.typography.labelSmall,
                     color = Dim,
                 )
-                Field(pass, { pass = it; failed = false }, "Vault passphrase")
+                Field(pass, { pass = it; failed = false }, s.vaultPassphrase)
                 PrimaryButton(
-                    "Unlock",
+                    s.unlock,
                     onClick = {
                         if (VaultHolder.unlock(context, pass)) { unlocked = true; vm.refreshServers() } else failed = true
                     },
                     enabled = pass.isNotBlank(),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                if (failed) Text("Wrong passphrase", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+                if (failed) Text(s.wrongPassphrase, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
             }
             return@ScreenFrame
         }
@@ -81,47 +83,47 @@ fun ManageScreen(
             if (servers.isEmpty()) {
                 item {
                     Text(
-                        "No saved servers. Provision one from Deploy while the vault is unlocked, and it'll appear here.",
+                        s.noSavedServers,
                         style = MaterialTheme.typography.labelSmall,
                         color = Dim,
                     )
                 }
             }
-            items(servers, key = { it.id }) { s ->
-                val open = s.id == selected
-                PanelCard(onClick = { vm.select(s.id) }) {
+            items(servers, key = { it.id }) { server ->
+                val open = server.id == selected
+                PanelCard(onClick = { vm.select(server.id) }) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(LeshiyIcons.Server, null, tint = if (open) Wisp else Moss, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(s.label, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onBackground, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(s.host, style = MaterialTheme.typography.labelSmall, color = Dim)
+                            Text(server.label, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onBackground, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(server.host, style = MaterialTheme.typography.labelSmall, color = Dim)
                         }
                         Icon(if (open) LeshiyIcons.ChevronDown else LeshiyIcons.ChevronRight, null, tint = Moss, modifier = Modifier.size(18.dp))
                     }
 
                     if (open) {
                         Spacer(Modifier.size(12.dp))
-                        SectionLabel("Users")
+                        SectionLabel(s.users)
                         users.forEach { u ->
                             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                                 Column(Modifier.weight(1f)) {
-                                    Text(u.label ?: "(orphan)", style = MaterialTheme.typography.bodyMedium, color = if (u.enabled) MaterialTheme.colorScheme.onBackground else MaterialTheme.colorScheme.error)
+                                    Text(u.label ?: s.orphan, style = MaterialTheme.typography.bodyMedium, color = if (u.enabled) MaterialTheme.colorScheme.onBackground else MaterialTheme.colorScheme.error)
                                     Text(u.shortId, style = MaterialTheme.typography.labelSmall, color = Dim)
                                 }
-                                IconBtn(LeshiyIcons.Trash, "Revoke", tint = MaterialTheme.colorScheme.error) { vm.deleteUser(s.id, u.shortId) }
+                                IconBtn(LeshiyIcons.Trash, s.remove, tint = MaterialTheme.colorScheme.error) { vm.deleteUser(server.id, u.shortId) }
                             }
                         }
                         Spacer(Modifier.size(8.dp))
-                        var label by remember(s.id) { mutableStateOf("") }
+                        var label by remember(server.id) { mutableStateOf("") }
                         Field(
-                            label, { label = it }, "New user label",
-                            trailing = { IconBtn(LeshiyIcons.Plus, "Add user", tint = Wisp) { vm.addUser(s.id, label) { uri -> onUserUri(uri, label.ifBlank { "phone" }); label = "" } } },
+                            label, { label = it }, s.newUserLabel,
+                            trailing = { IconBtn(LeshiyIcons.Plus, s.newUserLabel, tint = Wisp) { vm.addUser(server.id, label) { uri -> onUserUri(uri, label.ifBlank { "phone" }); label = "" } } },
                         )
                         Spacer(Modifier.size(10.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            SmallAction("Check status", enabled = !busy) { vm.status(s.id) }
-                            SmallAction("Teardown", enabled = !busy, danger = true) { vm.teardown(s.id, false) }
+                            SmallAction(s.checkStatus, enabled = !busy) { vm.status(server.id) }
+                            SmallAction(s.teardown, enabled = !busy, danger = true) { vm.teardown(server.id, false) }
                         }
                     }
                 }

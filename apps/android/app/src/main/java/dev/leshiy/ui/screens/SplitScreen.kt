@@ -47,6 +47,7 @@ import dev.leshiy.ui.components.IconBtn
 import dev.leshiy.ui.components.PrimaryButton
 import dev.leshiy.ui.components.ScreenFrame
 import dev.leshiy.ui.components.SectionLabel
+import dev.leshiy.ui.i18n.LocalStrings
 import dev.leshiy.ui.icons.LeshiyIcons
 import dev.leshiy.ui.theme.Bg0
 import dev.leshiy.ui.theme.Dim
@@ -59,7 +60,7 @@ import kotlinx.coroutines.withContext
 fun SplitScreen(appsVm: AppsViewModel, splitVm: SplitViewModel, onBack: () -> Unit) {
     val kind by splitVm.kind.collectAsStateWithLifecycle()
 
-    ScreenFrame("Split tunnel", onBack = onBack) {
+    ScreenFrame(LocalStrings.current.splitTunnel, onBack = onBack) {
         KindToggle(kind) { splitVm.setKind(it) }
         Spacer(Modifier.size(12.dp))
         when (kind) {
@@ -81,18 +82,19 @@ private fun ColumnScope.AppSplit(vm: AppsViewModel) {
         if (query.isBlank()) apps else apps.filter { it.label.contains(query.trim(), ignoreCase = true) }
     }
 
+    val s = LocalStrings.current
     ModeSelector(mode) { vm.setMode(it) }
     Spacer(Modifier.size(8.dp))
     Hint(
         when (mode) {
-            PerAppMode.OFF -> "All apps go through the VPN."
-            PerAppMode.INCLUDE -> "Only the checked apps go through the VPN."
-            PerAppMode.EXCLUDE -> "Checked apps bypass the VPN; everything else is tunneled."
+            PerAppMode.OFF -> s.hintAppOff
+            PerAppMode.INCLUDE -> s.hintAppInclude
+            PerAppMode.EXCLUDE -> s.hintAppExclude
         },
     )
     Spacer(Modifier.size(10.dp))
-    Field(query, { query = it }, "Search apps", trailing = { Icon(LeshiyIcons.Search, null, tint = Dim, modifier = Modifier.size(18.dp)) })
-    SectionLabel("Apps${if (query.isNotBlank()) " · ${shown.size}" else ""}")
+    Field(query, { query = it }, s.searchApps, trailing = { Icon(LeshiyIcons.Search, null, tint = Dim, modifier = Modifier.size(18.dp)) })
+    SectionLabel("${s.apps}${if (query.isNotBlank()) " · ${shown.size}" else ""}")
 
     LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         items(shown, key = { it.pkg }) { row ->
@@ -119,25 +121,26 @@ private fun ColumnScope.NetSplit(vm: SplitViewModel) {
     var input by remember { mutableStateOf("") }
     var error by remember { mutableStateOf(false) }
     val excludeUnsupported = mode == PerAppMode.EXCLUDE && Build.VERSION.SDK_INT < 33
+    val s = LocalStrings.current
 
     ModeSelector(mode) { vm.setNetMode(it) }
     Spacer(Modifier.size(8.dp))
     Hint(
         when (mode) {
-            PerAppMode.OFF -> "All traffic goes through the VPN."
-            PerAppMode.INCLUDE -> "Only traffic to these networks and domains goes through the VPN."
-            PerAppMode.EXCLUDE -> "Traffic to these networks and domains bypasses the VPN; everything else is tunneled."
+            PerAppMode.OFF -> s.hintNetOff
+            PerAppMode.INCLUDE -> s.hintNetInclude
+            PerAppMode.EXCLUDE -> s.hintNetExclude
         },
     )
     if (excludeUnsupported) {
         Spacer(Modifier.size(4.dp))
-        Text("Exclude by IP needs Android 13+. On this device it falls back to full tunnel.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+        Text(s.excludeUnsupported, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
     }
-    SectionLabel("Rules")
+    SectionLabel(s.rules)
 
     LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (cidrs.isEmpty() && domains.isEmpty()) {
-            item { Hint("Nothing yet. Add an IP/CIDR (10.0.0.0/8) or a domain (netflix.com) below.") }
+            item { Hint(s.nothingYet) }
         }
         items(cidrs, key = { "c:$it" }) { c ->
             RuleRow(LeshiyIcons.Shield, c) { vm.removeCidr(c) }
@@ -148,14 +151,14 @@ private fun ColumnScope.NetSplit(vm: SplitViewModel) {
     }
 
     if (domains.isNotEmpty()) {
-        Hint("Domains are resolved to IP addresses when you connect. CDNs with changing IPs may not fully match.")
+        Hint(s.domainNote)
         Spacer(Modifier.size(6.dp))
     }
-    Field(input, { input = it; error = false }, "IP, CIDR or domain")
-    if (error) Text("Not a valid IP, CIDR or domain", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+    Field(input, { input = it; error = false }, s.ipCidrDomain)
+    if (error) Text(s.invalidRule, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
     Spacer(Modifier.size(8.dp))
     PrimaryButton(
-        "Add rule",
+        s.addRule,
         onClick = { if (vm.addEntry(input)) input = "" else error = true },
         enabled = input.isNotBlank(),
         modifier = Modifier.fillMaxWidth(),
@@ -177,20 +180,29 @@ private fun RuleRow(icon: androidx.compose.ui.graphics.vector.ImageVector, text:
 
 @Composable
 private fun KindToggle(kind: SplitKind, onSelect: (SplitKind) -> Unit) {
+    val s = LocalStrings.current
     Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
         Row(Modifier.padding(3.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-            SegItem("By app", kind == SplitKind.APP, Modifier.weight(1f)) { onSelect(SplitKind.APP) }
-            SegItem("By network", kind == SplitKind.NETWORK, Modifier.weight(1f)) { onSelect(SplitKind.NETWORK) }
+            SegItem(s.byApp, kind == SplitKind.APP, Modifier.weight(1f)) { onSelect(SplitKind.APP) }
+            SegItem(s.byNetwork, kind == SplitKind.NETWORK, Modifier.weight(1f)) { onSelect(SplitKind.NETWORK) }
         }
     }
 }
 
 @Composable
 private fun ModeSelector(mode: PerAppMode, onSelect: (PerAppMode) -> Unit) {
+    val s = LocalStrings.current
+    val label = { m: PerAppMode ->
+        when (m) {
+            PerAppMode.OFF -> s.modeOff
+            PerAppMode.INCLUDE -> s.modeInclude
+            PerAppMode.EXCLUDE -> s.modeExclude
+        }
+    }
     Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
         Row(Modifier.padding(3.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
             PerAppMode.entries.forEach { m ->
-                SegItem(m.name.lowercase().replaceFirstChar { it.uppercase() }, m == mode, Modifier.weight(1f)) { onSelect(m) }
+                SegItem(label(m), m == mode, Modifier.weight(1f)) { onSelect(m) }
             }
         }
     }
