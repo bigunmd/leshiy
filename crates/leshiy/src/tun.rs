@@ -31,6 +31,13 @@ pub async fn run(
         leshiy_tun::discover::default_gateway_v6().await
     }
     .context("discover default gateway")?;
+    // Best-effort v6 gateway for routing IPv6 split-tunnel excludes when the server is v4-reached
+    // (when it's v6-reached, `orig_gateway` already is the v6 gateway).
+    let orig_gateway6 = if server_ip.is_ipv6() {
+        None
+    } else {
+        leshiy_tun::discover::default_gateway_v6().await.ok()
+    };
 
     let pref = match transport {
         crate::cli::Transport::Auto => TransportPref::Auto,
@@ -54,6 +61,7 @@ pub async fn run(
         mtu,
         server_ip,
         orig_gateway,
+        orig_gateway6,
         dns: vec![dns.parse().context("parse --dns")?],
         ..TunConfig::default()
     };
