@@ -42,9 +42,10 @@ impl Default for TunConfig {
             tun_name: "leshiy0".into(),
             mtu: 1400,
             tun_addr: "10.71.0.2".parse().unwrap(),
-            // IPv4-only until every backend carries IPv6 (then this flips to a ULA). Keeping it
-            // None preserves the fail-closed kill-switch and changes no current behavior.
-            tun_addr6: None,
+            // Dual-stack by default: a ULA on the TUN so IPv6 rides the tunnel. Backends that
+            // don't carry v6 (Windows/Android/stub) zero this in the engine via CARRIES_V6 and
+            // fail closed to the kill-switch, so this default is safe on every platform.
+            tun_addr6: Some("fd00:71::2".parse().unwrap()),
             server_ip: "0.0.0.0".parse().unwrap(),
             orig_gateway: "0.0.0.0".parse().unwrap(),
             dns: vec!["1.1.1.1".parse().unwrap()],
@@ -361,22 +362,21 @@ mod tests {
     }
 
     #[test]
-    fn ipv4_only_default_forces_dns_and_killswitch() {
-        // Default is Exclude + IPv4-only (tun_addr6 None): DNS forced, IPv6 fail-closed.
+    fn dual_stack_default_forces_dns_but_not_killswitch() {
+        // Default is Exclude + dual-stack (tun_addr6 Some): DNS forced, IPv6 carried (not killed).
         let c = TunConfig::default();
         assert!(c.force_dns());
-        assert!(c.ipv6_killswitch());
+        assert!(!c.ipv6_killswitch());
     }
 
     #[test]
-    fn dual_stack_disables_killswitch() {
-        // A v6 TUN address means IPv6 is carried through the tunnel, so it is NOT killed.
+    fn ipv4_only_applies_killswitch() {
+        // Without a v6 TUN address, IPv6 is fail-closed under an Exclude base.
         let c = TunConfig {
-            tun_addr6: Some("fd00:71::2".parse().unwrap()),
+            tun_addr6: None,
             ..TunConfig::default()
         };
-        assert!(c.force_dns());
-        assert!(!c.ipv6_killswitch());
+        assert!(c.ipv6_killswitch());
     }
 
     #[test]
