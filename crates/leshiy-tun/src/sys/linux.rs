@@ -17,6 +17,8 @@ const IP: &str = "ip";
 
 #[async_trait::async_trait]
 impl PrivilegedOps for LinuxOps {
+    const CARRIES_V6: bool = true;
+
     async fn start(
         &self,
         tun_name: &str,

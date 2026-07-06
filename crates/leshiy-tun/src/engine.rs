@@ -110,6 +110,13 @@ impl TunEngine {
         counters: Arc<ByteCounters>,
         cancel: Arc<Notify>,
     ) -> std::io::Result<()> {
+        // Platforms whose backend doesn't carry IPv6 (Windows/Android/stub, for now) must not
+        // leave a v6 TUN address set — otherwise the kill-switch would be skipped and v6 would
+        // leak around a v6-unaware backend. Zero it here so those platforms fail closed.
+        let mut cfg = cfg;
+        if !<PlatformOps as PrivilegedOps>::CARRIES_V6 {
+            cfg.tun_addr6 = None;
+        }
         // Drop provably-redundant rules (e.g. Include rules under an Exclude base with no
         // excludes are already tunneled) before installing routes / resolving domains.
         let (eff_include, eff_exclude) = cfg.split.effective();
