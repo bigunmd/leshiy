@@ -20,6 +20,10 @@ data class VpnRoute(val address: String, val prefix: Int)
 data class VpnConfig(
     val address: String,
     val prefix: Int,
+    /** IPv6 TUN address (dual-stack); null = IPv4-only. Must be set whenever an IPv6 route is
+     *  present, or `establish()` throws. */
+    val address6: String?,
+    val prefix6: Int,
     val mtu: Int,
     val dns: List<String>,
     val routes: List<VpnRoute>,
@@ -75,6 +79,9 @@ class LeshiyVpnService : VpnService() {
                 .setSession("Leshiy")
                 .setMtu(cfg.mtu)
                 .addAddress(cfg.address, cfg.prefix)
+            // Dual-stack: add the IPv6 TUN address BEFORE any IPv6 route, or addRoute("::", 0)
+            // throws ("route without an address of the same family").
+            if (cfg.address6 != null) builder.addAddress(cfg.address6, cfg.prefix6)
             for (dns in cfg.dns) builder.addDnsServer(dns)
             for (r in cfg.routes) builder.addRoute(r.address, r.prefix)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

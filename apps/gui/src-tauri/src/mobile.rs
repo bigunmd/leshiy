@@ -75,6 +75,10 @@ struct RouteArg {
 struct EstablishArgs {
     address: String,
     prefix: u8,
+    /// IPv6 TUN address (dual-stack). `None` = IPv4-only. Must be present whenever a `::/0` or
+    /// other IPv6 route is in `routes`, or `VpnService.establish()` throws.
+    address6: Option<String>,
+    prefix6: u8,
     mtu: u16,
     dns: Vec<String>,
     routes: Vec<RouteArg>,
@@ -127,29 +131,32 @@ pub fn read_clipboard() -> Result<String, String> {
     Ok(resp.text)
 }
 
-/// Map the merged split plan to VpnService routes. Exclude base = full tunnel (`0.0.0.0/0`) plus
-/// per-CIDR `excludeRoute` (API 33+, applied best-effort by the service); Include base = only the
-/// listed CIDRs. IPv4-only this phase (IPv6 isn't tunnelled). Domain rules aren't represented here
-/// (resolved at runtime; a no-op on Android's `NullController`) — a documented limitation.
+/// Map the merged split plan to VpnService routes. Exclude base = full tunnel for both families
+/// (`0.0.0.0/0` + `::/0`) plus per-CIDR `excludeRoute` (API 33+, applied best-effort by the
+/// service); Include base = only the listed CIDRs. Dual-stack: a v6 TUN address is added on the
+/// builder alongside these routes (see `EstablishArgs::address6`). Domain rules aren't represented
+/// here (resolved at runtime; a no-op on Android's `NullController`) — a documented limitation.
 fn routes_for_builder(split: &SplitPlan) -> (Vec<RouteArg>, Vec<RouteArg>) {
     let (inc, exc) = split.effective();
-    let v4 = |c: &leshiy_client::SplitCidr| c.addr.is_ipv4();
     let to_arg = |c: &leshiy_client::SplitCidr| RouteArg {
         address: c.addr.to_string(),
         prefix: c.prefix,
     };
     match split.base_mode {
         SplitMode::Exclude => (
-            vec![RouteArg {
-                address: "0.0.0.0".into(),
-                prefix: 0,
-            }],
-            exc.cidrs.iter().filter(|c| v4(c)).map(to_arg).collect(),
+            vec![
+                RouteArg {
+                    address: "0.0.0.0".into(),
+                    prefix: 0,
+                },
+                RouteArg {
+                    address: "::".into(),
+                    prefix: 0,
+                },
+            ],
+            exc.cidrs.iter().map(to_arg).collect(),
         ),
-        SplitMode::Include => (
-            inc.cidrs.iter().filter(|c| v4(c)).map(to_arg).collect(),
-            Vec::new(),
-        ),
+        SplitMode::Include => (inc.cidrs.iter().map(to_arg).collect(), Vec::new()),
     }
 }
 
@@ -243,6 +250,9 @@ pub async fn connect(state: &AppState, uri: String, settings: Settings) -> Resul
     let establish_args = EstablishArgs {
         address: "10.71.0.2".into(),
         prefix: 32,
+        // Dual-stack: a ULA on the TUN so `::/0` (added above) has a same-family address.
+        address6: Some("fd00:71::2".into()),
+        prefix6: 64,
         mtu: settings.vpn_mtu,
         dns: vec![settings.vpn_dns.clone()],
         routes,
