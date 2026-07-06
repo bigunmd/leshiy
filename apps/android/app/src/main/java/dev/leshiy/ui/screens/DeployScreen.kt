@@ -1,5 +1,8 @@
 package dev.leshiy.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -10,9 +13,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -21,8 +26,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.leshiy.ui.theme.Bg0
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import dev.leshiy.ui.ProvisionViewModel
 import dev.leshiy.ui.components.Field
 import dev.leshiy.ui.components.IconBtn
@@ -54,6 +66,21 @@ fun DeployScreen(
     var password by remember { mutableStateOf("") }
     var dest by remember { mutableStateOf("www.microsoft.com:443") }
     var port by remember { mutableStateOf("443") }
+    // SSH auth: password or private key.
+    var useKey by remember { mutableStateOf(false) }
+    var pem by remember { mutableStateOf("") }
+    var keyPass by remember { mutableStateOf("") }
+    val context = LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val keyFileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)!!.bufferedReader().readText()
+                }
+            }.getOrNull()?.let { pem = it }
+        }
+    }
     // Advanced / optional.
     var showAdvanced by remember { mutableStateOf(false) }
     var sshPort by remember { mutableStateOf("22") }
@@ -74,7 +101,30 @@ fun DeployScreen(
             SectionLabel(s.target)
             HelpField(host, { host = it }, s.vpsHost, s.helpHost)
             HelpField(user, { user = it }, s.sshUser, s.helpSshUser)
-            HelpField(password, { password = it }, s.sshPassword, s.helpSshPassword)
+
+            // Auth method: password or SSH key.
+            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
+                Row(Modifier.padding(3.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    AuthSeg(s.authPassword, !useKey, Modifier.weight(1f)) { useKey = false }
+                    AuthSeg(s.authKey, useKey, Modifier.weight(1f)) { useKey = true }
+                }
+            }
+            if (useKey) {
+                HelpField(pem, { pem = it }, s.sshPrivateKey, s.helpKey, singleLine = false)
+                androidx.compose.material3.OutlinedButton(
+                    onClick = { keyFileLauncher.launch(arrayOf("*/*")) },
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(LeshiyIcons.File, null, tint = Wisp, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(s.loadKeyFile, color = Wisp, style = MaterialTheme.typography.labelLarge)
+                }
+                HelpField(keyPass, { keyPass = it }, s.keyPassphraseOpt, s.helpKeyPassphrase)
+            } else {
+                HelpField(password, { password = it }, s.sshPassword, s.helpSshPassword)
+            }
 
             SectionLabel(s.camouflage)
             HelpField(dest, { dest = it }, s.borrowedSite, s.helpDest)
@@ -107,7 +157,9 @@ fun DeployScreen(
                         host = host.trim(),
                         sshPort = sshPort.trim().toUShortOrNull() ?: 22u,
                         sshUser = user.trim().ifBlank { "root" },
-                        sshPassword = password,
+                        sshPassword = if (useKey) null else password.ifBlank { null },
+                        sshPrivateKey = if (useKey) pem.ifBlank { null } else null,
+                        sshKeyPassphrase = if (useKey) keyPass.ifBlank { null } else null,
                         dest = dest.trim(),
                         listenPort = (port.trim().toIntOrNull() ?: 443).toUShort(),
                         label = label.trim().ifBlank { null },
@@ -119,7 +171,8 @@ fun DeployScreen(
                     )
                     vm.provision(cfg) { uri -> onProvisioned(uri, host.trim()) }
                 },
-                enabled = !state.running && host.isNotBlank() && password.isNotBlank(),
+                enabled = !state.running && host.isNotBlank() &&
+                    (if (useKey) pem.isNotBlank() else password.isNotBlank()),
                 modifier = Modifier.fillMaxWidth(),
             )
 
@@ -141,16 +194,40 @@ fun DeployScreen(
 
 /** A field with an info button that toggles a one-line explanation beneath it. */
 @Composable
-private fun HelpField(value: String, onChange: (String) -> Unit, label: String, help: String) {
+private fun HelpField(
+    value: String,
+    onChange: (String) -> Unit,
+    label: String,
+    help: String,
+    singleLine: Boolean = true,
+) {
     val s = LocalStrings.current
     var show by remember { mutableStateOf(false) }
-    Field(value, onChange, label, trailing = { IconBtn(LeshiyIcons.Info, s.help, tint = Moss) { show = !show } })
+    Field(value, onChange, label, singleLine = singleLine, trailing = { IconBtn(LeshiyIcons.Info, s.help, tint = Moss) { show = !show } })
     if (show) {
         Text(
             help,
             style = MaterialTheme.typography.labelSmall,
             color = Dim,
             modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+        )
+    }
+}
+
+@Composable
+private fun androidx.compose.foundation.layout.RowScope.AuthSeg(text: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(9.dp),
+        color = if (selected) Wisp else Color.Transparent,
+        modifier = modifier,
+    ) {
+        Text(
+            text,
+            modifier = Modifier.padding(vertical = 8.dp),
+            textAlign = TextAlign.Center,
+            color = if (selected) Bg0 else Dim,
+            style = MaterialTheme.typography.labelLarge,
         )
     }
 }

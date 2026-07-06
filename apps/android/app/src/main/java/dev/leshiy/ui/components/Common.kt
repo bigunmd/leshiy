@@ -150,13 +150,15 @@ fun Field(
     onValueChange: (String) -> Unit,
     label: String,
     modifier: Modifier = Modifier,
+    singleLine: Boolean = true,
     trailing: @Composable (() -> Unit)? = null,
 ) {
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         label = { Text(label) },
-        singleLine = true,
+        singleLine = singleLine,
+        minLines = if (singleLine) 1 else 3,
         trailingIcon = trailing,
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),

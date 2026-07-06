@@ -117,6 +117,14 @@ data class Strings(
     val helpUserLabel: String,
     val helpDns: String,
     val help: String,
+    // SSH auth
+    val authPassword: String,
+    val authKey: String,
+    val sshPrivateKey: String,
+    val keyPassphraseOpt: String,
+    val loadKeyFile: String,
+    val helpKey: String,
+    val helpKeyPassphrase: String,
     // Common
     val back: String,
 )
@@ -221,6 +229,13 @@ val EnStrings = Strings(
     helpUserLabel = "Name for the first client credential this creates. Defaults to \"self\".",
     helpDns = "Force the server's DNS resolver, e.g. 1.1.1.1. Leave empty to auto-detect.",
     help = "Help",
+    authPassword = "Password",
+    authKey = "SSH key",
+    sshPrivateKey = "Private key (PEM)",
+    keyPassphraseOpt = "Key passphrase (optional)",
+    loadKeyFile = "Load key from file",
+    helpKey = "Paste your OpenSSH/PEM private key, or load it from a file. It's used once to set up and stored only in the encrypted vault.",
+    helpKeyPassphrase = "If your private key is encrypted, its passphrase. Leave empty otherwise.",
     back = "Back",
 )
 
@@ -324,6 +339,13 @@ val RuStrings = Strings(
     helpUserLabel = "Имя первого клиентского доступа. По умолчанию «self».",
     helpDns = "Задать DNS-резолвер сервера, напр. 1.1.1.1. Пусто — автоопределение.",
     help = "Справка",
+    authPassword = "Пароль",
+    authKey = "SSH-ключ",
+    sshPrivateKey = "Приватный ключ (PEM)",
+    keyPassphraseOpt = "Пароль ключа (необязательно)",
+    loadKeyFile = "Загрузить ключ из файла",
+    helpKey = "Вставьте приватный ключ OpenSSH/PEM или загрузите из файла. Используется один раз при настройке и хранится только в зашифрованном хранилище.",
+    helpKeyPassphrase = "Если ключ зашифрован — его пароль. Иначе оставьте пустым.",
     back = "Назад",
 )
 
