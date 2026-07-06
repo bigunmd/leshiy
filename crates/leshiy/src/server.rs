@@ -53,6 +53,38 @@ pub fn ensure_dest_port(dest: &str) -> String {
     }
 }
 
+/// Bind the REALITY/TCP listener. For a v6 wildcard/literal (`[::]`), enable
+/// dual-stack (`IPV6_V6ONLY=false`) so the one socket also accepts IPv4 clients
+/// as v4-mapped; a v4 literal binds v4-only. A non-literal listen string
+/// (hostname) falls back to tokio's resolver bind.
+async fn bind_reality_listener(listen: &str) -> Result<tokio::net::TcpListener> {
+    let addr: std::net::SocketAddr = match listen.parse() {
+        Ok(a) => a,
+        Err(_) => {
+            return tokio::net::TcpListener::bind(listen)
+                .await
+                .with_context(|| format!("bind {listen}"));
+        }
+    };
+    let domain = if addr.is_ipv6() {
+        socket2::Domain::IPV6
+    } else {
+        socket2::Domain::IPV4
+    };
+    let sock = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))
+        .with_context(|| format!("socket {addr}"))?;
+    if addr.is_ipv6() {
+        // Serve IPv4 (v4-mapped) on the same [::] socket.
+        sock.set_only_v6(false).context("set IPV6_V6ONLY(false)")?;
+    }
+    sock.set_reuse_address(true).ok();
+    sock.set_nonblocking(true).context("set_nonblocking")?;
+    sock.bind(&addr.into())
+        .with_context(|| format!("bind {addr}"))?;
+    sock.listen(1024).context("listen")?;
+    tokio::net::TcpListener::from_std(sock.into()).context("listener from_std")
+}
+
 pub fn init(opts: InitOptions<'_>) -> Result<InitOutput> {
     let InitOptions {
         host,
@@ -488,9 +520,7 @@ pub async fn run(config: &str) -> Result<()> {
     };
 
     let cert = Arc::new(ServerCert::generate());
-    let listener = tokio::net::TcpListener::bind(&cfg.listen)
-        .await
-        .with_context(|| format!("bind {}", cfg.listen))?;
+    let listener = bind_reality_listener(&cfg.listen).await?;
 
     // Spawn the control socket alongside the REALITY server.
     let sock_path = cfg
@@ -650,6 +680,40 @@ mod tests {
             advertised_quic_addr("[2001:db8::1]:443", "0.0.0.0:443"),
             "[2001:db8::1]:443"
         );
+    }
+
+    #[tokio::test]
+    async fn bind_reality_listener_v6_is_dual_stack() {
+        let l = bind_reality_listener("[::]:0").await.unwrap();
+        assert!(l.local_addr().unwrap().is_ipv6());
+    }
+
+    #[tokio::test]
+    async fn bind_reality_listener_v4_binds_v4() {
+        let l = bind_reality_listener("127.0.0.1:0").await.unwrap();
+        assert!(l.local_addr().unwrap().is_ipv4());
+    }
+
+    #[tokio::test]
+    async fn bind_reality_listener_v6_accepts_v4_client() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // A dual-stack [::] listener must accept an IPv4 client (v4-mapped), so a
+        // single bind serves both families.
+        let l = bind_reality_listener("[::]:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            let mut b = [0u8; 3];
+            s.read_exact(&mut b).await.unwrap();
+            s.write_all(&b).await.unwrap();
+        });
+        let mut c = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        c.write_all(b"hey").await.unwrap();
+        let mut got = [0u8; 3];
+        c.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"hey");
     }
 
     #[test]
