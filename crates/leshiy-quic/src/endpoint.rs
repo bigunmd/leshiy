@@ -60,7 +60,33 @@ pub fn server_endpoint(
         .map_err(|e| crate::QuicError::Conn(format!("quic server cfg: {e}")))?;
     let mut cfg = ServerConfig::with_crypto(Arc::new(quic_crypto));
     cfg.transport_config(bbr_transport());
-    Endpoint::server(cfg, listen).map_err(Into::into)
+    // Build the UDP socket ourselves so a v6 wildcard is dual-stack (accepts
+    // IPv4 clients as v4-mapped), then hand it to quinn via Endpoint::new.
+    let socket = server_udp_socket(listen)?;
+    let runtime =
+        quinn::default_runtime().ok_or_else(|| crate::QuicError::Conn("no async runtime".into()))?;
+    Endpoint::new(quinn::EndpointConfig::default(), Some(cfg), socket, runtime).map_err(Into::into)
+}
+
+/// Bind the QUIC/UDP server socket. For a v6 wildcard/literal (`[::]`), enable
+/// dual-stack (`IPV6_V6ONLY=false`) so the one socket also serves IPv4 clients as
+/// v4-mapped; a v4 literal binds v4-only.
+fn server_udp_socket(listen: SocketAddr) -> Result<std::net::UdpSocket> {
+    let domain = if listen.is_ipv6() {
+        socket2::Domain::IPV6
+    } else {
+        socket2::Domain::IPV4
+    };
+    let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))
+        .map_err(|e| crate::QuicError::Conn(format!("udp socket: {e}")))?;
+    if listen.is_ipv6() {
+        sock.set_only_v6(false)
+            .map_err(|e| crate::QuicError::Conn(format!("IPV6_V6ONLY(false): {e}")))?;
+    }
+    sock.set_reuse_address(true).ok();
+    sock.bind(&listen.into())
+        .map_err(|e| crate::QuicError::Conn(format!("bind {listen}: {e}")))?;
+    Ok(sock.into())
 }
 
 /// Wildcard client bind matching the family of the QUIC server target: a v4 UDP
@@ -181,6 +207,14 @@ mod tests {
         let v6: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
         assert_eq!(client_bind_wildcard(v4), "0.0.0.0:0".parse().unwrap());
         assert_eq!(client_bind_wildcard(v6), "[::]:0".parse().unwrap());
+    }
+
+    #[test]
+    fn server_udp_socket_matches_family() {
+        let v6 = server_udp_socket("[::]:0".parse().unwrap()).unwrap();
+        assert!(v6.local_addr().unwrap().is_ipv6());
+        let v4 = server_udp_socket("0.0.0.0:0".parse().unwrap()).unwrap();
+        assert!(v4.local_addr().unwrap().is_ipv4());
     }
 
     #[tokio::test]
