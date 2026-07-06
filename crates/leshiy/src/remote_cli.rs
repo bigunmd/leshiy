@@ -169,6 +169,7 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
             sudo,
             sudo_password_stdin,
             dest,
+            dns,
             quic,
             port: cli_port,
             image,
@@ -280,6 +281,7 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                 connector,
                 downstream: downstream_id,
                 sudo: use_sudo,
+                dns_override: dns,
             };
 
             let mut transport = RusshTransport::new();
