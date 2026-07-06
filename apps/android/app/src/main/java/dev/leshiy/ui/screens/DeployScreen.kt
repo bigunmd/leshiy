@@ -22,6 +22,7 @@ import dev.leshiy.ui.components.PanelCard
 import dev.leshiy.ui.components.PrimaryButton
 import dev.leshiy.ui.components.ScreenFrame
 import dev.leshiy.ui.components.SectionLabel
+import dev.leshiy.ui.i18n.LocalStrings
 import dev.leshiy.ui.theme.Dim
 import dev.leshiy.ui.theme.PlexMono
 import dev.leshiy.ui.theme.Warn
@@ -32,6 +33,7 @@ fun DeployScreen(
     onProvisioned: (String, String) -> Unit,
     onBack: () -> Unit,
 ) {
+    val s = LocalStrings.current
     val state by vm.state.collectAsStateWithLifecycle()
     var host by remember { mutableStateOf("") }
     var user by remember { mutableStateOf("root") }
@@ -39,27 +41,27 @@ fun DeployScreen(
     var dest by remember { mutableStateOf("www.microsoft.com:443") }
     var port by remember { mutableStateOf("443") }
 
-    ScreenFrame("Deploy a server", onBack = onBack) {
+    ScreenFrame(s.deploy, onBack = onBack) {
         Column(
             modifier = Modifier.verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                "Provision a fresh VPS into a leshiy server over SSH. You'll need root (or sudo) access.",
+                s.deployIntro,
                 style = MaterialTheme.typography.labelSmall,
                 color = Dim,
             )
-            SectionLabel("Target")
-            Field(host, { host = it }, "VPS host or IP")
-            Field(user, { user = it }, "SSH user")
-            Field(password, { password = it }, "SSH password")
+            SectionLabel(s.target)
+            Field(host, { host = it }, s.vpsHost)
+            Field(user, { user = it }, s.sshUser)
+            Field(password, { password = it }, s.sshPassword)
 
-            SectionLabel("Camouflage")
-            Field(dest, { dest = it }, "Borrowed TLS site (host:port)")
-            Field(port, { port = it }, "REALITY port")
+            SectionLabel(s.camouflage)
+            Field(dest, { dest = it }, s.borrowedSite)
+            Field(port, { port = it }, s.realityPort)
 
             PrimaryButton(
-                text = if (state.running) "Provisioning…" else "Provision server",
+                text = if (state.running) s.provisioning else s.provision,
                 onClick = {
                     vm.provision(host, user, password, dest, port.toIntOrNull() ?: 443) { uri ->
                         onProvisioned(uri, host.trim())
@@ -74,7 +76,7 @@ fun DeployScreen(
             }
 
             if (state.log.isNotEmpty()) {
-                SectionLabel("Progress")
+                SectionLabel(s.progress)
                 PanelCard {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         state.log.forEach { line ->

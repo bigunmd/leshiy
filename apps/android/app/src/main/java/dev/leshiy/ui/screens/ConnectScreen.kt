@@ -28,6 +28,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.leshiy.ui.components.ConnectOrb
 import dev.leshiy.ui.components.IconBtn
 import dev.leshiy.ui.formatBytes
+import dev.leshiy.ui.i18n.LocalStrings
 import dev.leshiy.ui.icons.LeshiyIcons
 import dev.leshiy.ui.theme.ChipText
 import dev.leshiy.ui.theme.Dim
@@ -96,7 +97,7 @@ fun ConnectScreen(
             Spacer(Modifier.size(10.dp))
             if (active == null) {
                 Text(
-                    "no server selected",
+                    LocalStrings.current.noServerSelected,
                     fontFamily = PlexMono,
                     fontSize = 10.sp,
                     letterSpacing = 2.sp,
@@ -112,12 +113,13 @@ fun ConnectScreen(
 
 @Composable
 private fun StatusReadout(state: ConnState, up: ULong, down: ULong) {
+    val s = LocalStrings.current
     val label = when (state) {
-        ConnState.CONNECTED -> "protected"
-        ConnState.CONNECTING -> "connecting"
-        ConnState.RECONNECTING -> "reconnecting"
-        ConnState.FAILED -> "error"
-        ConnState.DISCONNECTED -> "disconnected"
+        ConnState.CONNECTED -> s.stProtected
+        ConnState.CONNECTING -> s.stConnecting
+        ConnState.RECONNECTING -> s.stReconnecting
+        ConnState.FAILED -> s.stError
+        ConnState.DISCONNECTED -> s.stDisconnected
     }
     val color = when (state) {
         ConnState.CONNECTED, ConnState.CONNECTING, ConnState.RECONNECTING -> WispBright
@@ -162,7 +164,7 @@ private fun ServerChip(name: String?, onClick: () -> Unit) {
             ) {
                 Icon(LeshiyIcons.Wisp, null, tint = Wisp, modifier = Modifier.size(14.dp))
                 Text(
-                    name ?: "Choose a server",
+                    name ?: LocalStrings.current.chooseServer,
                     fontSize = 13.sp,
                     color = if (name != null) ChipText else Dim,
                 )
@@ -170,7 +172,7 @@ private fun ServerChip(name: String?, onClick: () -> Unit) {
             }
         }
         Text(
-            "manage servers ›",
+            LocalStrings.current.manageServersLink,
             fontFamily = PlexMono,
             fontSize = 10.sp,
             letterSpacing = 2.sp,

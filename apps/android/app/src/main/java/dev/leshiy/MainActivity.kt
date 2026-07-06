@@ -10,10 +10,12 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -26,6 +28,9 @@ import dev.leshiy.ui.ProvisionViewModel
 import dev.leshiy.ui.QrScanActivity
 import dev.leshiy.ui.SplitViewModel
 import dev.leshiy.ui.components.Atmosphere
+import dev.leshiy.ui.i18n.LangState
+import dev.leshiy.ui.i18n.LocalStrings
+import dev.leshiy.ui.i18n.stringsFor
 import dev.leshiy.ui.screens.ConnectScreen
 import dev.leshiy.ui.screens.DeployScreen
 import dev.leshiy.ui.screens.ManageScreen
@@ -46,11 +51,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        LangState.init(this)
         enableEdgeToEdge()
         setContent {
-            LeshiyTheme {
-                Atmosphere {
-                    AppNav(onConnect = ::connect, onDisconnect = ::disconnect)
+            val lang by LangState.lang.collectAsStateWithLifecycle()
+            CompositionLocalProvider(LocalStrings provides stringsFor(lang)) {
+                LeshiyTheme {
+                    Atmosphere {
+                        AppNav(onConnect = ::connect, onDisconnect = ::disconnect)
+                    }
                 }
             }
         }
