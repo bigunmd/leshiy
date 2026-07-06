@@ -17,6 +17,8 @@ pub struct WindowsOps;
 
 #[async_trait::async_trait]
 impl PrivilegedOps for WindowsOps {
+    const CARRIES_V6: bool = true;
+
     async fn start(
         &self,
         tun_name: &str,
@@ -26,17 +28,13 @@ impl PrivilegedOps for WindowsOps {
         force_dns: bool,
         ipv6_killswitch: bool,
     ) -> std::io::Result<TunSession> {
-        // MVP carries IPv4 through the tunnel.
+        // The Wintun adapter always carries an IPv4 address; IPv6 is dual-stacked on top when
+        // `plan.tun_addr6` is set (else it stays fail-closed by disabling v6 on the NIC). The
+        // server exception may be v6 (v6-reached server); net_route handles both families.
         let IpAddr::V4(tun4) = plan.tun_addr else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "tun_addr must be IPv4 in this phase",
-            ));
-        };
-        let IpAddr::V4(_) = plan.server_exception.gateway else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "server exception gateway must be IPv4 in this phase",
+                "tun_addr must be IPv4",
             ));
         };
 
@@ -60,6 +58,23 @@ impl PrivilegedOps for WindowsOps {
         })?;
         let iface = device.tun_name().map_err(to_io)?;
 
+        // Dual-stack: add the IPv6 address to the adapter so IPv6 can ride the tunnel. Best-effort
+        // — if it fails we fall closed to disabling v6 on the NIC (below) instead of leaking v6.
+        let carry_v6 = match plan.tun_addr6 {
+            Some(IpAddr::V6(v6)) => {
+                let args = cmd::win_v6_addr_add_args(&iface, &v6.to_string());
+                let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+                match cmd::run(NETSH, &argv) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::error!(%v6, "failed to assign IPv6 adapter address ({e}); failing closed");
+                        false
+                    }
+                }
+            }
+            _ => false,
+        };
+
         // 2. Routes: server host-exception FIRST via the original gateway, then the
         //    default-override halves via the tun interface. Prefer net-route; fall back
         //    to netsh by interface name.
@@ -76,8 +91,11 @@ impl PrivilegedOps for WindowsOps {
             .flatten()
             .and_then(|r| r.ifindex);
         let exc = &plan.server_exception;
-        let exc_route = gateway_route(exc.dest.addr, exc.dest.prefix, exc.gateway, orig_idx);
-        if handle.add(&exc_route).await.is_err() {
+        // Attach the v4 egress ifindex only for a v4 exception; let the OS pick for v6.
+        let exc_idx = if exc.dest.addr.is_ipv4() { orig_idx } else { None };
+        let exc_route = gateway_route(exc.dest.addr, exc.dest.prefix, exc.gateway, exc_idx);
+        if handle.add(&exc_route).await.is_err() && exc.dest.addr.is_ipv4() {
+            // netsh fallback is v4 (ipv4) syntax only; net_route handles the v6 exception.
             let args = cmd::win_route_add_via_gateway_args(
                 &format!("{}/{}", exc.dest.addr, exc.dest.prefix),
                 &exc.gateway.to_string(),
@@ -93,11 +111,13 @@ impl PrivilegedOps for WindowsOps {
         // netsh by name. Best-effort: a bad/duplicate route in a list must not fail the session.
         let tun_idx = device.tun_index().ok().map(|i| i as u32);
         for c in &plan.via_tun {
-            let IpAddr::V4(_) = c.addr else {
-                continue; // IPv4-only this phase; skip an Include IPv6 CIDR.
-            };
-            // Route through the Wintun adapter by ifindex, or via its own on-link address if
-            // the index is unknown — always net_route (never a netsh subprocess per route).
+            // A v6 via-tun route needs IPv6 carried AND the adapter ifindex (the v4-gateway
+            // fallback can't carry v6); otherwise skip it.
+            if c.addr.is_ipv6() && (!carry_v6 || tun_idx.is_none()) {
+                continue;
+            }
+            // Route through the Wintun adapter by ifindex (both families), or via its own on-link
+            // v4 address if the index is unknown — always net_route (never a netsh subprocess).
             let route = match tun_idx {
                 Some(idx) => Route::new(c.addr, c.prefix).with_ifindex(idx),
                 None => Route::new(c.addr, c.prefix).with_gateway(IpAddr::V4(tun4)),
@@ -112,16 +132,13 @@ impl PrivilegedOps for WindowsOps {
         let gateway = plan.server_exception.gateway.to_string();
         let installed_bypass: Arc<Mutex<Vec<Cidr>>> = Arc::new(Mutex::new(Vec::new()));
         for b in &plan.bypass {
-            let IpAddr::V4(_) = b.dest.addr else {
+            // A v6 bypass needs IPv6 carried; otherwise skip (it then rides the tunnel — safe).
+            if b.dest.addr.is_ipv6() && !carry_v6 {
                 continue;
-            };
+            }
+            let idx = if b.dest.addr.is_ipv4() { orig_idx } else { None };
             let _ = handle
-                .add(&gateway_route(
-                    b.dest.addr,
-                    b.dest.prefix,
-                    b.gateway,
-                    orig_idx,
-                ))
+                .add(&gateway_route(b.dest.addr, b.dest.prefix, b.gateway, idx))
                 .await; // best-effort, fast (IP Helper API)
             installed_bypass.lock().unwrap().push(b.dest.clone());
         }
@@ -156,8 +173,11 @@ impl PrivilegedOps for WindowsOps {
 
         // 4. IPv6 leak mitigation (fail-closed): disable IPv6 binding on the original
         //    interface; restore on drop. Skipped in Include mode. (Full IPv6 is out of scope.)
+        // Applied when the caller asked (IPv4-only session) OR when we meant to carry v6 but
+        // couldn't assign the address. Skipped when v6 is genuinely carried, and in Include mode.
+        let apply_v6off = ipv6_killswitch || (plan.tun_addr6.is_some() && !carry_v6);
         let mut v6_disabled_iface = None;
-        if ipv6_killswitch && let Some(name) = &orig_iface {
+        if apply_v6off && let Some(name) = &orig_iface {
             let _ = cmd::run(
                 NETSH,
                 &["interface", "ipv6", "set", "interface", name, "disabled"],
@@ -171,6 +191,7 @@ impl PrivilegedOps for WindowsOps {
             tun_addr: tun4,
             gateway: plan.server_exception.gateway,
             orig_idx,
+            carry_v6,
             installed_bypass: installed_bypass.clone(),
         });
         let guard = WindowsTeardown {
@@ -201,6 +222,8 @@ struct WindowsController {
     gateway: IpAddr,
     /// Physical NIC ifindex — required for net_route to install a gateway route on Windows.
     orig_idx: Option<u32>,
+    /// Whether IPv6 is carried this session (gates resolved v6 domain via-tun routes).
+    carry_v6: bool,
     installed_bypass: Arc<Mutex<Vec<Cidr>>>,
 }
 
@@ -244,15 +267,17 @@ impl RouteController for WindowsController {
         Ok(())
     }
     async fn add_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
-        let IpAddr::V4(_) = c.addr else {
+        // A v6 via-tun route needs IPv6 carried AND the adapter ifindex (the v4-gateway fallback
+        // route can't carry v6); otherwise skip it.
+        if c.addr.is_ipv6() && (!self.carry_v6 || self.tun_idx.is_none()) {
             return Ok(());
-        };
+        }
         self.handle.add(&self.via_tun_route(c)).await
     }
     async fn remove_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
-        let IpAddr::V4(_) = c.addr else {
+        if c.addr.is_ipv6() && (!self.carry_v6 || self.tun_idx.is_none()) {
             return Ok(());
-        };
+        }
         let _ = self.handle.delete(&self.via_tun_route(c)).await;
         Ok(())
     }
