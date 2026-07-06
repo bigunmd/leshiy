@@ -21,10 +21,18 @@ pub struct TunConfig {
     /// TUN MTU — kept below the transport's to absorb TLS + mux framing overhead.
     pub mtu: u16,
     pub tun_addr: IpAddr,
+    /// IPv6 address for the TUN interface. `Some` carries IPv6 *through* the tunnel
+    /// (dual-stack); `None` keeps the session IPv4-only with the v6 kill-switch. Best-effort
+    /// on the host side — a backend that can't assign it fails closed to the kill-switch.
+    pub tun_addr6: Option<IpAddr>,
     /// The VPN server's own IP (excepted from the tunnel to avoid a routing loop).
     pub server_ip: IpAddr,
-    /// The original default gateway, captured before routes are changed.
+    /// The original default gateway (server-family), captured before routes are changed.
     pub orig_gateway: IpAddr,
+    /// The original IPv6 default gateway, for routing IPv6 split-tunnel excludes (bypass) around
+    /// the tunnel when the server is reached over IPv4. `None` = no v6 gateway (v6 excludes then
+    /// ride the tunnel).
+    pub orig_gateway6: Option<IpAddr>,
     /// DNS resolver(s) forced while the tunnel is up (queries ride the tunnel).
     pub dns: Vec<IpAddr>,
     /// Two-directional split-tunnel plan (manual rules + subscriptions, merged). Empty (the
@@ -38,8 +46,13 @@ impl Default for TunConfig {
             tun_name: "leshiy0".into(),
             mtu: 1400,
             tun_addr: "10.71.0.2".parse().unwrap(),
+            // Dual-stack by default: a ULA on the TUN so IPv6 rides the tunnel. Backends that
+            // don't carry v6 (Windows/Android/stub) zero this in the engine via CARRIES_V6 and
+            // fail closed to the kill-switch, so this default is safe on every platform.
+            tun_addr6: Some("fd00:71::2".parse().unwrap()),
             server_ip: "0.0.0.0".parse().unwrap(),
             orig_gateway: "0.0.0.0".parse().unwrap(),
+            orig_gateway6: None,
             dns: vec!["1.1.1.1".parse().unwrap()],
             split: leshiy_client::SplitPlan::default(),
         }
@@ -54,19 +67,20 @@ impl TunConfig {
         matches!(self.split.base_mode, leshiy_client::SplitMode::Exclude)
     }
 
-    /// Apply the IPv6 fail-closed kill-switch? Same rationale as [`force_dns`](Self::force_dns):
-    /// under an Include base the un-tunneled majority (incl. IPv6) must stay reachable.
+    /// Apply the IPv6 fail-closed kill-switch? Only when we are **not** carrying IPv6 through
+    /// the tunnel (`tun_addr6` is `None`) AND the base mode tunnels the default route (Exclude).
+    /// With a v6 TUN address, IPv6 rides the tunnel via the `::/1` override, so killing it would
+    /// break connectivity; under an Include base the un-tunneled majority must stay reachable.
     pub fn ipv6_killswitch(&self) -> bool {
-        matches!(self.split.base_mode, leshiy_client::SplitMode::Exclude)
+        self.tun_addr6.is_none() && matches!(self.split.base_mode, leshiy_client::SplitMode::Exclude)
     }
 }
 
-/// Format a destination as the `host:port` target the egress expects.
+/// Format a destination as the `host:port` target the egress expects. `SocketAddr`'s Display
+/// brackets IPv6 correctly (`[2001:db8::1]:443`), which the egress/resolver parse; the old V6
+/// arm emitted an unbracketed, unresolvable `2001:db8::1:443`.
 pub(crate) fn target_of(dst: SocketAddr) -> String {
-    match dst {
-        SocketAddr::V4(_) => dst.to_string(),
-        SocketAddr::V6(a) => format!("{}:{}", a.ip(), a.port()),
-    }
+    dst.to_string()
 }
 
 /// Idle timeout for a UDP association (no teardown signal on UDP). Kept short so an
@@ -102,6 +116,13 @@ impl TunEngine {
         counters: Arc<ByteCounters>,
         cancel: Arc<Notify>,
     ) -> std::io::Result<()> {
+        // Platforms whose backend doesn't carry IPv6 (Windows/Android/stub, for now) must not
+        // leave a v6 TUN address set — otherwise the kill-switch would be skipped and v6 would
+        // leak around a v6-unaware backend. Zero it here so those platforms fail closed.
+        let mut cfg = cfg;
+        if !<PlatformOps as PrivilegedOps>::CARRIES_V6 {
+            cfg.tun_addr6 = None;
+        }
         // Drop provably-redundant rules (e.g. Include rules under an Exclude base with no
         // excludes are already tunneled) before installing routes / resolving domains.
         let (eff_include, eff_exclude) = cfg.split.effective();
@@ -115,7 +136,9 @@ impl TunEngine {
             &exclude_cidrs,
             cfg.server_ip,
             cfg.orig_gateway,
+            cfg.orig_gateway6,
             cfg.tun_addr,
+            cfg.tun_addr6,
         )
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
         // Large rule sets bloat the routing table — and on macOS/Windows each route is a
@@ -327,6 +350,12 @@ mod tests {
     }
 
     #[test]
+    fn target_string_ipv6_is_bracketed() {
+        let dst: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+        assert_eq!(target_of(dst), "[2001:db8::1]:443");
+    }
+
+    #[test]
     fn default_mtu_is_1400() {
         assert_eq!(TunConfig::default().mtu, 1400);
     }
@@ -339,9 +368,20 @@ mod tests {
     }
 
     #[test]
-    fn exclude_mode_keeps_dns_and_ipv6_killswitch() {
-        let c = TunConfig::default(); // default mode is Exclude
+    fn dual_stack_default_forces_dns_but_not_killswitch() {
+        // Default is Exclude + dual-stack (tun_addr6 Some): DNS forced, IPv6 carried (not killed).
+        let c = TunConfig::default();
         assert!(c.force_dns());
+        assert!(!c.ipv6_killswitch());
+    }
+
+    #[test]
+    fn ipv4_only_applies_killswitch() {
+        // Without a v6 TUN address, IPv6 is fail-closed under an Exclude base.
+        let c = TunConfig {
+            tun_addr6: None,
+            ..TunConfig::default()
+        };
         assert!(c.ipv6_killswitch());
     }
 

@@ -1855,7 +1855,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "leshiy"
-version = "1.6.4"
+version = "1.7.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -1879,6 +1879,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "socket2 0.5.10",
  "terminal_size",
  "tokio",
  "tokio-rustls",
@@ -1892,7 +1893,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-client"
-version = "1.6.4"
+version = "1.7.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1917,7 +1918,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-core"
-version = "1.6.4"
+version = "1.7.0"
 dependencies = [
  "bytes",
  "proptest",
@@ -1930,7 +1931,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-helper"
-version = "1.6.4"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1950,7 +1951,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-mobile"
-version = "1.6.4"
+version = "1.7.0"
 dependencies = [
  "leshiy-client",
  "leshiy-provision",
@@ -1965,7 +1966,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-provision"
-version = "1.6.4"
+version = "1.7.0"
 dependencies = [
  "argon2 0.5.3",
  "async-trait",
@@ -1984,7 +1985,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-quic"
-version = "1.6.4"
+version = "1.7.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1997,6 +1998,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "sha2 0.10.9",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
@@ -2007,7 +2009,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-reality"
-version = "1.6.4"
+version = "1.7.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "async-trait",
@@ -2038,7 +2040,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-tls"
-version = "1.6.4"
+version = "1.7.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "chacha20poly1305",
@@ -2059,7 +2061,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-tun"
-version = "1.6.4"
+version = "1.7.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2844,7 +2846,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2884,7 +2886,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2",
+ "socket2 0.6.4",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -3694,6 +3696,16 @@ dependencies = [
 
 [[package]]
 name = "socket2"
+version = "0.5.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "socket2"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
@@ -3951,7 +3963,7 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
- "socket2",
+ "socket2 0.6.4",
  "tokio-macros",
  "windows-sys 0.61.2",
 ]

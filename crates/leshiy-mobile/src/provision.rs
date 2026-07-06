@@ -66,6 +66,8 @@ pub fn build_params(cfg: &ProvisionConfig, now: u64) -> ProvisionParams {
         connector: None,
         downstream: None,
         sudo: cfg.sudo_password.is_some(),
+        // Let the server detect its host DNS (public fallback); no operator override on mobile.
+        dns_override: None,
     }
 }
 

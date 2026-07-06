@@ -383,6 +383,11 @@ pub enum RemoteCmd {
         /// Borrowed TLS site for REALITY, host:port.
         #[arg(long)]
         dest: String,
+        /// Override the container's DNS resolver (a bare IPv4/IPv6 literal). By
+        /// default the host's IPv4 upstream is detected and a public IPv4 fallback
+        /// is added; set this only for split-horizon/private-resolver hosts.
+        #[arg(long)]
+        dns: Option<String>,
         /// REALITY/TCP external listen port (default 443).
         #[arg(long, default_value_t = 443)]
         port: u16,

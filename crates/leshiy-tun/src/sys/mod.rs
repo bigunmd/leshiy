@@ -73,6 +73,13 @@ pub struct TunSession {
 
 #[async_trait::async_trait]
 pub trait PrivilegedOps: Send + Sync {
+    /// Whether this backend actually carries IPv6 *through* the tunnel (assigns a v6 TUN
+    /// address and installs v6 routes). Defaults to `false`: a backend that hasn't implemented
+    /// v6 leaves it here, and the engine then zeroes `tun_addr6` so IPv6 is fail-closed by the
+    /// kill-switch instead of leaking around a v6-unaware backend. Overridden to `true` by
+    /// backends that carry v6 (Linux, macOS).
+    const CARRIES_V6: bool = false;
+
     /// Create + configure the TUN device, apply the route plan + DNS + IPv6 policy, and
     /// return a session whose drop restores the prior network state.
     ///

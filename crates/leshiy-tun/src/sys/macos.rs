@@ -19,11 +19,14 @@ use tun::AbstractDevice; // brings `tun_name()` into scope for the utun device
 
 const NETWORKSETUP: &str = "/usr/sbin/networksetup";
 const ROUTE: &str = "/sbin/route";
+const IFCONFIG: &str = "/sbin/ifconfig";
 
 pub struct MacOsOps;
 
 #[async_trait::async_trait]
 impl PrivilegedOps for MacOsOps {
+    const CARRIES_V6: bool = true;
+
     async fn start(
         &self,
         tun_name: &str,
@@ -33,11 +36,12 @@ impl PrivilegedOps for MacOsOps {
         force_dns: bool,
         ipv6_killswitch: bool,
     ) -> std::io::Result<TunSession> {
-        // MVP carries IPv4 through the tunnel; IPv6 is disabled below (fail-closed).
+        // The utun always carries an IPv4 address; IPv6 is dual-stacked on top when
+        // `plan.tun_addr6` is set (else it stays fail-closed via `-setv6off`).
         let IpAddr::V4(tun4) = plan.tun_addr else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "tun_addr must be IPv4 in this phase",
+                "tun_addr must be IPv4",
             ));
         };
 
@@ -54,6 +58,23 @@ impl PrivilegedOps for MacOsOps {
         // Read back the real interface name (e.g. "utun7") for `route -interface`.
         let iface = device.tun_name().map_err(to_io)?;
 
+        // Dual-stack: add the IPv6 address to the utun so IPv6 can ride the tunnel. Best-effort —
+        // if it fails we fall closed to `-setv6off` (below) instead of leaking v6.
+        let carry_v6 = match plan.tun_addr6 {
+            Some(IpAddr::V6(v6)) => {
+                let args = cmd::mac_ifconfig_v6_add_args(&iface, &v6.to_string());
+                let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+                match cmd::run(IFCONFIG, &argv) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::error!(%v6, "failed to assign IPv6 utun address ({e}); failing closed to -setv6off");
+                        false
+                    }
+                }
+            }
+            _ => false,
+        };
+
         // 2. Routes: server host-exception FIRST (escape the tunnel via the original
         //    gateway), then the default-override halves via the utun interface.
         let handle = Handle::new()?;
@@ -66,9 +87,11 @@ impl PrivilegedOps for MacOsOps {
             .flatten()
             .and_then(|r| r.ifindex);
         let exc = &plan.server_exception;
-        let exc_route = gateway_route(exc.dest.addr, exc.dest.prefix, exc.gateway, orig_idx);
-        if handle.add(&exc_route).await.is_err() {
-            // Fallback to BSD `route` if net-route's gateway add is rejected.
+        // Attach the v4 egress ifindex only for a v4 exception; let the OS pick for v6.
+        let exc_idx = if exc.dest.addr.is_ipv4() { orig_idx } else { None };
+        let exc_route = gateway_route(exc.dest.addr, exc.dest.prefix, exc.gateway, exc_idx);
+        if handle.add(&exc_route).await.is_err() && exc.dest.addr.is_ipv4() {
+            // Fallback to BSD `route` if net-route's gateway add is rejected (v4 syntax only).
             let args = cmd::mac_route_add_via_gateway_args(
                 &exc.dest.addr.to_string(),
                 exc.dest.prefix,
@@ -84,22 +107,26 @@ impl PrivilegedOps for MacOsOps {
         // Best-effort: a bad/duplicate route in a list must not fail the session.
         let tun_idx = device.tun_index().ok().map(|i| i as u32);
         for c in &plan.via_tun {
-            // IPv4-only this phase; skip an Include IPv6 CIDR rather than erroring.
-            let IpAddr::V4(_) = c.addr else {
+            // Skip an IPv6 via-tun route unless IPv6 is carried this session.
+            if c.addr.is_ipv6() && !carry_v6 {
                 continue;
-            };
+            }
             match tun_idx {
+                // net_route handles both families through the utun by ifindex.
                 Some(idx) => {
                     let _ = handle
                         .add(&Route::new(c.addr, c.prefix).with_ifindex(idx))
                         .await;
                 }
-                None => {
+                // Fallback `route` builder is v4 syntax only; a v6 route without an ifindex is
+                // skipped (tun_idx is essentially always present).
+                None if c.addr.is_ipv4() => {
                     let args =
                         cmd::mac_route_add_via_iface_args(&c.addr.to_string(), c.prefix, &iface);
                     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
                     let _ = cmd::run(ROUTE, &argv);
                 }
+                None => {}
             }
         }
 
@@ -108,16 +135,13 @@ impl PrivilegedOps for MacOsOps {
         //     routes persist after the utun drops, so they're deleted explicitly.
         let installed_bypass: Arc<Mutex<Vec<Cidr>>> = Arc::new(Mutex::new(Vec::new()));
         for b in &plan.bypass {
-            let IpAddr::V4(_) = b.dest.addr else {
+            // A v6 bypass needs IPv6 carried; otherwise skip (it then rides the tunnel — safe).
+            if b.dest.addr.is_ipv6() && !carry_v6 {
                 continue;
-            };
+            }
+            let idx = if b.dest.addr.is_ipv4() { orig_idx } else { None };
             let _ = handle
-                .add(&gateway_route(
-                    b.dest.addr,
-                    b.dest.prefix,
-                    b.gateway,
-                    orig_idx,
-                ))
+                .add(&gateway_route(b.dest.addr, b.dest.prefix, b.gateway, idx))
                 .await; // best-effort, fast (PF_ROUTE socket)
             installed_bypass.lock().unwrap().push(b.dest.clone());
         }
@@ -137,9 +161,12 @@ impl PrivilegedOps for MacOsOps {
         }
 
         // 4. IPv6 leak mitigation (fail-closed): turn IPv6 off on each service; restore to
-        //    automatic on drop. Skipped in Include mode. Full IPv6 tunnelling is out of scope.
+        //    automatic on drop. Applied when the caller asked (IPv4-only session) OR when we
+        //    meant to carry v6 but couldn't assign the address. Skipped when v6 is genuinely
+        //    carried, and in Include mode.
+        let apply_v6off = ipv6_killswitch || (plan.tun_addr6.is_some() && !carry_v6);
         let mut v6_services: Vec<String> = Vec::new();
-        if ipv6_killswitch {
+        if apply_v6off {
             for svc in &services {
                 if cmd::run(NETWORKSETUP, &["-setv6off", svc]).is_ok() {
                     v6_services.push(svc.clone());
@@ -153,6 +180,7 @@ impl PrivilegedOps for MacOsOps {
             tun_addr: tun4,
             gateway: plan.server_exception.gateway,
             orig_idx,
+            carry_v6,
             installed_bypass: installed_bypass.clone(),
         });
         let guard = MacOsTeardown {
@@ -179,6 +207,8 @@ struct MacOsController {
     tun_addr: std::net::Ipv4Addr,
     gateway: IpAddr,
     orig_idx: Option<u32>,
+    /// Whether IPv6 is carried this session (gates resolved v6 domain via-tun routes).
+    carry_v6: bool,
     installed_bypass: Arc<Mutex<Vec<Cidr>>>,
 }
 
@@ -222,15 +252,17 @@ impl RouteController for MacOsController {
         Ok(())
     }
     async fn add_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
-        let IpAddr::V4(_) = c.addr else {
+        // A v6 via-tun route needs IPv6 carried AND the utun ifindex (the v4-gateway fallback
+        // route can't carry v6); otherwise skip it.
+        if c.addr.is_ipv6() && (!self.carry_v6 || self.tun_idx.is_none()) {
             return Ok(());
-        };
+        }
         self.handle.add(&self.via_tun_route(c)).await
     }
     async fn remove_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
-        let IpAddr::V4(_) = c.addr else {
+        if c.addr.is_ipv6() && (!self.carry_v6 || self.tun_idx.is_none()) {
             return Ok(());
-        };
+        }
         let _ = self.handle.delete(&self.via_tun_route(c)).await;
         Ok(())
     }

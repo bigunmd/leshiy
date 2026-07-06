@@ -47,10 +47,40 @@ pub struct InitOptions<'a> {
 /// would fail to connect and break every handshake. Hostnames never contain a
 /// `:`, so "has a numeric suffix after the last `:`" reliably detects a port.
 pub fn ensure_dest_port(dest: &str) -> String {
-    match dest.rsplit_once(':') {
-        Some((_, p)) if p.parse::<u16>().is_ok() => dest.to_string(),
-        _ => format!("{dest}:443"),
+    // Bracket-aware so a bare IPv6 `dest` becomes `[v6]:443`, not `v6:443`.
+    leshiy_reality::addr::ensure_port(dest, 443)
+}
+
+/// Bind the REALITY/TCP listener. For a v6 wildcard/literal (`[::]`), enable
+/// dual-stack (`IPV6_V6ONLY=false`) so the one socket also accepts IPv4 clients
+/// as v4-mapped; a v4 literal binds v4-only. A non-literal listen string
+/// (hostname) falls back to tokio's resolver bind.
+async fn bind_reality_listener(listen: &str) -> Result<tokio::net::TcpListener> {
+    let addr: std::net::SocketAddr = match listen.parse() {
+        Ok(a) => a,
+        Err(_) => {
+            return tokio::net::TcpListener::bind(listen)
+                .await
+                .with_context(|| format!("bind {listen}"));
+        }
+    };
+    let domain = if addr.is_ipv6() {
+        socket2::Domain::IPV6
+    } else {
+        socket2::Domain::IPV4
+    };
+    let sock = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))
+        .with_context(|| format!("socket {addr}"))?;
+    if addr.is_ipv6() {
+        // Serve IPv4 (v4-mapped) on the same [::] socket.
+        sock.set_only_v6(false).context("set IPV6_V6ONLY(false)")?;
     }
+    sock.set_reuse_address(true).ok();
+    sock.set_nonblocking(true).context("set_nonblocking")?;
+    sock.bind(&addr.into())
+        .with_context(|| format!("bind {addr}"))?;
+    sock.listen(1024).context("listen")?;
+    tokio::net::TcpListener::from_std(sock.into()).context("listener from_std")
 }
 
 pub fn init(opts: InitOptions<'_>) -> Result<InitOutput> {
@@ -390,21 +420,37 @@ pub async fn run(config: &str) -> Result<()> {
                 Some(p) => leshiy_quic::endpoint::CertVerification::Pinned(p),
                 None => leshiy_quic::endpoint::CertVerification::Roots,
             };
-            let addr = tokio::net::lookup_host(&q.addr)
-                .await?
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("resolve connector addr {}", q.addr))?;
+            let addrs: Vec<std::net::SocketAddr> =
+                tokio::net::lookup_host(&q.addr).await?.collect();
+            if addrs.is_empty() {
+                return Err(anyhow::anyhow!("resolve connector addr {}", q.addr));
+            }
             tracing::info!(exit = %q.addr, "connector enabled");
-            Arc::new(
-                leshiy_quic::connector::ConnectorEgress::connect(
+            // Try each resolved address (e.g. AAAA then A) until the exit connects, so a
+            // leading unreachable address doesn't fail the whole connector chain.
+            let mut egress = None;
+            let mut last_err = None;
+            for addr in addrs {
+                match leshiy_quic::connector::ConnectorEgress::connect(
                     addr,
                     &q.sni,
                     u.client.short_id,
-                    v,
+                    v.clone(),
                 )
                 .await
-                .context("connect to exit")?,
-            ) as Arc<dyn Egress>
+                {
+                    Ok(c) => {
+                        egress = Some(c);
+                        break;
+                    }
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            Arc::new(egress.ok_or_else(|| {
+                last_err
+                    .map(|e| anyhow::anyhow!("connect to exit: {e}"))
+                    .unwrap_or_else(|| anyhow::anyhow!("connect to exit"))
+            })?) as Arc<dyn Egress>
         }
         None => {
             if cfg.allow_private_egress {
@@ -488,9 +534,7 @@ pub async fn run(config: &str) -> Result<()> {
     };
 
     let cert = Arc::new(ServerCert::generate());
-    let listener = tokio::net::TcpListener::bind(&cfg.listen)
-        .await
-        .with_context(|| format!("bind {}", cfg.listen))?;
+    let listener = bind_reality_listener(&cfg.listen).await?;
 
     // Spawn the control socket alongside the REALITY server.
     let sock_path = cfg
@@ -542,6 +586,15 @@ mod boot_tests {
         assert_eq!(
             super::ensure_dest_port("example.com:443"),
             "example.com:443"
+        );
+        // Bare IPv6 literal is bracketed before the port is appended.
+        assert_eq!(
+            super::ensure_dest_port("2001:db8::1"),
+            "[2001:db8::1]:443"
+        );
+        assert_eq!(
+            super::ensure_dest_port("[2001:db8::1]:8443"),
+            "[2001:db8::1]:8443"
         );
     }
 
@@ -650,6 +703,40 @@ mod tests {
             advertised_quic_addr("[2001:db8::1]:443", "0.0.0.0:443"),
             "[2001:db8::1]:443"
         );
+    }
+
+    #[tokio::test]
+    async fn bind_reality_listener_v6_is_dual_stack() {
+        let l = bind_reality_listener("[::]:0").await.unwrap();
+        assert!(l.local_addr().unwrap().is_ipv6());
+    }
+
+    #[tokio::test]
+    async fn bind_reality_listener_v4_binds_v4() {
+        let l = bind_reality_listener("127.0.0.1:0").await.unwrap();
+        assert!(l.local_addr().unwrap().is_ipv4());
+    }
+
+    #[tokio::test]
+    async fn bind_reality_listener_v6_accepts_v4_client() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // A dual-stack [::] listener must accept an IPv4 client (v4-mapped), so a
+        // single bind serves both families.
+        let l = bind_reality_listener("[::]:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            let mut b = [0u8; 3];
+            s.read_exact(&mut b).await.unwrap();
+            s.write_all(&b).await.unwrap();
+        });
+        let mut c = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        c.write_all(b"hey").await.unwrap();
+        let mut got = [0u8; 3];
+        c.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"hey");
     }
 
     #[test]

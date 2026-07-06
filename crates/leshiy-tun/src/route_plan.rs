@@ -39,12 +39,17 @@ pub struct ServerException {
 /// The full set of routing changes for a session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoutePlan {
+    /// IPv4 address assigned to the TUN interface.
     pub tun_addr: IpAddr,
+    /// IPv6 address for the TUN interface. `Some` enables dual-stack: IPv6 is carried
+    /// *through* the tunnel (the `::/1`+`8000::/1` override is added under an Exclude
+    /// base) instead of being fail-closed by the kill-switch. `None` = IPv4-only tunnel.
+    pub tun_addr6: Option<IpAddr>,
     pub via_tun: Vec<Cidr>,
     pub server_exception: ServerException,
     /// Split-tunnel **Exclude**-mode routes: each listed CIDR escapes the tunnel via the
-    /// original gateway (structurally a `ServerException`). Empty for plain full-tunnel and
-    /// for Include mode (where only `via_tun` carries the listed CIDRs instead).
+    /// original gateway of its own address family (structurally a `ServerException`). Empty
+    /// for plain full-tunnel and for Include mode (where only `via_tun` carries them instead).
     pub bypass: Vec<ServerException>,
 }
 
@@ -79,25 +84,43 @@ impl RoutePlan {
             server_ip,
             orig_gateway,
             tun_addr,
+            None,
         )
     }
 
     /// Single-direction convenience over [`from_split`](Self::from_split): Exclude puts
-    /// `static_cidrs` in the bypass set, Include puts them in the via-tun set.
+    /// `static_cidrs` in the bypass set, Include puts them in the via-tun set. `tun_addr6`
+    /// (an IPv6 TUN address) enables carrying IPv6 through the tunnel; `None` keeps it
+    /// IPv4-only.
     pub fn with_split(
         mode: leshiy_client::SplitMode,
         static_cidrs: &[Cidr],
         server_ip: IpAddr,
         orig_gateway: IpAddr,
         tun_addr: IpAddr,
+        tun_addr6: Option<IpAddr>,
     ) -> Result<RoutePlan, RoutePlanError> {
         match mode {
-            leshiy_client::SplitMode::Exclude => {
-                Self::from_split(mode, &[], static_cidrs, server_ip, orig_gateway, tun_addr)
-            }
-            leshiy_client::SplitMode::Include => {
-                Self::from_split(mode, static_cidrs, &[], server_ip, orig_gateway, tun_addr)
-            }
+            leshiy_client::SplitMode::Exclude => Self::from_split(
+                mode,
+                &[],
+                static_cidrs,
+                server_ip,
+                orig_gateway,
+                None,
+                tun_addr,
+                tun_addr6,
+            ),
+            leshiy_client::SplitMode::Include => Self::from_split(
+                mode,
+                static_cidrs,
+                &[],
+                server_ip,
+                orig_gateway,
+                None,
+                tun_addr,
+                tun_addr6,
+            ),
         }
     }
 
@@ -111,13 +134,16 @@ impl RoutePlan {
     /// The server exception is always emitted. Overlaps are resolved by the kernel's
     /// longest-prefix-match. `server_ip`/`orig_gateway` must share a family; IPv6 CIDRs are
     /// retained for the per-OS backends to filter.
+    #[allow(clippy::too_many_arguments)] // a routing plan legitimately needs all of these
     pub fn from_split(
         base_mode: leshiy_client::SplitMode,
         include_cidrs: &[Cidr],
         exclude_cidrs: &[Cidr],
         server_ip: IpAddr,
         orig_gateway: IpAddr,
+        orig_gateway6: Option<IpAddr>,
         tun_addr: IpAddr,
+        tun_addr6: Option<IpAddr>,
     ) -> Result<RoutePlan, RoutePlanError> {
         if server_ip.is_ipv4() != orig_gateway.is_ipv4() {
             return Err(RoutePlanError::FamilyMismatch {
@@ -134,7 +160,7 @@ impl RoutePlan {
             gateway: orig_gateway,
         };
         let mut via_tun = if matches!(base_mode, leshiy_client::SplitMode::Exclude) {
-            vec![
+            let mut v = vec![
                 Cidr {
                     addr: "0.0.0.0".parse().unwrap(),
                     prefix: 1,
@@ -143,20 +169,52 @@ impl RoutePlan {
                     addr: "128.0.0.0".parse().unwrap(),
                     prefix: 1,
                 },
-            ]
+            ];
+            // Dual-stack: send all IPv6 through the tunnel too (`::/1`+`8000::/1`, the
+            // same override-without-deleting trick as v4). Only when a v6 TUN address is
+            // present — otherwise IPv6 is fail-closed by the backend's kill-switch.
+            if tun_addr6.is_some() {
+                v.push(Cidr {
+                    addr: "::".parse().unwrap(),
+                    prefix: 1,
+                });
+                v.push(Cidr {
+                    addr: "8000::".parse().unwrap(),
+                    prefix: 1,
+                });
+            }
+            v
         } else {
             Vec::new()
         };
         via_tun.extend(include_cidrs.iter().cloned());
+        // Each bypass escapes via the original gateway of its OWN family. `orig_gateway` is the
+        // server-family gateway; `orig_gateway6` is the v6 gateway (used for v6 excludes when the
+        // server is reached over v4). A v6 exclude with no v6 gateway is dropped rather than
+        // routed via a v4 gateway — under a dual-stack Exclude base it then rides the `::/1`
+        // override through the tunnel (fail-safe, never leaked).
+        let v6_gateway = if orig_gateway.is_ipv6() {
+            Some(orig_gateway)
+        } else {
+            orig_gateway6
+        };
         let bypass = exclude_cidrs
             .iter()
-            .map(|c| ServerException {
-                dest: c.clone(),
-                gateway: orig_gateway,
+            .filter_map(|c| {
+                let gw = if c.addr.is_ipv4() {
+                    orig_gateway.is_ipv4().then_some(orig_gateway)
+                } else {
+                    v6_gateway
+                };
+                gw.map(|gateway| ServerException {
+                    dest: c.clone(),
+                    gateway,
+                })
             })
             .collect();
         Ok(RoutePlan {
             tun_addr,
+            tun_addr6,
             via_tun,
             server_exception,
             bypass,
@@ -176,7 +234,7 @@ mod tests {
         let gw: IpAddr = Ipv4Addr::new(192, 168, 1, 1).into();
         let tun = "10.71.0.2".parse().unwrap();
         let a = RoutePlan::full_tunnel(server, gw, tun).unwrap();
-        let b = RoutePlan::with_split(SplitMode::Exclude, &[], server, gw, tun).unwrap();
+        let b = RoutePlan::with_split(SplitMode::Exclude, &[], server, gw, tun, None).unwrap();
         assert_eq!(a.via_tun, b.via_tun);
         assert_eq!(a.server_exception, b.server_exception);
         assert!(a.bypass.is_empty());
@@ -197,6 +255,7 @@ mod tests {
             server,
             gw,
             "10.71.0.2".parse().unwrap(),
+            None,
         )
         .unwrap();
         // The default override is still installed.
@@ -222,6 +281,7 @@ mod tests {
             server,
             gw,
             "10.71.0.2".parse().unwrap(),
+            None,
         )
         .unwrap();
         // No 0/1 + 128/1 override; only the listed CIDR rides the TUN.
@@ -232,7 +292,10 @@ mod tests {
     }
 
     #[test]
-    fn with_split_keeps_ipv6_cidrs_in_plan_for_caller_to_filter() {
+    fn ipv6_exclude_is_dropped_from_bypass() {
+        // No v6 gateway is plumbed, so a v6 exclude is NOT routed via the v4 gateway; it is
+        // dropped and (under a dual-stack Exclude base) rides the `::/1` override through the
+        // tunnel — fail-safe, never leaked around it.
         let plan = RoutePlan::with_split(
             SplitMode::Exclude,
             &[Cidr {
@@ -242,10 +305,65 @@ mod tests {
             "203.0.113.7".parse().unwrap(),
             Ipv4Addr::new(192, 168, 1, 1).into(),
             "10.71.0.2".parse().unwrap(),
+            Some("fd00:71::2".parse().unwrap()),
+        )
+        .unwrap();
+        assert!(plan.bypass.is_empty(), "v6 exclude must not bypass via a v4 gateway");
+    }
+
+    #[test]
+    fn ipv6_exclude_bypasses_via_v6_gateway_when_present() {
+        // With a v6 gateway supplied, a v6 exclude escapes the tunnel via it (v4 server).
+        let plan = RoutePlan::from_split(
+            SplitMode::Exclude,
+            &[],
+            &[Cidr {
+                addr: "2001:db8::".parse().unwrap(),
+                prefix: 32,
+            }],
+            "203.0.113.7".parse().unwrap(),       // v4 server
+            Ipv4Addr::new(192, 168, 1, 1).into(), // v4 gateway
+            Some("fe80::1".parse().unwrap()),     // v6 gateway
+            "10.71.0.2".parse().unwrap(),
+            Some("fd00:71::2".parse().unwrap()),
         )
         .unwrap();
         assert_eq!(plan.bypass.len(), 1);
         assert_eq!(plan.bypass[0].dest.to_string(), "2001:db8::/32");
+        assert_eq!(plan.bypass[0].gateway, "fe80::1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn dual_stack_full_tunnel_adds_v6_override() {
+        // With a v6 TUN address, the Exclude base also overrides all IPv6 via the tunnel.
+        let plan = RoutePlan::from_split(
+            SplitMode::Exclude,
+            &[],
+            &[],
+            "203.0.113.7".parse().unwrap(),
+            Ipv4Addr::new(192, 168, 1, 1).into(),
+            None,
+            "10.71.0.2".parse().unwrap(),
+            Some("fd00:71::2".parse().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(plan.tun_addr6, Some("fd00:71::2".parse().unwrap()));
+        assert!(plan.via_tun.iter().any(|r| r.to_string() == "0.0.0.0/1"));
+        assert!(plan.via_tun.iter().any(|r| r.to_string() == "::/1"));
+        assert!(plan.via_tun.iter().any(|r| r.to_string() == "8000::/1"));
+    }
+
+    #[test]
+    fn ipv4_only_tunnel_has_no_v6_override() {
+        // Without a v6 TUN address, no `::/1` override is emitted (IPv6 stays fail-closed).
+        let plan = RoutePlan::full_tunnel(
+            "203.0.113.7".parse().unwrap(),
+            Ipv4Addr::new(192, 168, 1, 1).into(),
+            "10.71.0.2".parse().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(plan.tun_addr6, None);
+        assert!(!plan.via_tun.iter().any(|r| r.addr.is_ipv6()));
     }
 
     #[test]
@@ -264,7 +382,9 @@ mod tests {
             &exc,
             "203.0.113.7".parse().unwrap(),
             Ipv4Addr::new(192, 168, 1, 1).into(),
+            None,
             "10.71.0.2".parse().unwrap(),
+            None,
         )
         .unwrap();
         // Exclude base keeps the default override.
@@ -288,7 +408,9 @@ mod tests {
             &[],
             "203.0.113.7".parse().unwrap(),
             Ipv4Addr::new(192, 168, 1, 1).into(),
+            None,
             "10.71.0.2".parse().unwrap(),
+            None,
         )
         .unwrap();
         assert!(!plan.via_tun.iter().any(|r| r.to_string() == "0.0.0.0/1"));

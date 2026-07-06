@@ -25,6 +25,9 @@ class RouteArg {
 class EstablishArgs {
     var address: String = "10.71.0.2"
     var prefix: Int = 32
+    // IPv6 TUN address (dual-stack); null = IPv4-only.
+    var address6: String? = null
+    var prefix6: Int = 64
     var mtu: Int = 1400
     var dns: List<String> = emptyList()
     var routes: List<RouteArg> = emptyList()
@@ -104,6 +107,8 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         LeshiyVpnService.pendingConfig = VpnConfig(
             address = args.address,
             prefix = args.prefix,
+            address6 = args.address6,
+            prefix6 = args.prefix6,
             mtu = args.mtu,
             dns = args.dns,
             routes = args.routes.map { VpnRoute(it.address, it.prefix) },

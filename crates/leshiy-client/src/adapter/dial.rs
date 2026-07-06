@@ -6,7 +6,7 @@ use crate::error::{ClientError, Result};
 use crate::settings::TransportPref;
 use crate::transport::{Transport, Tunnel};
 use async_trait::async_trait;
-use leshiy_quic::client::{QuicConn, connect_quic};
+use leshiy_quic::client::{QuicConn, connect_quic_multi};
 use leshiy_quic::endpoint::CertVerification;
 use leshiy_reality::client::connect_reality;
 use leshiy_reality::config::{QuicEndpoint, RealityUri};
@@ -89,12 +89,14 @@ async fn connect_quic_from(q: &QuicEndpoint, short_id: [u8; 8]) -> Result<QuicCo
         return Err(ClientError::ConnectFailed);
     };
     let verification = CertVerification::Pinned(pin);
-    let addr = tokio::net::lookup_host(&q.addr)
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host(&q.addr)
         .await
         .map_err(|_| ClientError::ConnectFailed)?
-        .next()
-        .ok_or(ClientError::ConnectFailed)?;
-    connect_quic(addr, &q.sni, short_id, verification)
+        .collect();
+    if addrs.is_empty() {
+        return Err(ClientError::ConnectFailed);
+    }
+    connect_quic_multi(&addrs, &q.sni, short_id, verification)
         .await
         .map_err(|_| ClientError::ConnectFailed)
 }

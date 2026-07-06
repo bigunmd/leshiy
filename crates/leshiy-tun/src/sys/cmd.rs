@@ -96,6 +96,20 @@ pub(crate) fn win_route_add_via_gateway_args(
     ]
 }
 
+/// `netsh interface ipv6 add address <iface> <v6>` — add an IPv6 address to the tun adapter so
+/// IPv6 can ride the tunnel (the `tun` crate assigns only the v4 address at creation).
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn win_v6_addr_add_args(iface: &str, v6: &str) -> Vec<String> {
+    vec![
+        "interface".into(),
+        "ipv6".into(),
+        "add".into(),
+        "address".into(),
+        iface.to_string(),
+        v6.to_string(),
+    ]
+}
+
 /// `netsh interface ipv4 delete route <dest_cidr> <iface> <gateway>` — remove a bypass route
 /// on teardown. Mirrors the gateway add builder. (via_tun / include routes are managed through
 /// the net_route IP Helper API, not netsh, so there's no `*_via_iface` builder.)
@@ -170,6 +184,20 @@ pub(crate) fn mac_route_del_args(dest: &str, prefix: u8) -> Vec<String> {
         "delete".into(),
         "-net".into(),
         format!("{dest}/{prefix}"),
+    ]
+}
+
+/// `ifconfig <iface> inet6 <v6> prefixlen 64 alias` — add an IPv6 address to the utun so IPv6
+/// can ride the tunnel (the `tun` crate assigns only the v4 address at creation).
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn mac_ifconfig_v6_add_args(iface: &str, v6: &str) -> Vec<String> {
+    vec![
+        iface.to_string(),
+        "inet6".into(),
+        v6.to_string(),
+        "prefixlen".into(),
+        "64".into(),
+        "alias".into(),
     ]
 }
 
@@ -281,5 +309,23 @@ mod tests {
     fn mac_route_del_args_builds() {
         let args = mac_route_del_args("198.51.100.0", 24);
         assert_eq!(args, vec!["-n", "delete", "-net", "198.51.100.0/24"]);
+    }
+
+    #[test]
+    fn win_v6_addr_add_args_builds() {
+        let args = win_v6_addr_add_args("leshiy0", "fd00:71::2");
+        assert_eq!(
+            args,
+            vec!["interface", "ipv6", "add", "address", "leshiy0", "fd00:71::2"]
+        );
+    }
+
+    #[test]
+    fn mac_ifconfig_v6_add_args_builds() {
+        let args = mac_ifconfig_v6_add_args("utun7", "fd00:71::2");
+        assert_eq!(
+            args,
+            vec!["utun7", "inet6", "fd00:71::2", "prefixlen", "64", "alias"]
+        );
     }
 }

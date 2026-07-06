@@ -418,8 +418,9 @@ pub async fn run_reality_server(
     loop {
         let (sock, peer) = listener.accept().await?;
         // Admit before doing any work (including the dial to dest). On rejection
-        // the socket is dropped immediately.
-        let Some(guard) = limiter.try_acquire(peer.ip()) else {
+        // the socket is dropped immediately. Normalize a v4-mapped peer (dual-stack
+        // listener) so a v4 client isn't limited separately from its `::ffff:` form.
+        let Some(guard) = limiter.try_acquire(crate::netguard::canonical_ip(peer.ip())) else {
             continue;
         };
         sock.set_nodelay(true).ok();

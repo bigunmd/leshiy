@@ -40,6 +40,7 @@ tokio-rustls.workspace = true
 webpki-roots.workspace = true
 leshiy-provision = { path = "../leshiy-provision" }
 rpassword.workspace = true
+socket2.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

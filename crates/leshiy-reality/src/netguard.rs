@@ -22,15 +22,23 @@ use std::net::{IpAddr, SocketAddr};
 /// `allow_private` permits loopback / RFC 1918 / IPv6 unique-local targets.
 /// Link-local (incl. cloud metadata 169.254.169.254), unspecified, broadcast
 /// and multicast are forbidden regardless of `allow_private`.
-fn check_ip(addr: IpAddr, allow_private: bool) -> Result<()> {
-    // Canonicalize IPv4-mapped IPv6 to IPv4 so the v4 rules apply uniformly.
-    let addr = match addr {
+/// Canonicalize an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to its IPv4 form, leaving other
+/// addresses unchanged. A dual-stack listener reports v4 peers in the mapped form, so per-IP
+/// bookkeeping (connection limits, rate limits, logs) must normalize to avoid treating the same
+/// client's v4 and v4-mapped forms as distinct.
+pub fn canonical_ip(addr: IpAddr) -> IpAddr {
+    match addr {
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
             Some(v4) => IpAddr::V4(v4),
             None => IpAddr::V6(v6),
         },
         v4 => v4,
-    };
+    }
+}
+
+fn check_ip(addr: IpAddr, allow_private: bool) -> Result<()> {
+    // Canonicalize IPv4-mapped IPv6 to IPv4 so the v4 rules apply uniformly.
+    let addr = canonical_ip(addr);
 
     let forbidden = match addr {
         IpAddr::V4(v4) => {
@@ -58,21 +66,31 @@ fn check_ip(addr: IpAddr, allow_private: bool) -> Result<()> {
     Ok(())
 }
 
-/// Resolve `target` (e.g. `"example.com:443"` or `"127.0.0.1:80"`) and
-/// return the first resolved `SocketAddr` after verifying it against the
-/// egress policy (see [`check_ip`]).
-pub async fn resolve_checked(target: &str, allow_private: bool) -> Result<SocketAddr> {
-    let mut addrs = tokio::net::lookup_host(target)
+/// Resolve `target` (e.g. `"example.com:443"`, `"[2001:db8::1]:443"`, or
+/// `"127.0.0.1:80"`) and return **all** resolved `SocketAddr`s that pass the
+/// egress policy (see [`check_ip`]), in resolver order.
+///
+/// Forbidden addresses are filtered out rather than aborting the whole target, so
+/// a legitimate dual-stack host whose result mixes families still connects, while
+/// a policy-violating address is never dialed. Callers try the returned addresses
+/// in turn — a leading unreachable one (e.g. an AAAA on an IPv4-only network) then
+/// falls through to the next instead of failing the dial. Returning resolved
+/// addresses (never re-resolving) preserves the DNS-rebinding guarantee. Errors if
+/// nothing resolves or every result is forbidden.
+pub async fn resolve_all_checked(target: &str, allow_private: bool) -> Result<Vec<SocketAddr>> {
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host(target)
         .await
-        .map_err(RealityError::Io)?;
+        .map_err(RealityError::Io)?
+        .filter(|a| check_ip(a.ip(), allow_private).is_ok())
+        .collect();
 
-    let addr = addrs
-        .next()
-        .ok_or_else(|| RealityError::Malformed(format!("no address resolved for {target}")))?;
+    if addrs.is_empty() {
+        return Err(RealityError::Malformed(format!(
+            "no allowed address resolved for {target}"
+        )));
+    }
 
-    check_ip(addr.ip(), allow_private)?;
-
-    Ok(addr)
+    Ok(addrs)
 }
 
 #[cfg(test)]
@@ -160,14 +178,28 @@ mod tests {
         assert!(check_ip(ip("2606:4700:4700::1111"), false).is_ok());
     }
 
-    #[tokio::test]
-    async fn resolve_checked_blocks_loopback_by_default() {
-        assert!(resolve_checked("127.0.0.1:80", false).await.is_err());
+    #[test]
+    fn canonical_ip_unmaps_v4_mapped() {
+        assert_eq!(canonical_ip(ip("::ffff:1.2.3.4")), ip("1.2.3.4"));
+        assert_eq!(canonical_ip(ip("1.2.3.4")), ip("1.2.3.4"));
+        assert_eq!(canonical_ip(ip("2001:db8::1")), ip("2001:db8::1"));
     }
 
     #[tokio::test]
-    async fn resolve_checked_allows_loopback_on_opt_in() {
-        let addr = resolve_checked("127.0.0.1:80", true).await.unwrap();
-        assert_eq!(addr.ip(), ip("127.0.0.1"));
+    async fn resolve_all_checked_blocks_loopback_by_default() {
+        // Loopback is filtered out under the default policy → nothing left → error.
+        assert!(resolve_all_checked("127.0.0.1:80", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_all_checked_allows_loopback_on_opt_in() {
+        let addrs = resolve_all_checked("127.0.0.1:80", true).await.unwrap();
+        assert!(addrs.iter().any(|a| a.ip() == ip("127.0.0.1")));
+    }
+
+    #[tokio::test]
+    async fn resolve_all_checked_keeps_public_addr() {
+        let addrs = resolve_all_checked("1.1.1.1:443", false).await.unwrap();
+        assert_eq!(addrs, vec!["1.1.1.1:443".parse::<SocketAddr>().unwrap()]);
     }
 }
