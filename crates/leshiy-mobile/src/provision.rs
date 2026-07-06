@@ -20,6 +20,14 @@ pub struct ProvisionConfig {
     pub listen_port: u16,
     pub label: Option<String>,
     pub sudo_password: Option<String>,
+    /// Enable QUIC on this UDP port (advanced). None = TCP-only REALITY.
+    pub quic_port: Option<u16>,
+    /// Container image override. None = the release matching this build.
+    pub image_ref: Option<String>,
+    /// Label for the first (self) client. None = "self".
+    pub user_label: Option<String>,
+    /// Force the container's DNS resolver (`--dns`). None = host detection + public fallback.
+    pub dns_override: Option<String>,
 }
 
 /// A single progress line pushed to the UI as provisioning advances.
@@ -56,18 +64,27 @@ pub fn build_params(cfg: &ProvisionConfig, now: u64) -> ProvisionParams {
         secret: SshSecret::Password(Zeroizing::new(cfg.ssh_password.clone())),
         public_host: format!("{}:{}", cfg.host, cfg.listen_port),
         dest_sni: cfg.dest.clone(),
-        image_ref: concat!("ghcr.io/bigunmd/leshiy:v", env!("CARGO_PKG_VERSION")).to_string(),
+        image_ref: cfg
+            .image_ref
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| {
+                concat!("ghcr.io/bigunmd/leshiy:v", env!("CARGO_PKG_VERSION")).to_string()
+            }),
         container: "leshiy".into(),
-        quic_port: None,
+        quic_port: cfg.quic_port,
         listen_port: cfg.listen_port,
-        user_label: "self".into(),
+        user_label: cfg
+            .user_label
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "self".into()),
         now,
         role: ProvisionRole::Single,
         connector: None,
         downstream: None,
         sudo: cfg.sudo_password.is_some(),
-        // Let the server detect its host DNS (public fallback); no operator override on mobile.
-        dns_override: None,
+        dns_override: cfg.dns_override.clone().filter(|s| !s.trim().is_empty()),
     }
 }
 
@@ -152,6 +169,10 @@ mod tests {
             listen_port: 443,
             label: None,
             sudo_password: None,
+            quic_port: None,
+            image_ref: None,
+            user_label: None,
+            dns_override: None,
         }
     }
 
