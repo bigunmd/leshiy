@@ -23,10 +23,14 @@ pub async fn run(
         .next()
         .ok_or_else(|| anyhow!("no address for server {}", parsed.server_addr))?
         .ip();
-    // Capture the current default gateway BEFORE we change any routes.
-    let orig_gateway = leshiy_tun::discover::default_gateway_v4()
-        .await
-        .context("discover default gateway")?;
+    // Capture the current default gateway (matching the server's family, so the server-IP
+    // exception can point at it) BEFORE we change any routes.
+    let orig_gateway = if server_ip.is_ipv4() {
+        leshiy_tun::discover::default_gateway_v4().await
+    } else {
+        leshiy_tun::discover::default_gateway_v6().await
+    }
+    .context("discover default gateway")?;
 
     let pref = match transport {
         crate::cli::Transport::Auto => TransportPref::Auto,
