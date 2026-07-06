@@ -24,6 +24,7 @@ import dev.leshiy.ui.ManageViewModel
 import dev.leshiy.ui.ProfilesViewModel
 import dev.leshiy.ui.ProvisionViewModel
 import dev.leshiy.ui.QrScanActivity
+import dev.leshiy.ui.SplitViewModel
 import dev.leshiy.ui.components.Atmosphere
 import dev.leshiy.ui.screens.ConnectScreen
 import dev.leshiy.ui.screens.DeployScreen
@@ -90,6 +91,7 @@ private fun AppNav(onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
     val connectVm: ConnectViewModel = viewModel()
     val profilesVm: ProfilesViewModel = viewModel()
     val appsVm: AppsViewModel = viewModel()
+    val splitVm: SplitViewModel = viewModel()
     val provisionVm: ProvisionViewModel = viewModel()
     val manageVm: ManageViewModel = viewModel()
 
@@ -134,7 +136,7 @@ private fun AppNav(onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
             )
         }
         composable(Route.SPLIT) {
-            SplitScreen(vm = appsVm, onBack = { nav.popBackStack() })
+            SplitScreen(appsVm = appsVm, splitVm = splitVm, onBack = { nav.popBackStack() })
         }
         composable(Route.DEPLOY) {
             DeployScreen(

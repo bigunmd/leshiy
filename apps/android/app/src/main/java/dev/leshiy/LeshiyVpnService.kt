@@ -6,9 +6,15 @@ import android.app.NotificationManager
 import android.content.Intent
 import android.net.VpnService
 import android.content.Context
+import android.net.InetAddresses
+import android.net.IpPrefix
 import android.os.Build
+import dev.leshiy.data.PerAppMode
 import dev.leshiy.data.PerAppStore
+import dev.leshiy.data.SplitKind
+import dev.leshiy.data.SplitStore
 import dev.leshiy.data.TunnelRepository
+import dev.leshiy.data.cidrParts
 import dev.leshiy.data.perAppPlan
 import uniffi.leshiy_mobile.LeshiyBridge
 import uniffi.leshiy_mobile.Status
@@ -36,14 +42,13 @@ class LeshiyVpnService : VpnService() {
             ?: dev.leshiy.data.Profiles.manager(applicationContext).activeUri()
             ?: return START_NOT_STICKY
 
-        val tun = Builder()
+        val builder = Builder()
             .setSession("leshiy")
             .addAddress("10.71.0.2", 32)
-            .addRoute("0.0.0.0", 0)
             .addDnsServer("1.1.1.1")
             .setMtu(1400)
-            .applyPerApp(applicationContext)
-            .establish() ?: return START_NOT_STICKY
+        configureSplit(builder, applicationContext)
+        val tun = builder.establish() ?: return START_NOT_STICKY
 
         startForeground(NOTIFICATION_ID, buildNotification())
 
@@ -64,14 +69,41 @@ class LeshiyVpnService : VpnService() {
         stopSelf()
     }
 
-    /** Apply the persisted per-app split-tunnel rules to the tunnel Builder. */
-    private fun Builder.applyPerApp(ctx: Context): Builder {
-        val store = PerAppStore(ctx)
-        val plan = perAppPlan(store.mode(), store.packages(), ctx.packageName)
-        // runCatching guards NameNotFoundException for a since-uninstalled package.
-        plan.allowed.forEach { runCatching { addAllowedApplication(it) } }
-        plan.disallowed.forEach { runCatching { addDisallowedApplication(it) } }
-        return this
+    /**
+     * Apply the active split-tunnel scheme to the Builder. App-based uses allow/disallow apps;
+     * network-based uses routes (include = route only these CIDRs; exclude = full tunnel minus
+     * these, Android 13+). Our own app is always kept off the tunnel to avoid a routing loop.
+     */
+    private fun configureSplit(b: Builder, ctx: Context) {
+        when (SplitStore(ctx).kind()) {
+            SplitKind.NETWORK -> {
+                val split = SplitStore(ctx)
+                val cidrs = split.cidrs().mapNotNull { cidrParts(it) }
+                when {
+                    split.netMode() == PerAppMode.INCLUDE && cidrs.isNotEmpty() ->
+                        cidrs.forEach { (a, p) -> runCatching { b.addRoute(a, p) } }
+                    split.netMode() == PerAppMode.EXCLUDE -> {
+                        b.addRoute("0.0.0.0", 0)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            cidrs.forEach { (a, p) ->
+                                runCatching { b.excludeRoute(IpPrefix(InetAddresses.parseNumericAddress(a), p)) }
+                            }
+                        }
+                    }
+                    else -> b.addRoute("0.0.0.0", 0)
+                }
+                // Loop avoidance: our own dial must bypass the tunnel.
+                runCatching { b.addDisallowedApplication(ctx.packageName) }
+            }
+            SplitKind.APP -> {
+                b.addRoute("0.0.0.0", 0)
+                val store = PerAppStore(ctx)
+                val plan = perAppPlan(store.mode(), store.packages(), ctx.packageName)
+                // runCatching guards NameNotFoundException for a since-uninstalled package.
+                plan.allowed.forEach { runCatching { b.addAllowedApplication(it) } }
+                plan.disallowed.forEach { runCatching { b.addDisallowedApplication(it) } }
+            }
+        }
     }
 
     override fun onRevoke() {
