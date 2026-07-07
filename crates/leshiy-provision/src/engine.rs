@@ -236,18 +236,18 @@ async fn provision_inner<T: Transport>(
         let host_dns = detect_host_dns(t).await;
         let dns = dns_servers(host_dns, p.dns_override.as_deref());
         let dns_refs: Vec<&str> = dns.iter().map(String::as_str).collect();
-        // Publish the container port on the host's IPv6 wildcard too, but only when the host
-        // has IPv6 — `-p '[::]:…'` otherwise fails the whole `docker run`. Best-effort: on any
-        // probe hiccup we skip the v6 publish (v4 still works).
-        let publish_v6 = matches!(
+        // Whether the host has IPv6, used to pick the server's *in-container* bind address. The
+        // host-port publish is a bare `-p P:P` (Docker auto-dual-stacks it), so this no longer
+        // affects publishing. Best-effort: on any probe hiccup, fall back to the v4 bind.
+        let host_has_ipv6 = matches!(
             t.run(docker::detect_host_ipv6_cmd()).await,
             Ok(o) if o.stdout.trim() == "yes"
         );
-        // Bind dual-stack (`[::]`) so the server accepts both IPv4 (v4-mapped) and IPv6 clients
-        // on one socket — but only when the host has IPv6, since binding `[::]` fails inside the
+        // Bind dual-stack (`[::]`) so the server accepts both IPv4 (v4-mapped) and IPv6 clients on
+        // one socket — but only when the host has IPv6, since binding `[::]` fails inside the
         // container on a kernel with IPv6 disabled (same kernel as the host). Fall back to
         // `0.0.0.0` there.
-        let listen_host = if publish_v6 { "[::]" } else { "0.0.0.0" };
+        let listen_host = if host_has_ipv6 { "[::]" } else { "0.0.0.0" };
         let mut envs = vec![
             ("LESHIY_HOST".to_string(), p.public_host.clone()),
             ("LESHIY_DEST".to_string(), p.dest_sni.clone()),
@@ -270,7 +270,6 @@ async fn provision_inner<T: Transport>(
             &p.image_ref,
             p.listen_port,
             p.quic_port,
-            publish_v6,
             &dns_refs,
             &envs,
         );
@@ -973,13 +972,13 @@ mod tests {
             .into_iter()
             .find(|c| c.contains("docker run"))
             .expect("a docker run");
-        // A host with IPv6 publishes BOTH wildcards so IPv4 and IPv6 clients both reach the server
-        // (Docker makes the `[::]` socket v6-only, so they don't collide). The container binds
-        // `[::]` internally (dual-stack).
-        assert!(run.contains("-p 443:443"), "v4 wildcard publish: {run}");
+        // The port is published with a bare `-p P:P` — Docker auto-dual-stacks it at runtime. We
+        // must NOT emit an explicit `-p '[::]:…'` (it collides with the v4 bind). On a host with
+        // IPv6 the server still binds `[::]` INSIDE the container (dual-stack).
+        assert!(run.contains("-p 443:443"), "bare port publish: {run}");
         assert!(
-            run.contains("-p '[::]:443:443'"),
-            "v6 wildcard publish: {run}"
+            !run.contains("[::]:443:443"),
+            "no explicit v6 publish: {run}"
         );
         assert!(
             run.contains("LESHIY_LISTEN='[::]:443'"),
