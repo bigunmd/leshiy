@@ -316,7 +316,10 @@ mod tests {
             Some("fd00:71::2".parse().unwrap()),
         )
         .unwrap();
-        assert!(plan.bypass.is_empty(), "v6 exclude must not bypass via a v4 gateway");
+        assert!(
+            plan.bypass.is_empty(),
+            "v6 exclude must not bypass via a v4 gateway"
+        );
         // No v6 gateway known → the live resolver has none either, so a resolved v6 bypass is a
         // safe no-op rather than being routed via the v4 gateway.
         assert_eq!(plan.orig_gateway6, None);
@@ -344,7 +347,10 @@ mod tests {
         assert_eq!(plan.bypass[0].gateway, "fe80::1".parse::<IpAddr>().unwrap());
         // The same v6 gateway is exposed on the plan so the live resolver can bypass runtime-
         // resolved v6 domain rules through it (not just the static excludes above).
-        assert_eq!(plan.orig_gateway6, Some("fe80::1".parse::<IpAddr>().unwrap()));
+        assert_eq!(
+            plan.orig_gateway6,
+            Some("fe80::1".parse::<IpAddr>().unwrap())
+        );
     }
 
     #[test]

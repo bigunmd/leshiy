@@ -49,7 +49,10 @@ pub(crate) async fn fetch_origin(origin: &str, method: &str, path: &str) -> Opti
         sock.read_to_end(&mut raw).await.ok()?;
         parse_http_response(&raw)
     };
-    tokio::time::timeout(ORIGIN_TIMEOUT, work).await.ok().flatten()
+    tokio::time::timeout(ORIGIN_TIMEOUT, work)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Parse a raw HTTP/1.1 response into (status, body). Returns `None` if the status line or the

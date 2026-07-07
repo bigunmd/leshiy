@@ -216,7 +216,11 @@ impl UserAdmin for InMemoryUserStore {
     }
 
     fn remove(&self, short_id: &[u8; 8]) -> bool {
-        self.users.write().unwrap_or_else(|e| e.into_inner()).remove(short_id).is_some()
+        self.users
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(short_id)
+            .is_some()
     }
 
     fn set_enabled(&self, short_id: &[u8; 8], on: bool) -> bool {

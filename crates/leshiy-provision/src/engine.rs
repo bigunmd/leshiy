@@ -253,7 +253,10 @@ async fn provision_inner<T: Transport>(
             ),
         ];
         if let Some(q) = p.quic_port {
-            envs.push(("LESHIY_QUIC_LISTEN".to_string(), format!("{listen_host}:{q}")));
+            envs.push((
+                "LESHIY_QUIC_LISTEN".to_string(),
+                format!("{listen_host}:{q}"),
+            ));
         }
         if let Some(conn) = &p.connector {
             envs.push(("LESHIY_CONNECTOR".to_string(), conn.clone()));
@@ -848,7 +851,10 @@ mod tests {
             .find(|c| c.contains("docker run"))
             .expect("a docker run");
         assert!(run.contains("-p '[::]:443:443'"), "v6 publish: {run}");
-        assert!(run.contains("LESHIY_LISTEN='[::]:443'"), "dual-stack bind: {run}");
+        assert!(
+            run.contains("LESHIY_LISTEN='[::]:443'"),
+            "dual-stack bind: {run}"
+        );
     }
 
     #[tokio::test]
@@ -878,7 +884,10 @@ mod tests {
             .find(|c| c.contains("docker run"))
             .expect("a docker run");
         assert!(!run.contains("[::]"), "must stay IPv4-only: {run}");
-        assert!(run.contains("LESHIY_LISTEN='0.0.0.0:443'"), "v4 bind: {run}");
+        assert!(
+            run.contains("LESHIY_LISTEN='0.0.0.0:443'"),
+            "v4 bind: {run}"
+        );
     }
 
     #[test]

@@ -593,10 +593,7 @@ mod boot_tests {
             "example.com:443"
         );
         // Bare IPv6 literal is bracketed before the port is appended.
-        assert_eq!(
-            super::ensure_dest_port("2001:db8::1"),
-            "[2001:db8::1]:443"
-        );
+        assert_eq!(super::ensure_dest_port("2001:db8::1"), "[2001:db8::1]:443");
         assert_eq!(
             super::ensure_dest_port("[2001:db8::1]:8443"),
             "[2001:db8::1]:8443"

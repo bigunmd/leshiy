@@ -88,7 +88,11 @@ impl PrivilegedOps for MacOsOps {
             .and_then(|r| r.ifindex);
         let exc = &plan.server_exception;
         // Attach the v4 egress ifindex only for a v4 exception; let the OS pick for v6.
-        let exc_idx = if exc.dest.addr.is_ipv4() { orig_idx } else { None };
+        let exc_idx = if exc.dest.addr.is_ipv4() {
+            orig_idx
+        } else {
+            None
+        };
         let exc_route = gateway_route(exc.dest.addr, exc.dest.prefix, exc.gateway, exc_idx);
         if handle.add(&exc_route).await.is_err() && exc.dest.addr.is_ipv4() {
             // Fallback to BSD `route` if net-route's gateway add is rejected (v4 syntax only).
@@ -155,11 +159,18 @@ impl PrivilegedOps for MacOsOps {
             if b.dest.addr.is_ipv6() && !carry_v6 {
                 continue;
             }
-            let idx = if b.dest.addr.is_ipv4() { orig_idx } else { None };
+            let idx = if b.dest.addr.is_ipv4() {
+                orig_idx
+            } else {
+                None
+            };
             let _ = handle
                 .add(&gateway_route(b.dest.addr, b.dest.prefix, b.gateway, idx))
                 .await; // best-effort, fast (PF_ROUTE socket)
-            installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).push(b.dest.clone());
+            installed_bypass
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(b.dest.clone());
         }
 
         // 3. DNS: set the configured resolver(s) on every active network service, backing up
@@ -263,7 +274,10 @@ impl RouteController for MacOsController {
         self.handle
             .add(&gateway_route(c.addr, c.prefix, gw, self.orig_idx))
             .await?;
-        self.installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).push(c.clone());
+        self.installed_bypass
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(c.clone());
         Ok(())
     }
     async fn remove_bypass(&self, c: &Cidr) -> std::io::Result<()> {
@@ -274,7 +288,10 @@ impl RouteController for MacOsController {
             .handle
             .delete(&gateway_route(c.addr, c.prefix, gw, self.orig_idx))
             .await;
-        self.installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| x != c);
+        self.installed_bypass
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|x| x != c);
         Ok(())
     }
     async fn add_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
@@ -296,7 +313,12 @@ impl RouteController for MacOsController {
         // Drain the shared list so the guard's `Drop` (same Arc) finds it empty and skips its slow
         // per-route `route delete` subprocess fallback. Delete each in-process via net_route —
         // far faster than a subprocess per CIDR for a large rule set.
-        let routes: Vec<Cidr> = std::mem::take(&mut *self.installed_bypass.lock().unwrap_or_else(|e| e.into_inner()));
+        let routes: Vec<Cidr> = std::mem::take(
+            &mut *self
+                .installed_bypass
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
         for c in &routes {
             let Some(gw) = self.bypass_gateway(c) else {
                 continue;
@@ -359,7 +381,12 @@ struct MacOsTeardown {
 impl Drop for MacOsTeardown {
     fn drop(&mut self) {
         // Best-effort; teardown must never panic.
-        for c in self.installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        for c in self
+            .installed_bypass
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+        {
             let args = cmd::mac_route_del_args(&c.addr.to_string(), c.prefix);
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
             let _ = cmd::run(ROUTE, &argv);

@@ -95,14 +95,12 @@ pub enum Socks5Cmd<S> {
 /// Minimal SOCKS5 (no-auth). Returns ("host:port", io) for a CONNECT; errors on any other
 /// command. Kept for callers whose transport cannot carry UDP (QUIC client, direct listener).
 /// Mirror of v0 `leshiy::client::socks5_accept`, errors mapped to `RealityError`.
-pub async fn socks5_accept<S: AsyncRead + AsyncWrite + Unpin>(
-    io: S,
-) -> crate::Result<(String, S)> {
+pub async fn socks5_accept<S: AsyncRead + AsyncWrite + Unpin>(io: S) -> crate::Result<(String, S)> {
     match socks5_accept_ext(io).await? {
         Socks5Cmd::Connect { target, io } => Ok((target, io)),
-        Socks5Cmd::UdpAssociate { .. } => {
-            Err(crate::RealityError::Malformed("only CONNECT supported".into()))
-        }
+        Socks5Cmd::UdpAssociate { .. } => Err(crate::RealityError::Malformed(
+            "only CONNECT supported".into(),
+        )),
     }
 }
 

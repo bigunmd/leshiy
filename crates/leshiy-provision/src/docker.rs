@@ -265,10 +265,21 @@ mod tests {
     fn run_cmd_injects_multiple_dns_in_order() {
         // Docker tries `--dns` servers in order, so the host resolver must precede
         // the public fallback.
-        let run = run_cmd("leshiy", "img:1", 443, None, true, &["10.130.0.2", "1.1.1.1"], &[]);
+        let run = run_cmd(
+            "leshiy",
+            "img:1",
+            443,
+            None,
+            true,
+            &["10.130.0.2", "1.1.1.1"],
+            &[],
+        );
         let host_at = run.find("--dns 10.130.0.2").expect("host --dns present");
         let fb_at = run.find("--dns 1.1.1.1").expect("fallback --dns present");
-        assert!(host_at < fb_at, "host resolver must come before fallback: {run}");
+        assert!(
+            host_at < fb_at,
+            "host resolver must come before fallback: {run}"
+        );
     }
 
     #[test]
@@ -278,7 +289,10 @@ mod tests {
         assert!(!DNS_PUBLIC_FALLBACK.is_empty());
         for f in DNS_PUBLIC_FALLBACK {
             assert!(valid_dns_addr(f), "fallback must be a valid dns addr: {f}");
-            assert!(f.contains('.') && !f.contains(':'), "fallback must be IPv4: {f}");
+            assert!(
+                f.contains('.') && !f.contains(':'),
+                "fallback must be IPv4: {f}"
+            );
         }
     }
 
