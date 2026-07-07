@@ -19,7 +19,14 @@ pub struct ServerAuthConfig {
     pub server_names: HashSet<String>,
     pub short_ids: HashSet<[u8; 8]>,
     pub max_time_diff: Duration,
-    pub dest: String, // host:port of the borrowed site
+    /// Default borrowed-site `host:port`, used for any SNI without a specific entry in
+    /// [`dest_by_sni`](Self::dest_by_sni) (and for connections with no SNI).
+    pub dest: String,
+    /// Per-SNI borrowed-site overrides. When an operator advertises multiple `server_names`,
+    /// each should mirror its OWN real origin — otherwise the borrowed ServerHello/cert only
+    /// matches one advertised name and the others are distinguishable (cert-SAN mismatch). An
+    /// SNI absent here falls back to [`dest`](Self::dest). Empty = single-dest (legacy) behavior.
+    pub dest_by_sni: std::collections::HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -35,6 +42,14 @@ impl ServerAuthConfig {
     }
     pub fn sni_allowed(&self, sni: &str) -> bool {
         self.server_names.contains(sni)
+    }
+    /// The borrowed-site `host:port` to mirror for a connection with the given SNI: the per-SNI
+    /// override if one exists, else the default [`dest`](Self::dest). Mirroring each advertised
+    /// name to its own origin keeps the borrowed ServerHello/cert consistent with the SNI.
+    pub fn dest_for(&self, sni: Option<&str>) -> &str {
+        sni.and_then(|s| self.dest_by_sni.get(s))
+            .map(String::as_str)
+            .unwrap_or(&self.dest)
     }
 }
 
@@ -159,6 +174,27 @@ impl RealityUri {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dest_for_selects_per_sni_then_falls_back() {
+        let cfg = ServerAuthConfig {
+            static_secret: Zeroizing::new([0u8; 32]),
+            server_names: HashSet::from(["a.example".into(), "b.example".into()]),
+            short_ids: HashSet::new(),
+            max_time_diff: Duration::from_secs(120),
+            dest: "default.origin:443".into(),
+            dest_by_sni: std::collections::HashMap::from([(
+                "b.example".to_string(),
+                "b.origin:443".to_string(),
+            )]),
+        };
+        // Per-SNI override wins.
+        assert_eq!(cfg.dest_for(Some("b.example")), "b.origin:443");
+        // SNI without an override falls back to the default dest.
+        assert_eq!(cfg.dest_for(Some("a.example")), "default.origin:443");
+        // No SNI → default dest.
+        assert_eq!(cfg.dest_for(None), "default.origin:443");
+    }
 
     #[test]
     fn reality_uri_roundtrip() {

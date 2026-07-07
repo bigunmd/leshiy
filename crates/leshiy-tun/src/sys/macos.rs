@@ -106,6 +106,10 @@ impl PrivilegedOps for MacOsOps {
         // the utun by its index (from the device); if unavailable, fall back to `route` by name.
         // Best-effort: a bad/duplicate route in a list must not fail the session.
         let tun_idx = device.tun_index().ok().map(|i| i as u32);
+        // Count via_tun install failures: unlike a failed bypass (the CIDR then rides the tunnel —
+        // safe), a failed via_tun means that CIDR is NOT routed through the tunnel. Under an
+        // Include base that is a silent direct-traffic leak, so surface it instead of swallowing.
+        let mut via_tun_failures = 0usize;
         for c in &plan.via_tun {
             // Skip an IPv6 via-tun route unless IPv6 is carried this session.
             if c.addr.is_ipv6() && !carry_v6 {
@@ -114,9 +118,13 @@ impl PrivilegedOps for MacOsOps {
             match tun_idx {
                 // net_route handles both families through the utun by ifindex.
                 Some(idx) => {
-                    let _ = handle
+                    if handle
                         .add(&Route::new(c.addr, c.prefix).with_ifindex(idx))
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        via_tun_failures += 1;
+                    }
                 }
                 // Fallback `route` builder is v4 syntax only; a v6 route without an ifindex is
                 // skipped (tun_idx is essentially always present).
@@ -124,10 +132,18 @@ impl PrivilegedOps for MacOsOps {
                     let args =
                         cmd::mac_route_add_via_iface_args(&c.addr.to_string(), c.prefix, &iface);
                     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-                    let _ = cmd::run(ROUTE, &argv);
+                    if cmd::run(ROUTE, &argv).is_err() {
+                        via_tun_failures += 1;
+                    }
                 }
-                None => {}
+                None => via_tun_failures += 1,
             }
+        }
+        if via_tun_failures > 0 {
+            tracing::warn!(
+                failures = via_tun_failures,
+                "some via-tun routes failed to install; matching traffic may bypass the tunnel"
+            );
         }
 
         // 2b. Split-tunnel bypass routes (Exclude): each CIDR escapes via the original gateway.
@@ -143,7 +159,7 @@ impl PrivilegedOps for MacOsOps {
             let _ = handle
                 .add(&gateway_route(b.dest.addr, b.dest.prefix, b.gateway, idx))
                 .await; // best-effort, fast (PF_ROUTE socket)
-            installed_bypass.lock().unwrap().push(b.dest.clone());
+            installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).push(b.dest.clone());
         }
 
         // 3. DNS: set the configured resolver(s) on every active network service, backing up
@@ -179,6 +195,7 @@ impl PrivilegedOps for MacOsOps {
             tun_idx,
             tun_addr: tun4,
             gateway: plan.server_exception.gateway,
+            gateway6: plan.orig_gateway6,
             orig_idx,
             carry_v6,
             installed_bypass: installed_bypass.clone(),
@@ -206,8 +223,11 @@ struct MacOsController {
     tun_idx: Option<u32>,
     tun_addr: std::net::Ipv4Addr,
     gateway: IpAddr,
+    /// Original IPv6 default gateway (from the plan), used to route resolved v6 bypass rules.
+    /// `None` when v6 isn't carried or no v6 default route exists — a v6 bypass is then a no-op.
+    gateway6: Option<IpAddr>,
     orig_idx: Option<u32>,
-    /// Whether IPv6 is carried this session (gates resolved v6 domain via-tun routes).
+    /// Whether IPv6 is carried this session (gates resolved v6 domain via-tun / bypass routes).
     carry_v6: bool,
     installed_bypass: Arc<Mutex<Vec<Cidr>>>,
 }
@@ -219,36 +239,42 @@ impl MacOsController {
             None => Route::new(c.addr, c.prefix).with_gateway(IpAddr::V4(self.tun_addr)),
         }
     }
+
+    /// The original gateway to bypass a resolved CIDR through, by address family. `None` for a v6
+    /// CIDR when v6 isn't carried or no v6 gateway is known — the CIDR then rides the tunnel (safe).
+    fn bypass_gateway(&self, c: &Cidr) -> Option<IpAddr> {
+        if c.addr.is_ipv4() {
+            self.gateway.is_ipv4().then_some(self.gateway)
+        } else if self.carry_v6 {
+            self.gateway6
+        } else {
+            None
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl RouteController for MacOsController {
     async fn add_bypass(&self, c: &Cidr) -> std::io::Result<()> {
-        let IpAddr::V4(_) = c.addr else {
+        let Some(gw) = self.bypass_gateway(c) else {
+            tracing::debug!(cidr = %c, "split-tunnel: no gateway for this family; bypass rides the tunnel");
             return Ok(());
         };
         self.handle
-            .add(&gateway_route(
-                c.addr,
-                c.prefix,
-                self.gateway,
-                self.orig_idx,
-            ))
+            .add(&gateway_route(c.addr, c.prefix, gw, self.orig_idx))
             .await?;
-        self.installed_bypass.lock().unwrap().push(c.clone());
+        self.installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).push(c.clone());
         Ok(())
     }
     async fn remove_bypass(&self, c: &Cidr) -> std::io::Result<()> {
+        let Some(gw) = self.bypass_gateway(c) else {
+            return Ok(());
+        };
         let _ = self
             .handle
-            .delete(&gateway_route(
-                c.addr,
-                c.prefix,
-                self.gateway,
-                self.orig_idx,
-            ))
+            .delete(&gateway_route(c.addr, c.prefix, gw, self.orig_idx))
             .await;
-        self.installed_bypass.lock().unwrap().retain(|x| x != c);
+        self.installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| x != c);
         Ok(())
     }
     async fn add_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
@@ -270,16 +296,14 @@ impl RouteController for MacOsController {
         // Drain the shared list so the guard's `Drop` (same Arc) finds it empty and skips its slow
         // per-route `route delete` subprocess fallback. Delete each in-process via net_route —
         // far faster than a subprocess per CIDR for a large rule set.
-        let routes: Vec<Cidr> = std::mem::take(&mut *self.installed_bypass.lock().unwrap());
+        let routes: Vec<Cidr> = std::mem::take(&mut *self.installed_bypass.lock().unwrap_or_else(|e| e.into_inner()));
         for c in &routes {
+            let Some(gw) = self.bypass_gateway(c) else {
+                continue;
+            };
             let _ = self
                 .handle
-                .delete(&gateway_route(
-                    c.addr,
-                    c.prefix,
-                    self.gateway,
-                    self.orig_idx,
-                ))
+                .delete(&gateway_route(c.addr, c.prefix, gw, self.orig_idx))
                 .await;
         }
     }
@@ -335,7 +359,7 @@ struct MacOsTeardown {
 impl Drop for MacOsTeardown {
     fn drop(&mut self) {
         // Best-effort; teardown must never panic.
-        for c in self.installed_bypass.lock().unwrap().iter() {
+        for c in self.installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).iter() {
             let args = cmd::mac_route_del_args(&c.addr.to_string(), c.prefix);
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
             let _ = cmd::run(ROUTE, &argv);

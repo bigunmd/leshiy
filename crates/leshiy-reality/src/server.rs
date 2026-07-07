@@ -124,8 +124,14 @@ where
     // 1. read the client's first TLS record
     let first = read_record(&mut client).await?; // Err here = bare/garbage TCP open → drop
     let first_bytes = first.encode();
-    // 2. dial dest (bounded), forward the first record
-    let mut dest = match connect_dest(&cfg.dest, DEST_CONNECT_TIMEOUT).await {
+    // 2. dial dest (bounded), forward the first record. Peek the SNI from the ClientHello so a
+    //    multi-name deployment mirrors each advertised name to its OWN origin (per-SNI dest); a
+    //    garbage/non-ClientHello first record just falls back to the default dest and is relayed.
+    let peek_sni = leshiy_tls::ja::extract_client_hello_fields(&first.payload)
+        .ok()
+        .and_then(|f| f.sni);
+    let mut dest = match connect_dest(cfg.dest_for(peek_sni.as_deref()), DEST_CONNECT_TIMEOUT).await
+    {
         Some(d) => d,
         None => {
             // H4: a dest-dial failure must NOT produce an instant zero-byte close
@@ -465,6 +471,7 @@ mod tests {
             short_ids: HashSet::from([[1u8, 2, 3, 4, 0, 0, 0, 0]]),
             max_time_diff: Duration::from_secs(120),
             dest: "www.example.com:443".into(),
+            dest_by_sni: Default::default(),
         }
     }
 

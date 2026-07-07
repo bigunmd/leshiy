@@ -64,6 +64,7 @@ fn server_cfg(secret: [u8; 32], dest: String) -> Arc<ServerAuthConfig> {
         short_ids: HashSet::from([[1u8, 2, 3, 4, 0, 0, 0, 0]]),
         max_time_diff: Duration::from_secs(120),
         dest,
+        dest_by_sni: Default::default(),
     })
 }
 

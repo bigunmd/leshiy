@@ -1,6 +1,6 @@
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 use leshiy_quic::{
-    client::run_quic_client,
+    client::{connect_quic, run_quic_client},
     endpoint::{CertVerification, cert_sha256, server_endpoint},
     masquerade::Masquerade,
     server::serve_quic_on_endpoint,
@@ -12,7 +12,7 @@ use leshiy_reality::{
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -69,21 +69,51 @@ fn free_tcp_addr() -> std::net::SocketAddr {
 /// avoiding the bind/drop/rebind window that let a parallel test steal the port (which showed
 /// up as a flaky "certificate pin mismatch").
 async fn start_server(store: Arc<dyn UserStore>) -> (std::net::SocketAddr, [u8; 32]) {
+    start_server_masq(store, Masquerade::default()).await
+}
+
+/// Like [`start_server`] but with a caller-chosen masquerade (e.g. a reverse-proxy origin).
+async fn start_server_masq(
+    store: Arc<dyn UserStore>,
+    masq: Masquerade,
+) -> (std::net::SocketAddr, [u8; 32]) {
     let (certs, key) = self_signed();
     let pin = cert_sha256(certs[0].as_ref());
     let ep =
         server_endpoint("127.0.0.1:0".parse().unwrap(), certs, key).expect("bind quic endpoint");
     let bound = ep.local_addr().expect("local_addr");
     tokio::spawn(async move {
-        let _ = serve_quic_on_endpoint(
-            ep,
-            store,
-            Masquerade::default(),
-            Arc::new(DirectEgress::allowing_private()),
-        )
-        .await;
+        let _ = serve_quic_on_endpoint(ep, store, masq, Arc::new(DirectEgress::allowing_private()))
+            .await;
     });
     (bound, pin)
+}
+
+/// Spawn a minimal HTTP/1.1 origin that answers every request with `body` (200 OK, Connection:
+/// close). Returns its "127.0.0.1:<port>".
+async fn spawn_http_origin(body: &'static str) -> String {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = l.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                // Read the request head (until CRLFCRLF), then reply and close.
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            });
+        }
+    });
+    addr
 }
 
 /// Drive a full SOCKS5 CONNECT over the given SOCKS proxy to the echo address,
@@ -537,6 +567,108 @@ async fn prober_get_gets_masquerade() {
         "prober should get the masquerade page, got: {:?}",
         String::from_utf8_lossy(&body)
     );
+}
+
+// ---------------------------------------------------------------------------
+// Test 4b: prober GET is reverse-proxied to a real origin (not a stub page)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn prober_get_reverse_proxied_to_origin() {
+    let origin = spawn_http_origin("<html><body>REAL ORIGIN PAGE</body></html>").await;
+    let store = Arc::new(InMemoryUserStore::new(vec![])); // no users → prober path
+    let (server, pin) = start_server_masq(store, Masquerade::Reverse(origin)).await;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let ep = leshiy_quic::endpoint::client_endpoint(CertVerification::Pinned(pin), server).unwrap();
+    let conn = ep.connect(server, "example.test").unwrap().await.unwrap();
+    let (mut driver, mut send_req) = h3::client::new(h3_quinn::Connection::new(conn))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
+    });
+
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://example.test/")
+        .body(())
+        .unwrap();
+    let mut stream = send_req.send_request(req).await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), 200, "reverse-proxied GET should relay the origin's 200");
+
+    let mut body = Vec::new();
+    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+        while chunk.has_remaining() {
+            let c = chunk.chunk();
+            body.extend_from_slice(c);
+            let n = c.len();
+            chunk.advance(n);
+        }
+    }
+    assert!(
+        String::from_utf8_lossy(&body).contains("REAL ORIGIN PAGE"),
+        "prober should get the real origin's page, got: {:?}",
+        String::from_utf8_lossy(&body)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 4c: CONNECT-UDP carries UDP datagrams end-to-end (RFC 9298)
+// ---------------------------------------------------------------------------
+
+/// Spawn a UDP echo server; returns "127.0.0.1:<port>".
+async fn spawn_udp_echo() -> String {
+    let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = s.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        let mut b = [0u8; 2048];
+        loop {
+            if let Ok((n, from)) = s.recv_from(&mut b).await {
+                let _ = s.send_to(&b[..n], from).await;
+            }
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn connect_udp_datagram_echo() {
+    let udp_echo = spawn_udp_echo().await;
+    let store = Arc::new(InMemoryUserStore::new(vec![User {
+        short_id: [1; 8],
+        enabled: true,
+        expires_at: None,
+        data_cap: None,
+        rate_up: None,
+        rate_down: None,
+    }]));
+    let (server, pin) = start_server(store).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let conn = connect_quic(server, "example.test", [1; 8], CertVerification::Pinned(pin))
+        .await
+        .expect("connect quic");
+    let mut flow = conn
+        .open_datagram(&udp_echo)
+        .await
+        .expect("open CONNECT-UDP association");
+
+    // Send a datagram to the echo through the QUIC tunnel; expect it back. Retry a couple of
+    // times: the very first HTTP datagram can race the server-side association setup.
+    for attempt in 0..5 {
+        flow.send(Bytes::from_static(b"quic-udp-e2e")).await.unwrap();
+        match tokio::time::timeout(Duration::from_millis(500), flow.recv()).await {
+            Ok(Some(got)) => {
+                assert_eq!(got.as_ref(), b"quic-udp-e2e");
+                return;
+            }
+            _ if attempt < 4 => continue,
+            other => panic!("no datagram echo: {other:?}"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

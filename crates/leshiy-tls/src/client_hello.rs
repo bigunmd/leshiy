@@ -260,15 +260,30 @@ fn build_extension(
         // negotiates application settings), distinct from the ALPN list.
         0x44cd => vec![0x00, 0x03, 0x02, b'h', b'2'],
 
-        // All remaining extension types:
-        //   - GREASE entries: empty body is valid (GREASE is ignored by servers)
-        //   - session_ticket (0x0023): empty body = no session ticket to offer
-        //   - extended_master_secret (0x0017): empty body (flag-style extension)
-        //   - signed_certificate_timestamp (0x0012): empty body (client request)
-        //
-        // JA4/JA3 only inspect extension type IDs, so bodies here do not affect
-        // the fingerprint hash.
-        _ => Vec::new(),
+        // Flag-style / request extensions whose ClientHello body is legitimately empty:
+        //   session_ticket (0x0023): no session ticket to offer
+        //   extended_master_secret (0x0017): flag-style extension
+        //   signed_certificate_timestamp (0x0012): client request, empty body
+        // JA4/JA3 only inspect extension type IDs, so bodies here do not affect the hash.
+        0x0023 | 0x0017 | 0x0012 => Vec::new(),
+
+        // GREASE placeholders carry an empty body (servers ignore GREASE). The caller filters
+        // GREASE out before calling this, so this arm is defensive.
+        e if is_grease(e) => Vec::new(),
+
+        // Any other type is one this builder has no body for: it would emit an EMPTY (likely
+        // rustls-rejected) body. The shipped profiles (Yandex/Chrome) never hit this; a NEW
+        // profile that lists such an extension must add an explicit arm above. We keep the
+        // empty-body fallback for release (prior behavior) but debug-assert so the gap surfaces
+        // in tests instead of silently producing a broken ClientHello.
+        other => {
+            debug_assert!(
+                false,
+                "build_extension: no body for extension type {other:#06x}; \
+                 this profile needs an explicit arm"
+            );
+            Vec::new()
+        }
     }
 }
 

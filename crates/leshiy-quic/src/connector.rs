@@ -6,9 +6,9 @@
 //! re-establishes it (mutex-serialized to avoid a stampede) and retries once.  Enforcement
 //! (rate-limit, data-cap) stays at A.
 use crate::QuicError;
-use crate::client::{QuicConn, open_connect};
+use crate::client::{QuicConn, QuicDatagramFlow, open_connect};
 use bytes::{Buf, Bytes};
-use leshiy_reality::egress::{Egress, EgressRead, EgressWrite};
+use leshiy_reality::egress::{Egress, EgressRead, EgressWrite, UdpEgress};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -118,6 +118,58 @@ impl Egress for ConnectorEgress {
                 })?;
                 Ok(wrap_halves(halves))
             }
+        }
+    }
+
+    /// Open a UDP association to `target` at Exit B over CONNECT-UDP, mirroring `open`'s
+    /// reconnect-once-on-transport-failure discipline.
+    async fn open_udp(&self, target: &str) -> leshiy_reality::Result<Box<dyn UdpEgress>> {
+        let conn = self.get_or_connect().await.map_err(|e| {
+            leshiy_reality::RealityError::Malformed(format!("connector connect: {e}"))
+        })?;
+        match conn.open_datagram(target).await {
+            Ok(flow) => Ok(Box::new(ConnectorUdpEgress { flow })),
+            // Per-stream failure on a healthy connection — surface without tearing it down.
+            Err(e @ QuicError::ConnectStatus(_)) => Err(leshiy_reality::RealityError::Malformed(
+                format!("connector udp: {e}"),
+            )),
+            // Transport failure — invalidate and reconnect once, then retry.
+            Err(_) => {
+                self.invalidate().await;
+                let conn = self.get_or_connect().await.map_err(|e| {
+                    leshiy_reality::RealityError::Malformed(format!("connector reconnect: {e}"))
+                })?;
+                let flow = conn.open_datagram(target).await.map_err(|e| {
+                    leshiy_reality::RealityError::Malformed(format!("connector udp: {e}"))
+                })?;
+                Ok(Box::new(ConnectorUdpEgress { flow }))
+            }
+        }
+    }
+}
+
+/// UDP egress backed by a QUIC CONNECT-UDP association to Exit B.
+struct ConnectorUdpEgress {
+    flow: QuicDatagramFlow,
+}
+
+#[async_trait::async_trait]
+impl UdpEgress for ConnectorUdpEgress {
+    async fn send(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.flow
+            .send(Bytes::copy_from_slice(buf))
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(buf.len())
+    }
+    async fn recv(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self.flow.recv().await {
+            Some(b) => {
+                let n = buf.len().min(b.len());
+                buf[..n].copy_from_slice(&b[..n]);
+                Ok(n)
+            }
+            None => Ok(0), // association/connection closed
         }
     }
 }

@@ -14,6 +14,8 @@ pub enum Error {
     Version(String),
     #[error("connection closed")]
     Closed,
+    #[error("handshake timed out")]
+    Timeout,
 }
 
 impl From<snow::Error> for Error {
