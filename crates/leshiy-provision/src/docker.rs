@@ -102,8 +102,22 @@ pub fn run_cmd(
     s
 }
 
+/// Names of **running** containers.
 pub fn ps_names_cmd() -> &'static str {
     "sudo docker ps --format '{{.Names}}'"
+}
+
+/// Names of **all** containers, including stopped/exited/created ones. `docker run --name`
+/// collides with any container of that name regardless of state, so detection must consult this
+/// (not just [`ps_names_cmd`]) to notice a stale stopped container blocking the name.
+pub fn ps_all_names_cmd() -> &'static str {
+    "sudo docker ps -a --format '{{.Names}}'"
+}
+
+/// Force-remove a container by name. The persistent data volume is separate, so removing the
+/// container keeps the server's users/config; only the (stale) container instance is discarded.
+pub fn container_rm_cmd(container: &str) -> String {
+    format!("sudo docker rm -f {container}")
 }
 
 /// Print the host's first container-usable **IPv4** DNS server (or nothing).
