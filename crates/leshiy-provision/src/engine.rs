@@ -204,19 +204,34 @@ async fn provision_inner<T: Transport>(
     let fw_detail = firewall_step(t, p.listen_port, p.quic_port).await;
     on_event(ev(Step::Firewall, Status::Done, fw_detail));
 
-    // 4. Detect existing container (idempotent re-run).
+    // 4. Detect existing container (idempotent re-run). `docker ps` lists only RUNNING
+    //    containers; a stopped/exited one still owns the name and would collide with
+    //    `docker run --name`, so also consult `docker ps -a`. Reuse only a genuinely running
+    //    container (the reuse path `docker exec`s into it); a stale stopped one is removed so we
+    //    can recreate a working container (the data volume persists, so users/config survive).
     *current = Step::DetectExisting;
     on_event(ev(Step::DetectExisting, Status::Started, ""));
-    let names = docker::parse_ps_names(&t.run(docker::ps_names_cmd()).await?.stdout);
-    let exists = names.iter().any(|n| n == &p.container);
+    let running = docker::parse_ps_names(&t.run(docker::ps_names_cmd()).await?.stdout);
+    let all = docker::parse_ps_names(&t.run(docker::ps_all_names_cmd()).await?.stdout);
+    let running_exists = running.iter().any(|n| n == &p.container);
+    let stale = !running_exists && all.iter().any(|n| n == &p.container);
     on_event(ev(
         Step::DetectExisting,
         Status::Done,
-        format!("exists={exists}"),
+        if stale {
+            "exists=false (removing a stale stopped container of the same name)".to_string()
+        } else {
+            format!("exists={running_exists}")
+        },
     ));
 
-    // 5/6. Pull + run (skipped if exists).
-    if !exists {
+    // Remove a stale stopped container so `docker run --name` doesn't fail with a name conflict.
+    if stale {
+        t.run(&docker::container_rm_cmd(&p.container)).await?.ok()?;
+    }
+
+    // 5/6. Pull + run (skipped only when reusing a running container).
+    if !running_exists {
         *current = Step::PullImage;
         on_event(ev(Step::PullImage, Status::Started, &p.image_ref));
         t.run(&docker::pull_cmd(&p.image_ref)).await?.ok()?;
@@ -1087,6 +1102,67 @@ mod tests {
         );
         provision(&mut t, &params(), &mut |_| {}).await.unwrap();
         assert!(!t.calls().iter().any(|c| c.contains("docker run")));
+    }
+
+    #[tokio::test]
+    async fn provision_removes_stale_stopped_container_before_run() {
+        // A container named `leshiy` exists but is STOPPED: `docker ps` (running) does not list
+        // it, while `docker ps -a` (all) does. `docker run --name` would collide with it, so
+        // provision must force-remove the stale container first, then recreate.
+        let mut t = FakeTransport::new();
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        // Most-specific first: `docker ps -a` lists the stopped container...
+        .on(
+            "docker ps -a",
+            CommandOutput {
+                code: 0,
+                stdout: "leshiy\n".into(),
+                stderr: String::new(),
+            },
+        )
+        // ...while `docker ps` (running only) is empty.
+        .on(
+            "docker ps",
+            CommandOutput {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 0,
+                stdout: format!("{}\n", issued_uri()),
+                stderr: String::new(),
+            },
+        );
+        provision(&mut t, &params(), &mut |_| {}).await.unwrap();
+        let calls = t.calls();
+        // The stale container is force-removed before a fresh one is created.
+        let rm = calls
+            .iter()
+            .position(|c| c.contains("docker rm -f") && c.contains("leshiy"));
+        let run = calls.iter().position(|c| c.contains("docker run"));
+        assert!(
+            rm.is_some(),
+            "expected stale container removal; calls: {calls:?}"
+        );
+        assert!(
+            run.is_some(),
+            "expected a fresh docker run; calls: {calls:?}"
+        );
+        assert!(
+            rm < run,
+            "stale removal must precede docker run; calls: {calls:?}"
+        );
     }
 
     #[tokio::test]
