@@ -204,31 +204,20 @@ async fn provision_inner<T: Transport>(
     let fw_detail = firewall_step(t, p.listen_port, p.quic_port).await;
     on_event(ev(Step::Firewall, Status::Done, fw_detail));
 
-    // 4. Detect existing container (idempotent re-run). `docker ps` lists only RUNNING
-    //    containers; a stopped/exited one still owns the name and would collide with
-    //    `docker run --name`, so also consult `docker ps -a`. Reuse only a genuinely running
-    //    container (the reuse path `docker exec`s into it); a stale stopped one is removed so we
-    //    can recreate a working container (the data volume persists, so users/config survive).
+    // 4. Detect existing container (idempotent re-run). Reuse only a genuinely RUNNING container
+    //    (the reuse path `docker exec`s into it, which needs it up). Anything else — a stopped,
+    //    exited, or half-created leftover (a failed `docker run --name` leaves a `Created`
+    //    container that still owns the name) — is force-removed by `run_container` right before it
+    //    recreates. The persistent data volume is separate, so users/config survive.
     *current = Step::DetectExisting;
     on_event(ev(Step::DetectExisting, Status::Started, ""));
     let running = docker::parse_ps_names(&t.run(docker::ps_names_cmd()).await?.stdout);
-    let all = docker::parse_ps_names(&t.run(docker::ps_all_names_cmd()).await?.stdout);
     let running_exists = running.iter().any(|n| n == &p.container);
-    let stale = !running_exists && all.iter().any(|n| n == &p.container);
     on_event(ev(
         Step::DetectExisting,
         Status::Done,
-        if stale {
-            "exists=false (removing a stale stopped container of the same name)".to_string()
-        } else {
-            format!("exists={running_exists}")
-        },
+        format!("running={running_exists}"),
     ));
-
-    // Remove a stale stopped container so `docker run --name` doesn't fail with a name conflict.
-    if stale {
-        t.run(&docker::container_rm_cmd(&p.container)).await?.ok()?;
-    }
 
     // 5/6. Pull + run (skipped only when reusing a running container).
     if !running_exists {
@@ -285,7 +274,7 @@ async fn provision_inner<T: Transport>(
             &dns_refs,
             &envs,
         );
-        run_container(t, &run).await?;
+        run_container(t, &p.container, &run).await?;
         on_event(ev(
             Step::RunContainer,
             Status::Done,
@@ -529,10 +518,11 @@ fn is_control_socket_unready(stderr: &str) -> bool {
     stderr.contains("control socket") || stderr.contains("is the server running")
 }
 
-/// A `docker run` right after removing a stale container can transiently fail to bind the host
-/// port: Docker tears down the old container's port bindings (userland proxy / iptables) slightly
-/// after `docker rm` returns, so the new bind races the release with "address already in use".
-/// Bounded so a genuine, persistent conflict (another service on the port) still fails promptly.
+/// Bound on the `docker run` retry. A `docker run` right after a container is removed can
+/// transiently fail to bind the host port: Docker tears down the old container's port bindings
+/// (userland proxy / iptables) slightly after `docker rm` returns, so the new bind races the
+/// release with "address already in use". Bounded so a genuine, persistent conflict (another
+/// service on the port) still fails promptly.
 const RUN_ATTEMPTS: usize = 5;
 const RUN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -540,11 +530,16 @@ fn is_port_bind_race(stderr: &str) -> bool {
     stderr.contains("address already in use")
 }
 
-/// Run the `docker run` command, retrying only the transient port-bind race above. A transport
-/// error or any other command failure (bad image, invalid flag, …) fails fast.
-async fn run_container<T: Transport>(t: &mut T, cmd: &str) -> Result<()> {
+/// Create the container, force-removing any existing one of the same name FIRST — a stopped/exited
+/// container, or the `Created` leftover a *failed* `docker run --name` leaves behind (which would
+/// otherwise make the next run collide on the name). Retries only the transient port-bind race; a
+/// transport error or any other command failure (bad image, invalid flag, …) fails fast.
+async fn run_container<T: Transport>(t: &mut T, container: &str, cmd: &str) -> Result<()> {
     let mut last_err = None;
     for attempt in 0..RUN_ATTEMPTS {
+        // Clear any container of this name — a pre-existing stale one, or the leftover from a
+        // previous failed attempt in this loop. Best-effort (it may legitimately not exist).
+        let _ = t.run(&docker::container_rm_cmd(container)).await;
         if attempt > 0 {
             tokio::time::sleep(RUN_RETRY_DELAY).await;
         }
