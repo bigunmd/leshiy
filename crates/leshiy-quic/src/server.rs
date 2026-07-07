@@ -56,34 +56,56 @@ async fn serve_h3_conn(
     masq: Masquerade,
     egress: Arc<dyn Egress>,
 ) -> Result<()> {
-    let mut h3 = h3::server::Connection::new(h3_quinn::Connection::new(conn))
+    // Keep a clone of the raw QUIC connection for connection-level datagram I/O (CONNECT-UDP);
+    // the h3 driver owns the wrapped one. Enable extended CONNECT (so `:protocol=connect-udp` is
+    // accepted) and H3 datagrams in the SETTINGS.
+    let dgram_conn = conn.clone();
+    let mut builder = h3::server::builder();
+    builder.enable_extended_connect(true).enable_datagram(true);
+    let mut h3 = builder
+        .build(h3_quinn::Connection::new(conn))
         .await
         .map_err(|e| QuicError::Conn(e.to_string()))?;
+    // One demux task per connection fans inbound datagrams out to their CONNECT-UDP handlers.
+    let registry = crate::dgram::new_registry();
+    tokio::spawn(crate::dgram::demux_loop(dgram_conn.clone(), registry.clone()));
     while let Ok(Some(resolver)) = h3.accept().await {
         let (req, stream) = match resolver.resolve_request().await {
             Ok(x) => x,
             Err(_) => continue,
         };
         let (store, masq, egress) = (store.clone(), masq.clone(), egress.clone());
+        let (dgram_conn, registry) = (dgram_conn.clone(), registry.clone());
         tokio::spawn(async move {
-            let _ = handle_request(req, stream, store, masq, egress).await;
+            let _ = handle_request(req, stream, store, masq, egress, dgram_conn, registry).await;
         });
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_request(
     req: http::Request<()>,
     stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     store: Arc<dyn UserStore>,
     masq: Masquerade,
     egress: Arc<dyn Egress>,
+    dgram_conn: quinn::Connection,
+    registry: crate::dgram::DatagramRegistry,
 ) -> Result<()> {
     if *req.method() == Method::CONNECT
         && let Some(sid) = auth_short_id(&req)
         && let Some(limits) = store.authorize(&sid, now_secs())
         && let Some(target) = req.uri().authority().map(|a| a.as_str().to_string())
     {
+        // Extended CONNECT with `:protocol = connect-udp` (RFC 9298) → UDP datagram tunnel;
+        // a plain CONNECT → TCP stream tunnel.
+        let is_udp = req.extensions().get::<h3::ext::Protocol>()
+            == Some(&h3::ext::Protocol::CONNECT_UDP);
+        if is_udp {
+            return tunnel_udp(stream, &target, sid, limits, store, egress, dgram_conn, registry)
+                .await;
+        }
         return tunnel(stream, &target, sid, limits, store, egress).await;
     }
     serve_masquerade(req, stream, masq).await
@@ -97,10 +119,21 @@ fn auth_short_id(req: &http::Request<()>) -> Option<[u8; 8]> {
 
 async fn serve_masquerade(
     req: http::Request<()>,
-    mut stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     masq: Masquerade,
 ) -> Result<()> {
-    let Masquerade::Page(html) = masq;
+    match masq {
+        Masquerade::Page(html) => serve_masquerade_page(req, stream, html).await,
+        Masquerade::Reverse(origin) => serve_masquerade_reverse(req, stream, &origin).await,
+    }
+}
+
+/// Static-page masquerade: 200 + `html` for GET/HEAD "/", else 404.
+async fn serve_masquerade_page(
+    req: http::Request<()>,
+    mut stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    html: String,
+) -> Result<()> {
     let is_head = *req.method() == Method::HEAD;
     // Serve 200 only for GET or HEAD "/"; unauthorized CONNECT and everything else gets 404.
     // HEAD gets the correct status but NO body (RFC 9110 §9.3.2).
@@ -109,6 +142,49 @@ async fn serve_masquerade(
         (StatusCode::OK, html)
     } else {
         (StatusCode::NOT_FOUND, "Not Found".to_string())
+    };
+    let resp = http::Response::builder().status(status).body(()).unwrap();
+    stream
+        .send_response(resp)
+        .await
+        .map_err(|e| QuicError::Conn(e.to_string()))?;
+    if !is_head {
+        stream
+            .send_data(Bytes::from(body))
+            .await
+            .map_err(|e| QuicError::Conn(e.to_string()))?;
+    }
+    stream
+        .finish()
+        .await
+        .map_err(|e| QuicError::Conn(e.to_string()))?;
+    Ok(())
+}
+
+/// Reverse-proxy masquerade: fetch the request's method+path from the operator's real HTTP origin
+/// and relay its status + body, so a prober sees a credible site. A HEAD gets the origin's status
+/// with no body; an unreachable origin yields a 502.
+async fn serve_masquerade_reverse(
+    req: http::Request<()>,
+    mut stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    origin: &str,
+) -> Result<()> {
+    let is_head = *req.method() == Method::HEAD;
+    // CONNECT never reverse-proxies (an unauthorized CONNECT is a probe): map it to a 404 fetch by
+    // requesting a path that the origin will 404 — but simplest is to only proxy GET/HEAD and 404
+    // everything else, matching the static path's behavior.
+    let proxied = *req.method() == Method::GET || is_head;
+    let (status, body) = if proxied {
+        match crate::masquerade::fetch_origin(origin, req.method().as_str(), req.uri().path()).await
+        {
+            Some(r) => (
+                StatusCode::from_u16(r.status).unwrap_or(StatusCode::BAD_GATEWAY),
+                r.body,
+            ),
+            None => (StatusCode::BAD_GATEWAY, b"Bad Gateway".to_vec()),
+        }
+    } else {
+        (StatusCode::NOT_FOUND, b"Not Found".to_vec())
     };
     let resp = http::Response::builder().status(status).body(()).unwrap();
     stream
@@ -229,5 +305,77 @@ async fn tunnel(
     };
 
     let _ = tokio::join!(down, up);
+    Ok(())
+}
+
+/// Relay a CONNECT-UDP association (RFC 9298): HTTP datagrams on this request stream ↔ a UDP
+/// egress socket. Inbound datagrams arrive via the connection demux (`registry`); outbound go out
+/// as connection-level QUIC datagrams framed for this stream. The association ends when the client
+/// closes the request stream, the UDP socket errors, or the user is revoked.
+#[allow(clippy::too_many_arguments)]
+async fn tunnel_udp(
+    mut stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    target: &str,
+    sid: [u8; 8],
+    limits: UserLimits,
+    store: Arc<dyn UserStore>,
+    egress: Arc<dyn Egress>,
+    dgram_conn: quinn::Connection,
+    registry: crate::dgram::DatagramRegistry,
+) -> Result<()> {
+    let stream_id = stream.id();
+    // Open the UDP egress; on failure reply 502 so the client sees a clean proxy error.
+    let mut udp = match egress.open_udp(target).await {
+        Ok(u) => u,
+        Err(_) => {
+            let _ = stream
+                .send_response(http::Response::builder().status(502).body(()).unwrap())
+                .await;
+            let _ = stream.finish().await;
+            return Ok(());
+        }
+    };
+    stream
+        .send_response(http::Response::builder().status(200).body(()).unwrap())
+        .await
+        .map_err(|e| QuicError::Conn(e.to_string()))?;
+
+    let mut inbound = crate::dgram::register(&registry, stream_id).await;
+    let mut buf = vec![0u8; 65535];
+    // Re-check authorization on a timer (a revoked/over-cap user must stop, like the TCP relay).
+    let mut revoke = tokio::time::interval(std::time::Duration::from_secs(2));
+    revoke.tick().await;
+    loop {
+        tokio::select! {
+            _ = revoke.tick() => {
+                if !store.still_allowed(&sid, now_secs()) { break; }
+            }
+            // UP: client datagram → target.
+            up = inbound.recv() => match up {
+                Some(payload) => {
+                    if let Some(tb) = &limits.up { tb.consume(payload.len() as u64).await; }
+                    let _ = udp.send(&payload).await;
+                    store.add_usage(&sid, payload.len() as u64, 0);
+                }
+                None => break,
+            },
+            // DOWN: target → client datagram.
+            r = udp.recv(&mut buf) => match r {
+                Ok(n) => {
+                    if let Some(tb) = &limits.down { tb.consume(n as u64).await; }
+                    let dg = crate::dgram::encode(stream_id, Bytes::copy_from_slice(&buf[..n]));
+                    if dgram_conn.send_datagram(dg).is_err() { break; }
+                    store.add_usage(&sid, 0, n as u64);
+                }
+                Err(_) => break,
+            },
+            // The client closing the request stream ends the association (UDP has no FIN).
+            done = stream.recv_data() => match done {
+                Ok(Some(_)) => {} // connect-udp carries no stream body; ignore stray data
+                Ok(None) | Err(_) => break,
+            },
+        }
+    }
+    crate::dgram::deregister(&registry, stream_id).await;
     Ok(())
 }

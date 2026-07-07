@@ -11,9 +11,9 @@ use async_trait::async_trait;
 pub trait Tunnel: Send + Sync {
     /// Open a new proxied stream to `target` ("host:port").
     async fn open(&self, target: &str) -> Result<Box<dyn ProxyStream>>;
-    /// Open a UDP datagram association to `target` ("host:port").
-    /// Default: unsupported — transports without datagram support (e.g. QUIC for now)
-    /// inherit this and return `ConnectFailed`.
+    /// Open a UDP datagram association to `target` ("host:port"). Both REALITY (mux datagrams)
+    /// and QUIC (CONNECT-UDP, RFC 9298) implement this; a transport without datagram support
+    /// inherits this default and returns `ConnectFailed`.
     async fn open_datagram(&self, _target: &str) -> Result<Box<dyn DatagramFlow>> {
         Err(crate::error::ClientError::ConnectFailed)
     }

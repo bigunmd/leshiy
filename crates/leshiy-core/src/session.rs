@@ -4,7 +4,14 @@ use crate::frame::{Frame, MAX_PLAINTEXT};
 use crate::handshake::{build_initiator, build_responder};
 use snow::TransportState;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
+
+/// Wall-clock bound on the Noise handshake (both `connect` and `accept`). A peer that opens the
+/// socket and then stalls — never sending msg1, or dribbling it — must not pin the task forever
+/// (a slowloris / connection-holding DoS). The whole handshake is expected to complete in a few
+/// round-trips, so this is generous while still bounding a hostile or dead peer.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Wire framing of a sealed frame: [u16 BE ciphertext-len][ciphertext].
 async fn read_sealed<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>> {
@@ -38,18 +45,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         let mut hs = build_initiator(server_pub, client_priv, major)?;
         let (mut reader, mut writer) = tokio::io::split(io);
 
-        // msg1: initiator → responder
-        let mut buf = vec![0u8; 1024];
-        let n = hs.write_message(&[], &mut buf)?;
-        write_sealed(&mut writer, &buf[..n]).await?;
+        // Bound the whole handshake so a stalled/hostile peer can't pin this task forever.
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+            // msg1: initiator → responder
+            let mut buf = vec![0u8; 1024];
+            let n = hs.write_message(&[], &mut buf)?;
+            write_sealed(&mut writer, &buf[..n]).await?;
 
-        // msg2: responder → initiator
-        let msg2 = read_sealed(&mut reader).await?;
-        let mut tmp = vec![0u8; 1024];
-        hs.read_message(&msg2, &mut tmp)?;
-
-        let transport = hs.into_transport_mode()?;
-        Ok(Self {
+            // msg2: responder → initiator
+            let msg2 = read_sealed(&mut reader).await?;
+            let mut tmp = vec![0u8; 1024];
+            hs.read_message(&msg2, &mut tmp)?;
+            Ok::<_, Error>(hs.into_transport_mode()?)
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map(|transport| Self {
             reader,
             writer,
             transport: Arc::new(Mutex::new(transport)),
@@ -63,18 +74,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         let mut hs = build_responder(server_priv, major)?;
         let (mut reader, mut writer) = tokio::io::split(io);
 
-        // msg1: initiator → responder (may fail on wrong key / major)
-        let msg1 = read_sealed(&mut reader).await?;
-        let mut tmp = vec![0u8; 1024];
-        hs.read_message(&msg1, &mut tmp)?;
+        // Bound the whole handshake: after a valid connect a peer that stalls before sending msg1
+        // (or dribbles it) must be dropped, not held indefinitely (anti-probe / anti-DoS).
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+            // msg1: initiator → responder (may fail on wrong key / major)
+            let msg1 = read_sealed(&mut reader).await?;
+            let mut tmp = vec![0u8; 1024];
+            hs.read_message(&msg1, &mut tmp)?;
 
-        // msg2: responder → initiator
-        let mut buf = vec![0u8; 1024];
-        let n = hs.write_message(&[], &mut buf)?;
-        write_sealed(&mut writer, &buf[..n]).await?;
-
-        let transport = hs.into_transport_mode()?;
-        Ok(Self {
+            // msg2: responder → initiator
+            let mut buf = vec![0u8; 1024];
+            let n = hs.write_message(&[], &mut buf)?;
+            write_sealed(&mut writer, &buf[..n]).await?;
+            Ok::<_, Error>(hs.into_transport_mode()?)
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map(|transport| Self {
             reader,
             writer,
             transport: Arc::new(Mutex::new(transport)),
@@ -209,6 +225,18 @@ mod tests {
         let reply = sess.read_frame().await.unwrap();
         assert_eq!(reply.payload.as_ref(), b"yo");
         srv.await.unwrap();
+    }
+
+    /// A peer that opens the connection but never sends msg1 must be dropped by the handshake
+    /// deadline, not held forever. `start_paused` auto-advances virtual time while the accept task
+    /// is idle, so the 10s timeout fires instantly instead of blocking the test.
+    #[tokio::test(start_paused = true)]
+    async fn accept_times_out_on_a_stalled_peer() {
+        let server = generate_keypair().unwrap();
+        // Keep the client end alive but silent, so the server's read pends (not EOF).
+        let (_c_io, s_io) = tokio::io::duplex(8192);
+        let res = Session::accept(s_io, &server.private, PROTOCOL_MAJOR).await;
+        assert!(matches!(res, Err(Error::Timeout)));
     }
 
     #[tokio::test]

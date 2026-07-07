@@ -94,7 +94,7 @@ impl PrivilegedOps for LinuxOps {
                 continue;
             }
             batch.push_str(&format!("route add {} via {}\n", b.dest, b.gateway));
-            installed_bypass.lock().unwrap().push(b.dest.clone());
+            installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).push(b.dest.clone());
         }
         ip_batch(&batch).await?;
 
@@ -127,6 +127,7 @@ impl PrivilegedOps for LinuxOps {
         let controller = Arc::new(LinuxController {
             handle: Handle::new()?,
             gateway: plan.server_exception.gateway,
+            gateway6: plan.orig_gateway6,
             ifindex,
             carry_v6,
             installed_bypass: installed_bypass.clone(),
@@ -152,6 +153,9 @@ impl PrivilegedOps for LinuxOps {
 struct LinuxController {
     handle: Handle,
     gateway: IpAddr,
+    /// Original IPv6 default gateway (from the plan), used to route resolved v6 bypass rules.
+    /// `None` when v6 isn't carried or no v6 default route exists — a v6 bypass is then a no-op.
+    gateway6: Option<IpAddr>,
     ifindex: u32,
     /// Whether IPv6 is carried through the tunnel this session. When false, resolved v6 domain
     /// routes are ignored (v6 is either fail-closed or out of scope).
@@ -159,29 +163,43 @@ struct LinuxController {
     installed_bypass: Arc<Mutex<Vec<Cidr>>>,
 }
 
+impl LinuxController {
+    /// The original gateway to bypass a resolved CIDR through, by address family. `None` for a v6
+    /// CIDR when v6 isn't carried or no v6 gateway is known — the caller then makes it a no-op
+    /// (the CIDR rides the tunnel, which is safe: it never leaks around it).
+    fn bypass_gateway(&self, c: &Cidr) -> Option<IpAddr> {
+        if c.addr.is_ipv4() {
+            self.gateway.is_ipv4().then_some(self.gateway)
+        } else if self.carry_v6 {
+            self.gateway6
+        } else {
+            None
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl RouteController for LinuxController {
     async fn add_bypass(&self, c: &Cidr) -> std::io::Result<()> {
-        // Bypass rides the original gateway, which we only have for IPv4 (see the planner's
-        // v6-exclude drop). A resolved v6 domain rule therefore stays in the tunnel.
-        let IpAddr::V4(_) = c.addr else {
+        let Some(gw) = self.bypass_gateway(c) else {
+            tracing::debug!(cidr = %c, "split-tunnel: no gateway for this family; bypass rides the tunnel");
             return Ok(());
         };
         self.handle
-            .add(&Route::new(c.addr, c.prefix).with_gateway(self.gateway))
+            .add(&Route::new(c.addr, c.prefix).with_gateway(gw))
             .await?;
-        self.installed_bypass.lock().unwrap().push(c.clone());
+        self.installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).push(c.clone());
         Ok(())
     }
     async fn remove_bypass(&self, c: &Cidr) -> std::io::Result<()> {
-        let IpAddr::V4(_) = c.addr else {
+        let Some(gw) = self.bypass_gateway(c) else {
             return Ok(());
         };
         let _ = self
             .handle
-            .delete(&Route::new(c.addr, c.prefix).with_gateway(self.gateway))
+            .delete(&Route::new(c.addr, c.prefix).with_gateway(gw))
             .await;
-        self.installed_bypass.lock().unwrap().retain(|x| x != c);
+        self.installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| x != c);
         Ok(())
     }
     async fn add_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
@@ -286,13 +304,27 @@ async fn ip_batch(script: &str) -> std::io::Result<()> {
         .args(["-force", "-batch", "-"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        // Capture stderr so we can surface per-line failures. `-force` keeps going past a bad line
+        // and (without this) those errors vanished — a failed route install (e.g. an Include
+        // via_tun) would silently not route, so count and warn instead of swallowing.
+        .stderr(std::process::Stdio::piped())
         .spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(script.as_bytes()).await?;
         // `stdin` is dropped at the end of this block → `ip` sees EOF and runs the batch.
     }
-    child.wait().await?;
+    let out = child.wait_with_output().await?;
+    let errors = out
+        .stderr
+        .split(|&b| b == b'\n')
+        .filter(|l| !l.is_empty())
+        .count();
+    if errors > 0 {
+        tracing::warn!(
+            failures = errors,
+            "some routes failed to install (ip -batch); matching traffic may not be routed as planned"
+        );
+    }
     Ok(())
 }
 

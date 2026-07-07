@@ -13,7 +13,7 @@
 //! oracle. Legitimate clients use a fresh random per connection (`OsRng`), so
 //! they never collide.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -33,8 +33,11 @@ pub fn replay_key(random: &[u8], session_id: &[u8]) -> Option<Key> {
 }
 
 struct Inner {
-    // (key, inserted_at_secs), oldest at the front.
+    // (key, inserted_at_secs), oldest at the front — drives TTL / capacity eviction.
     order: VecDeque<(Key, u64)>,
+    // Membership index kept in lockstep with `order`, so the per-connection replay check is
+    // O(1) instead of an O(n) scan over up to `max_entries` recent keys on the hot accept path.
+    present: HashSet<Key>,
 }
 
 /// Bounded, TTL-based set of recently-seen ClientHello keys.
@@ -52,6 +55,7 @@ impl ReplayGuard {
             max_entries: 100_000,
             inner: Mutex::new(Inner {
                 order: VecDeque::new(),
+                present: HashSet::new(),
             }),
         }
     }
@@ -61,26 +65,30 @@ impl ReplayGuard {
     pub fn check_and_record(&self, key: Key, now: u64) -> bool {
         let mut inner = self.inner.lock().unwrap();
 
-        // Evict expired entries from the front (oldest first).
+        // Evict expired entries from the front (oldest first), keeping `present` in lockstep.
         let cutoff = now.saturating_sub(self.ttl_secs);
-        while let Some(&(_, ts)) = inner.order.front() {
+        while let Some(&(k, ts)) = inner.order.front() {
             if ts < cutoff {
                 inner.order.pop_front();
+                inner.present.remove(&k);
             } else {
                 break;
             }
         }
 
-        // Replay if a live entry with the same key exists.
-        if inner.order.iter().any(|(k, _)| *k == key) {
+        // Replay if a live entry with the same key exists (O(1) via the membership index).
+        if inner.present.contains(&key) {
             return true;
         }
 
         // Cap memory: drop the oldest if at capacity.
-        if inner.order.len() >= self.max_entries {
-            inner.order.pop_front();
+        if inner.order.len() >= self.max_entries
+            && let Some((old, _)) = inner.order.pop_front()
+        {
+            inner.present.remove(&old);
         }
         inner.order.push_back((key, now));
+        inner.present.insert(key);
         false
     }
 }

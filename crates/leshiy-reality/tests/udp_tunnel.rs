@@ -40,6 +40,7 @@ async fn authed_datagram_echo() {
         short_ids: HashSet::from([[1u8, 2, 3, 4, 0, 0, 0, 0]]),
         max_time_diff: Duration::from_secs(120),
         dest: "www.example.com:443".into(),
+        dest_by_sni: Default::default(),
     });
     let cert = Arc::new(ServerCert::generate());
 

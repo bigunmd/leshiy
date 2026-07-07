@@ -266,7 +266,7 @@ type Streams = Arc<Mutex<HashMap<u32, StreamSink>>>;
 /// errors) and drops each `data_tx` so consumers see EOF. Called when a task tears the session
 /// down, so no stream is left hanging.
 fn close_all_streams(streams: &Streams) {
-    let drained: Vec<StreamSink> = streams.lock().unwrap().drain().map(|(_, s)| s).collect();
+    let drained: Vec<StreamSink> = streams.lock().unwrap_or_else(|e| e.into_inner()).drain().map(|(_, s)| s).collect();
     for sink in drained {
         sink.close();
     }
@@ -350,7 +350,7 @@ impl Mux {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
                         Command::Open(id, target, sink) => {
-                            w_streams.lock().unwrap().insert(id, sink);
+                            w_streams.lock().unwrap_or_else(|e| e.into_inner()).insert(id, sink);
                             if writer
                                 .write_frame(&Frame {
                                     stream_id: id,
@@ -365,7 +365,7 @@ impl Mux {
                         }
                         Command::Write(f) => {
                             if base_type(f.ftype) == FrameType::Close as u8
-                                && let Some(sink) = w_streams.lock().unwrap().remove(&f.stream_id)
+                                && let Some(sink) = w_streams.lock().unwrap_or_else(|e| e.into_inner()).remove(&f.stream_id)
                             {
                                 sink.close();
                             }
@@ -439,7 +439,7 @@ impl Mux {
                         let (stream, sink) =
                             new_stream(f.stream_id, target, kind, r_cmd_tx.clone(), flowcontrol_on);
                         {
-                            let mut map = r_streams.lock().unwrap();
+                            let mut map = r_streams.lock().unwrap_or_else(|e| e.into_inner());
                             if map.len() >= MAX_CONCURRENT_PEER_STREAMS {
                                 break; // peer opened too many concurrent streams → abort (L3)
                             }
@@ -454,7 +454,7 @@ impl Mux {
                         // shared reader and head-of-line-block other streams; flow control bounds how
                         // much the peer may have in flight. Clone the sink out of the map first so we
                         // never hold the Mutex guard across an .await.
-                        let sink = r_streams.lock().unwrap().get(&f.stream_id).cloned();
+                        let sink = r_streams.lock().unwrap_or_else(|e| e.into_inner()).get(&f.stream_id).cloned();
                         if let Some(sink) = sink {
                             let n = f.payload.len();
                             let buffered = sink.buffered.fetch_add(n, Ordering::SeqCst) + n;
@@ -462,7 +462,7 @@ impl Mux {
                                 // The peer is ignoring its window (or there is none): reset just this
                                 // stream instead of buffering without bound or stalling the mux.
                                 sink.buffered.fetch_sub(n, Ordering::SeqCst);
-                                if let Some(sink) = r_streams.lock().unwrap().remove(&f.stream_id) {
+                                if let Some(sink) = r_streams.lock().unwrap_or_else(|e| e.into_inner()).remove(&f.stream_id) {
                                     sink.close();
                                 }
                                 let _ = r_cmd_tx
@@ -487,14 +487,14 @@ impl Mux {
                                 f.payload[2],
                                 f.payload[3],
                             ]) as usize;
-                            if let Some(sink) = r_streams.lock().unwrap().get(&f.stream_id)
+                            if let Some(sink) = r_streams.lock().unwrap_or_else(|e| e.into_inner()).get(&f.stream_id)
                                 && let Some(sem) = &sink.send_window
                             {
                                 sem.add_permits(credit.min(MAX_CREDIT));
                             }
                         }
                     } else if bt == FrameType::Close as u8 {
-                        if let Some(sink) = r_streams.lock().unwrap().remove(&f.stream_id) {
+                        if let Some(sink) = r_streams.lock().unwrap_or_else(|e| e.into_inner()).remove(&f.stream_id) {
                             sink.close();
                         }
                     } else if is_critical(f.ftype) {
@@ -794,7 +794,7 @@ mod tests {
     }
     impl crate::transport::FrameWrite for RecordingWriter {
         async fn write_frame(&mut self, frame: &Frame) -> crate::Result<()> {
-            self.sent.lock().unwrap().push(frame.clone());
+            self.sent.lock().unwrap_or_else(|e| e.into_inner()).push(frame.clone());
             Ok(())
         }
     }

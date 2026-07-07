@@ -82,11 +82,36 @@ fn client_hello_version() -> Hello {
     }
 }
 
-/// Minimal SOCKS5 (no-auth, CONNECT only). Returns ("host:port", io).
+/// A parsed SOCKS5 request: either a stream CONNECT or a UDP ASSOCIATE.
+pub enum Socks5Cmd<S> {
+    /// CONNECT to `target` ("host:port"); the success reply has already been sent on `io`.
+    Connect { target: String, io: S },
+    /// UDP ASSOCIATE. The reply is **not** yet sent (it must carry the relay's bound address,
+    /// which only the caller knows once it binds the UDP socket). `io` is the TCP control
+    /// connection — kept open to detect teardown; the client closing it ends the association.
+    UdpAssociate { io: S },
+}
+
+/// Minimal SOCKS5 (no-auth). Returns ("host:port", io) for a CONNECT; errors on any other
+/// command. Kept for callers whose transport cannot carry UDP (QUIC client, direct listener).
 /// Mirror of v0 `leshiy::client::socks5_accept`, errors mapped to `RealityError`.
 pub async fn socks5_accept<S: AsyncRead + AsyncWrite + Unpin>(
-    mut io: S,
+    io: S,
 ) -> crate::Result<(String, S)> {
+    match socks5_accept_ext(io).await? {
+        Socks5Cmd::Connect { target, io } => Ok((target, io)),
+        Socks5Cmd::UdpAssociate { .. } => {
+            Err(crate::RealityError::Malformed("only CONNECT supported".into()))
+        }
+    }
+}
+
+/// Full SOCKS5 accept: handles the no-auth greeting and parses the request, distinguishing
+/// CONNECT (0x01) from UDP ASSOCIATE (0x03). For CONNECT the success reply is sent here; for
+/// UDP ASSOCIATE it is deferred to the caller (which binds the relay socket first).
+pub async fn socks5_accept_ext<S: AsyncRead + AsyncWrite + Unpin>(
+    mut io: S,
+) -> crate::Result<Socks5Cmd<S>> {
     use crate::RealityError;
     // Greeting
     let mut head = [0u8; 2];
@@ -102,25 +127,49 @@ pub async fn socks5_accept<S: AsyncRead + AsyncWrite + Unpin>(
         .await
         .map_err(RealityError::Io)?; // no-auth selected
 
-    // Request
+    // Request: VER, CMD, RSV, ATYP
     let mut req = [0u8; 4];
     io.read_exact(&mut req).await.map_err(RealityError::Io)?;
-    if req[1] != 0x01 {
-        // CMD must be CONNECT
+    let cmd = req[1];
+    // CONNECT (0x01) and UDP ASSOCIATE (0x03) are supported; BIND (0x02) and anything else aren't.
+    if cmd != 0x01 && cmd != 0x03 {
         io.write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
             .await
             .map_err(RealityError::Io)?;
-        return Err(RealityError::Malformed("only CONNECT supported".into()));
+        return Err(RealityError::Malformed("unsupported SOCKS command".into()));
     }
-    let host = match req[3] {
+    let host = read_socks_addr(&mut io, req[3]).await?;
+    let mut p = [0u8; 2];
+    io.read_exact(&mut p).await.map_err(RealityError::Io)?;
+    let port = u16::from_be_bytes(p);
+
+    if cmd == 0x01 {
+        // Success reply: VER=5, REP=0, RSV=0, ATYP=1 (IPv4), BND.ADDR=0.0.0.0, BND.PORT=0
+        io.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .await
+            .map_err(RealityError::Io)?;
+        Ok(Socks5Cmd::Connect {
+            target: crate::addr::join_host_port(&host, port),
+            io,
+        })
+    } else {
+        // UDP ASSOCIATE — the DST.ADDR/DST.PORT above is the address the client will send *from*
+        // (commonly 0.0.0.0:0); we don't restrict on it. The reply is sent by the caller once the
+        // relay socket is bound.
+        Ok(Socks5Cmd::UdpAssociate { io })
+    }
+}
+
+/// Read a SOCKS5 address field (ATYP + ADDR) into a host string (no port).
+async fn read_socks_addr<S: AsyncRead + Unpin>(io: &mut S, atyp: u8) -> crate::Result<String> {
+    use crate::RealityError;
+    Ok(match atyp {
         0x01 => {
-            // IPv4
             let mut a = [0u8; 4];
             io.read_exact(&mut a).await.map_err(RealityError::Io)?;
             std::net::Ipv4Addr::from(a).to_string()
         }
         0x03 => {
-            // Domain
             let mut l = [0u8; 1];
             io.read_exact(&mut l).await.map_err(RealityError::Io)?;
             let mut d = vec![0u8; l[0] as usize];
@@ -128,21 +177,12 @@ pub async fn socks5_accept<S: AsyncRead + AsyncWrite + Unpin>(
             String::from_utf8_lossy(&d).to_string()
         }
         0x04 => {
-            // IPv6
             let mut a = [0u8; 16];
             io.read_exact(&mut a).await.map_err(RealityError::Io)?;
             std::net::Ipv6Addr::from(a).to_string()
         }
         _ => return Err(RealityError::Malformed("bad atyp".into())),
-    };
-    let mut p = [0u8; 2];
-    io.read_exact(&mut p).await.map_err(RealityError::Io)?;
-    let port = u16::from_be_bytes(p);
-    // Success reply: VER=5, REP=0, RSV=0, ATYP=1 (IPv4), BND.ADDR=0.0.0.0, BND.PORT=0
-    io.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-        .await
-        .map_err(RealityError::Io)?;
-    Ok((crate::addr::join_host_port(&host, port), io))
+    })
 }
 
 /// An established REALITY tunnel, ready for SOCKS5 serving.
@@ -275,6 +315,7 @@ pub async fn connect_reality(
 }
 
 /// Bind a SOCKS5 listener on `socks_addr` and serve tunneled connections over `conn`.
+/// Handles both CONNECT (TCP streams) and UDP ASSOCIATE (datagram flows) over the mux.
 pub async fn serve_socks5(conn: RealityConn, socks_addr: &str) -> crate::Result<()> {
     let mux = conn.mux;
     let listener = TcpListener::bind(socks_addr)
@@ -283,15 +324,185 @@ pub async fn serve_socks5(conn: RealityConn, socks_addr: &str) -> crate::Result<
     loop {
         let (cli, _) = listener.accept().await.map_err(crate::RealityError::Io)?;
         cli.set_nodelay(true).ok();
+        // The UDP relay is bound on the interface the control connection arrived on (loopback for
+        // a local SOCKS proxy); capture it before `cli` is moved into the accept.
+        let bind_ip = cli
+            .local_addr()
+            .map(|a| a.ip())
+            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
         let mux = mux.clone();
         tokio::spawn(async move {
-            if let Ok((target, cli)) = socks5_accept(cli).await
-                && let Ok(stream) = { mux.lock().await.open(&target).await }
-            {
-                let _ = pipe(cli, stream).await;
+            match socks5_accept_ext(cli).await {
+                Ok(Socks5Cmd::Connect { target, io }) => {
+                    if let Ok(stream) = { mux.lock().await.open(&target).await } {
+                        let _ = pipe(io, stream).await;
+                    }
+                }
+                Ok(Socks5Cmd::UdpAssociate { io }) => {
+                    let _ = serve_udp_associate(io, mux, bind_ip).await;
+                }
+                Err(_) => {}
             }
         });
     }
+}
+
+/// Serve one SOCKS5 UDP ASSOCIATE: bind a local UDP relay, reply with its address on the TCP
+/// control connection, then relay the client's datagrams to per-target mux datagram flows and
+/// their replies back. The association ends when the client closes the control connection (or it
+/// errors) — UDP itself has no teardown signal.
+async fn serve_udp_associate<S>(
+    mut ctrl: S,
+    mux: Arc<Mutex<leshiy_core::mux::Mux>>,
+    bind_ip: std::net::IpAddr,
+) -> crate::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    use crate::RealityError;
+    let relay = Arc::new(
+        tokio::net::UdpSocket::bind((bind_ip, 0))
+            .await
+            .map_err(RealityError::Io)?,
+    );
+    let bound = relay.local_addr().map_err(RealityError::Io)?;
+    ctrl.write_all(&encode_assoc_reply(bound))
+        .await
+        .map_err(RealityError::Io)?;
+
+    // One mux datagram flow per distinct target; the sender feeds the flow's UP direction.
+    let mut assocs: std::collections::HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>> =
+        std::collections::HashMap::new();
+    let mut client_addr: Option<std::net::SocketAddr> = None;
+    let mut buf = vec![0u8; 65535];
+    let mut ctrl_buf = [0u8; 256];
+    loop {
+        tokio::select! {
+            // The control connection closing (or erroring) ends the whole association.
+            r = ctrl.read(&mut ctrl_buf) => match r {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {} // clients don't normally send on it; ignore stray bytes
+            },
+            r = relay.recv_from(&mut buf) => {
+                let (n, from) = match r { Ok(x) => x, Err(_) => break };
+                // Pin the association to the first client source; drop spoofed packets from elsewhere.
+                match client_addr {
+                    None => client_addr = Some(from),
+                    Some(a) if a != from => continue,
+                    Some(_) => {}
+                }
+                let Some((target, data_off, header)) = parse_udp_datagram(&buf[..n]) else {
+                    continue; // fragmented or malformed — dropped
+                };
+                let data = buf[data_off..n].to_vec();
+                if !assocs.contains_key(&target) {
+                    let stream = match mux.lock().await.open_datagram(&target).await {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+                    tokio::spawn(udp_assoc_flow(stream, rx, relay.clone(), from, header));
+                    assocs.insert(target.clone(), tx);
+                }
+                if let Some(tx) = assocs.get(&target) {
+                    let _ = tx.send(data).await;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Drive one target's datagram flow: forward UP datagrams from `up_rx` onto the mux `stream`, and
+/// wrap DOWN datagrams from the tunnel in a SOCKS UDP header (echoing the request's target address)
+/// and send them back to the client. Ends when either side closes.
+async fn udp_assoc_flow(
+    mut stream: leshiy_core::mux::Stream,
+    mut up_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    relay: Arc<tokio::net::UdpSocket>,
+    client_addr: std::net::SocketAddr,
+    header: Vec<u8>,
+) {
+    // SOCKS UDP reply prefix: RSV(2)=0, FRAG(1)=0, then the echoed ATYP+ADDR+PORT of the target.
+    let mut prefix = vec![0u8, 0, 0];
+    prefix.extend_from_slice(&header);
+    loop {
+        tokio::select! {
+            up = up_rx.recv() => match up {
+                Some(data) => {
+                    if stream.send(data.into()).await.is_err() {
+                        break;
+                    }
+                }
+                None => break,
+            },
+            down = stream.recv() => match down {
+                Ok(b) => {
+                    let mut pkt = prefix.clone();
+                    pkt.extend_from_slice(&b);
+                    if relay.send_to(&pkt, client_addr).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            },
+        }
+    }
+}
+
+/// Parse a SOCKS5 UDP request datagram: `RSV(2) FRAG(1) ATYP ADDR PORT DATA`. Returns the
+/// target ("host:port"), the offset where DATA begins, and the raw `ATYP+ADDR+PORT` header bytes
+/// (echoed back in replies). `None` if fragmented (FRAG != 0) or malformed.
+fn parse_udp_datagram(pkt: &[u8]) -> Option<(String, usize, Vec<u8>)> {
+    if pkt.len() < 4 || pkt[2] != 0 {
+        return None; // too short, or fragmentation (unsupported — drop)
+    }
+    let atyp = pkt[3];
+    let (host, addr_end) = match atyp {
+        0x01 => {
+            let a: [u8; 4] = pkt.get(4..8)?.try_into().ok()?;
+            (std::net::Ipv4Addr::from(a).to_string(), 8)
+        }
+        0x04 => {
+            let a: [u8; 16] = pkt.get(4..20)?.try_into().ok()?;
+            (std::net::Ipv6Addr::from(a).to_string(), 20)
+        }
+        0x03 => {
+            let len = *pkt.get(4)? as usize;
+            let end = 5 + len;
+            let d = pkt.get(5..end)?;
+            (String::from_utf8_lossy(d).to_string(), end)
+        }
+        _ => return None,
+    };
+    let port = u16::from_be_bytes([*pkt.get(addr_end)?, *pkt.get(addr_end + 1)?]);
+    let data_off = addr_end + 2;
+    if data_off > pkt.len() {
+        return None;
+    }
+    // Header = ATYP+ADDR+PORT (pkt[3..data_off]), echoed verbatim in reply datagrams.
+    Some((
+        crate::addr::join_host_port(&host, port),
+        data_off,
+        pkt[3..data_off].to_vec(),
+    ))
+}
+
+/// Build the SOCKS5 UDP ASSOCIATE success reply carrying the relay's bound address.
+fn encode_assoc_reply(bound: std::net::SocketAddr) -> Vec<u8> {
+    let mut r = vec![0x05, 0x00, 0x00];
+    match bound.ip() {
+        std::net::IpAddr::V4(v4) => {
+            r.push(0x01);
+            r.extend_from_slice(&v4.octets());
+        }
+        std::net::IpAddr::V6(v6) => {
+            r.push(0x04);
+            r.extend_from_slice(&v6.octets());
+        }
+    }
+    r.extend_from_slice(&bound.port().to_be_bytes());
+    r
 }
 
 /// Connect to the REALITY server, authenticate, establish the tunnel, and serve SOCKS5.

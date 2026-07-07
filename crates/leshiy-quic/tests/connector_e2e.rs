@@ -312,6 +312,7 @@ async fn connector_reality_front_two_hop() {
         short_ids: HashSet::from([USER_SID]),
         max_time_diff: Duration::from_secs(120),
         dest,
+        dest_by_sni: Default::default(),
     });
     let cert = Arc::new(ServerCert::generate());
 
@@ -533,6 +534,60 @@ async fn wait_udp(addr: std::net::SocketAddr) {
     }
     // Last resort: just wait a bit.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+}
+
+/// Spawn a UDP echo server; returns its "127.0.0.1:<port>".
+async fn spawn_udp_echo() -> String {
+    let s = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = s.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        let mut b = [0u8; 2048];
+        loop {
+            if let Ok((n, from)) = s.recv_from(&mut b).await {
+                let _ = s.send_to(&b[..n], from).await;
+            }
+        }
+    });
+    addr
+}
+
+/// Open a UDP association through the egress to `target`, send `payload`, read it back.
+async fn udp_roundtrip_through_egress(
+    eg: &leshiy_quic::connector::ConnectorEgress,
+    target: &str,
+    payload: &[u8],
+) -> Result<(), String> {
+    use leshiy_reality::egress::Egress;
+    let mut u = eg.open_udp(target).await.map_err(|e| e.to_string())?;
+    // Retry: the first datagram can race the far-side association setup.
+    for attempt in 0..5 {
+        u.send(payload).await.map_err(|e| e.to_string())?;
+        let mut buf = vec![0u8; 2048];
+        match tokio::time::timeout(Duration::from_millis(500), u.recv(&mut buf)).await {
+            Ok(Ok(n)) if &buf[..n] == payload => return Ok(()),
+            _ if attempt < 4 => continue,
+            other => return Err(format!("no udp echo: {other:?}")),
+        }
+    }
+    Err("no udp echo after retries".into())
+}
+
+/// A (ConnectorEgress → B) carries UDP to an echo via CONNECT-UDP through the two-hop path.
+#[tokio::test]
+async fn connector_udp_two_hop() {
+    let udp_echo = spawn_udp_echo().await;
+    let (b_addr, b_pin) = spawn_exit_b().await;
+    let connector = ConnectorEgress::connect(
+        b_addr,
+        "example.test",
+        CONNECTOR_SID,
+        CertVerification::Pinned(b_pin),
+    )
+    .await
+    .expect("ConnectorEgress::connect to B must succeed");
+    udp_roundtrip_through_egress(&connector, &udp_echo, b"connector-udp-e2e")
+        .await
+        .expect("UDP echo through the connector");
 }
 
 /// Open a single tunnel through the egress to `target`, write `payload`, read it back.

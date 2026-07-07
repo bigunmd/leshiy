@@ -95,10 +95,10 @@ fn capped(domains: &[String]) -> (&[String], bool) {
     }
 }
 
-/// Resolve `domains` to host CIDRs (`/32`) via the system resolver, with bounded concurrency so
-/// large subscription lists resolve in seconds. IPv6 results are filtered out this phase (IPv6
-/// is not tunnelled). Unresolvable domains are skipped (logged); the list is capped to
-/// [`MAX_DOMAINS`] (warned, never silent).
+/// Resolve `domains` to host CIDRs (`/32` for IPv4, `/128` for IPv6) via the system resolver,
+/// with bounded concurrency so large subscription lists resolve in seconds. Both families are
+/// emitted; a v6 route is a no-op when the session doesn't carry IPv6. Unresolvable domains are
+/// skipped (logged); the list is capped to [`MAX_DOMAINS`] (warned, never silent).
 pub async fn resolve_domains(domains: &[String]) -> BTreeSet<Cidr> {
     let total = domains.len();
     let (domains, truncated) = capped(domains);
@@ -128,18 +128,22 @@ pub async fn resolve_domains(domains: &[String]) -> BTreeSet<Cidr> {
     out
 }
 
-/// Resolve a single domain to its IPv4 host CIDRs (`/32`). Empty on failure (logged).
+/// Resolve a single domain to its host CIDRs (`/32` for IPv4, `/128` for IPv6). Empty on
+/// failure (logged). Both families are emitted; the per-OS backend decides whether a v6 route is
+/// installable (it drops v6 when the session doesn't carry IPv6 — a safe no-op).
 async fn resolve_one(domain: &str) -> Vec<Cidr> {
     // `lookup_host` needs a port; 0 is fine since we only use the addresses.
     match tokio::net::lookup_host((domain, 0)).await {
         Ok(addrs) => addrs
-            .filter_map(|a| match a.ip() {
-                IpAddr::V4(v4) => Some(Cidr {
+            .map(|a| match a.ip() {
+                IpAddr::V4(v4) => Cidr {
                     addr: v4.into(),
                     prefix: 32,
-                }),
-                // IPv6 is out of scope this phase (kill-switched / untunnelled).
-                IpAddr::V6(_) => None,
+                },
+                IpAddr::V6(v6) => Cidr {
+                    addr: v6.into(),
+                    prefix: 128,
+                },
             })
             .collect(),
         Err(e) => {
@@ -186,6 +190,22 @@ mod tests {
             addr: s.parse().unwrap(),
             prefix: 32,
         }
+    }
+
+    fn host6(s: &str) -> Cidr {
+        Cidr {
+            addr: s.parse().unwrap(),
+            prefix: 128,
+        }
+    }
+
+    /// `lookup_host` returns IP literals verbatim (no DNS), so passing one exercises the
+    /// address→CIDR mapping deterministically and offline.
+    #[tokio::test]
+    async fn resolve_one_maps_families_to_host_prefixes() {
+        assert_eq!(resolve_one("127.0.0.1").await, vec![host("127.0.0.1")]);
+        // v6 was previously dropped; it must now map to a /128 so v6 domain rules apply.
+        assert_eq!(resolve_one("::1").await, vec![host6("::1")]);
     }
 
     #[test]

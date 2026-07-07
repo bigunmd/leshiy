@@ -118,12 +118,11 @@ impl EngineRunner {
         }
     }
 
-    /// The full-tunnel VPN carries UDP via tunnel **datagrams**, which only REALITY (TCP)
-    /// provides — QUIC datagrams are unimplemented and `QuicTunnel` can't relay the VPN's
-    /// flows. So force REALITY regardless of the user's (proxy) transport preference, matching
-    /// `leshiy tun`/`leshiy vpn` (which default `--transport tcp`).
-    fn pref(_t: TransportPref) -> TransportPref {
-        TransportPref::Tcp
+    /// The full-tunnel VPN carries UDP via tunnel **datagrams**. Both transports now provide them
+    /// — REALITY via mux datagrams and QUIC via CONNECT-UDP (RFC 9298) — so the user's transport
+    /// preference is honored as-is (no longer forced to REALITY/TCP).
+    fn pref(t: TransportPref) -> TransportPref {
+        t
     }
 
     /// The fallible body of `start`: resolve the server, dial the tunnel, and spawn the engine.

@@ -140,6 +140,7 @@ impl Harness {
             short_ids: HashSet::from([SHORT_ID]),
             max_time_diff: Duration::from_secs(120),
             dest,
+            dest_by_sni: Default::default(),
         });
         let cert = Arc::new(ServerCert::generate());
 
@@ -370,6 +371,7 @@ async fn data_cap_disconnects() {
         short_ids: HashSet::from([SHORT_ID]),
         max_time_diff: Duration::from_secs(120),
         dest: dest.clone(),
+        dest_by_sni: Default::default(),
     });
     let cert = Arc::new(ServerCert::generate());
 

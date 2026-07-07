@@ -5,7 +5,7 @@ exclude = ["apps/gui/src-tauri"]
 
 [workspace.package]
 edition = "2024"
-version = "1.7.0"
+version = "1.7.1"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
@@ -41,7 +41,10 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 quinn = { version = "0.11", features = ["rustls-aws-lc-rs"] }
 socket2 = { version = "0.5", features = ["all"] }
 h3 = "0.0.8"
-h3-quinn = "0.0.10"
+h3-quinn = { version = "0.0.10", features = ["datagram"] }
+# HTTP/3 datagrams (RFC 9297) + CONNECT-UDP (RFC 9298) — carries VPN/UDP flows over the QUIC
+# transport. Version pinned to what h3-quinn 0.0.10 depends on.
+h3-datagram = "0.0.2"
 http = "1"
 bytes = "1"
 webpki-roots = "0.26"

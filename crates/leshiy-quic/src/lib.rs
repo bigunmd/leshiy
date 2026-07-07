@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod connector;
+mod dgram;
 pub mod endpoint;
 pub mod masquerade;
 pub mod server;

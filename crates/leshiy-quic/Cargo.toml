@@ -12,6 +12,7 @@ thiserror.workspace = true
 leshiy-reality = { path = "../leshiy-reality" }
 h3.workspace = true
 h3-quinn.workspace = true
+h3-datagram.workspace = true
 http.workspace = true
 bytes.workspace = true
 hex.workspace = true
@@ -24,6 +25,7 @@ socket2 = { workspace = true }
 rcgen.workspace = true
 h3.workspace = true
 h3-quinn.workspace = true
+h3-datagram.workspace = true
 http.workspace = true
 bytes.workspace = true
 hex.workspace = true

@@ -1392,6 +1392,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "h3-datagram"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d2c9f77921668673721ae40f17c729fc48b9e38a663858097cea547484fdf0f"
+dependencies = [
+ "bytes",
+ "h3",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "h3-quinn"
 version = "0.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1400,6 +1411,7 @@ dependencies = [
  "bytes",
  "futures",
  "h3",
+ "h3-datagram",
  "quinn",
  "tokio",
  "tokio-util",
@@ -1744,7 +1756,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "leshiy"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "anstream",
  "anstyle",
@@ -1782,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-client"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1807,7 +1819,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-core"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "bytes",
  "proptest",
@@ -1820,7 +1832,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-helper"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1840,7 +1852,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-provision"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "argon2 0.5.3",
  "async-trait",
@@ -1859,11 +1871,12 @@ dependencies = [
 
 [[package]]
 name = "leshiy-quic"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "async-trait",
  "bytes",
  "h3",
+ "h3-datagram",
  "h3-quinn",
  "hex",
  "http",
@@ -1883,7 +1896,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-reality"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "aes-gcm 0.10.3",
  "async-trait",
@@ -1914,7 +1927,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-tls"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "aes-gcm 0.10.3",
  "chacha20poly1305",
@@ -1935,7 +1948,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-tun"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "async-trait",
  "bytes",

@@ -218,12 +218,14 @@ pub fn init(opts: InitOptions<'_>) -> Result<InitOutput> {
     let cfg = RealityServerConfig {
         listen,
         dest: dest.to_string(),
+        dest_by_sni: Default::default(),
         server_names: vec![sni.clone()],
         static_private_key_b64: URL_SAFE_NO_PAD.encode(*sk_bytes),
         short_ids: vec![], // DB is the registry; short_ids unused when user_db is set.
         max_time_diff_secs: 120,
         host: host.to_string(),
         control_socket: None,
+        masquerade_origin: None,
         user_db: Some(db_path_str),
         // The BIND address (e.g. 0.0.0.0:443) — what the server listens on at runtime.
         quic_listen: quic_listen.map(|s| s.to_string()),
@@ -512,7 +514,10 @@ pub async fn run(config: &str) -> Result<()> {
 
         // Spawn QUIC server with the SAME store and the SAME egress.
         let qstore: Arc<dyn UserStore> = user_store.clone();
-        let masq = leshiy_quic::masquerade::Masquerade::default();
+        let masq = match &cfg.masquerade_origin {
+            Some(origin) => leshiy_quic::masquerade::Masquerade::Reverse(origin.clone()),
+            None => leshiy_quic::masquerade::Masquerade::default(),
+        };
         let qegress = egress.clone();
         tokio::spawn(async move {
             if let Err(e) =

@@ -151,6 +151,27 @@ pub fn into_transport<R, W>(
     )
 }
 
+/// Per-record bound on the post-ClientHello handshake reads. After a valid authed ClientHello a
+/// peer that stalls before sending its Finished (or a slow/hostile `dest` on the client side) must
+/// be dropped, not held indefinitely — bounded only by the connection limiter otherwise.
+const HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Read one TLS record, bounded by [`HANDSHAKE_READ_TIMEOUT`]. A timeout maps to the same
+/// `Malformed` path as a read error, so the caller treats a stalled peer like a broken one.
+async fn read_record_deadlined<R>(
+    reader: &mut R,
+    what: &str,
+) -> RealityResult<leshiy_tls::record::Record>
+where
+    R: AsyncRead + Unpin + Send,
+{
+    match tokio::time::timeout(HANDSHAKE_READ_TIMEOUT, read_record(reader)).await {
+        Ok(Ok(rec)) => Ok(rec),
+        Ok(Err(_)) => Err(RealityError::Malformed(format!("reading {what}"))),
+        Err(_) => Err(RealityError::Malformed(format!("{what} timed out"))),
+    }
+}
+
 /// Drive the server handshake: send the flight, read the client Finished record,
 /// return the session + the split halves ready for the app-data tunnel.
 ///
@@ -171,10 +192,9 @@ where
     let (sh_state, flight) = server_handshake(client_hello, dest_server_hello, auth_key, cert)?;
     writer.write_all(&flight).await.map_err(RealityError::Io)?;
     writer.flush().await.map_err(RealityError::Io)?;
-    // read one record = the client's (encrypted) Finished
-    let fin = read_record(&mut reader)
-        .await
-        .map_err(|_| RealityError::Malformed("reading client Finished".into()))?;
+    // read one record = the client's (encrypted) Finished (deadline-bounded: a client that stalls
+    // after a valid ClientHello must not pin the accept task forever).
+    let fin = read_record_deadlined(&mut reader, "client Finished").await?;
     let session = sh_state.finish(&fin.encode())?;
     Ok((session, reader, writer))
 }
@@ -199,12 +219,8 @@ where
 {
     // read the server flight: plaintext SH record + one encrypted record. Read two records
     // and concatenate their raw bytes (client_handshake parses SH then the encrypted record).
-    let sh_rec = read_record(&mut reader)
-        .await
-        .map_err(|_| RealityError::Malformed("reading SH record".into()))?;
-    let enc_rec = read_record(&mut reader)
-        .await
-        .map_err(|_| RealityError::Malformed("reading encrypted flight record".into()))?;
+    let sh_rec = read_record_deadlined(&mut reader, "SH record").await?;
+    let enc_rec = read_record_deadlined(&mut reader, "encrypted flight record").await?;
     let mut flight = sh_rec.encode();
     flight.extend_from_slice(&enc_rec.encode());
     let out: ClientHandshakeOut =
