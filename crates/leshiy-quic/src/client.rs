@@ -120,10 +120,7 @@ pub async fn connect_quic(
     let dgram_conn = conn.clone();
     let mut builder = h3::client::builder();
     builder.enable_extended_connect(true).enable_datagram(true);
-    let (mut driver, send_req): (
-        h3::client::Connection<h3_quinn::Connection, Bytes>,
-        _,
-    ) = builder
+    let (mut driver, send_req): (h3::client::Connection<h3_quinn::Connection, Bytes>, _) = builder
         .build(h3_quinn::Connection::new(conn))
         .await
         .map_err(|e| QuicError::Conn(e.to_string()))?;
@@ -136,7 +133,10 @@ pub async fn connect_quic(
     });
     // One demux task per connection fans inbound datagrams out to their per-target associations.
     let registry = crate::dgram::new_registry();
-    tokio::spawn(crate::dgram::demux_loop(dgram_conn.clone(), registry.clone()));
+    tokio::spawn(crate::dgram::demux_loop(
+        dgram_conn.clone(),
+        registry.clone(),
+    ));
     Ok(QuicConn {
         send_req,
         short_id,

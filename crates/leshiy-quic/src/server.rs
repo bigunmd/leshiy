@@ -68,7 +68,10 @@ async fn serve_h3_conn(
         .map_err(|e| QuicError::Conn(e.to_string()))?;
     // One demux task per connection fans inbound datagrams out to their CONNECT-UDP handlers.
     let registry = crate::dgram::new_registry();
-    tokio::spawn(crate::dgram::demux_loop(dgram_conn.clone(), registry.clone()));
+    tokio::spawn(crate::dgram::demux_loop(
+        dgram_conn.clone(),
+        registry.clone(),
+    ));
     while let Ok(Some(resolver)) = h3.accept().await {
         let (req, stream) = match resolver.resolve_request().await {
             Ok(x) => x,
@@ -100,11 +103,13 @@ async fn handle_request(
     {
         // Extended CONNECT with `:protocol = connect-udp` (RFC 9298) → UDP datagram tunnel;
         // a plain CONNECT → TCP stream tunnel.
-        let is_udp = req.extensions().get::<h3::ext::Protocol>()
-            == Some(&h3::ext::Protocol::CONNECT_UDP);
+        let is_udp =
+            req.extensions().get::<h3::ext::Protocol>() == Some(&h3::ext::Protocol::CONNECT_UDP);
         if is_udp {
-            return tunnel_udp(stream, &target, sid, limits, store, egress, dgram_conn, registry)
-                .await;
+            return tunnel_udp(
+                stream, &target, sid, limits, store, egress, dgram_conn, registry,
+            )
+            .await;
         }
         return tunnel(stream, &target, sid, limits, store, egress).await;
     }

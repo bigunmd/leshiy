@@ -597,7 +597,11 @@ async fn prober_get_reverse_proxied_to_origin() {
         .unwrap();
     let mut stream = send_req.send_request(req).await.unwrap();
     let resp = stream.recv_response().await.unwrap();
-    assert_eq!(resp.status(), 200, "reverse-proxied GET should relay the origin's 200");
+    assert_eq!(
+        resp.status(),
+        200,
+        "reverse-proxied GET should relay the origin's 200"
+    );
 
     let mut body = Vec::new();
     while let Some(mut chunk) = stream.recv_data().await.unwrap() {
@@ -648,9 +652,14 @@ async fn connect_udp_datagram_echo() {
     let (server, pin) = start_server(store).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let conn = connect_quic(server, "example.test", [1; 8], CertVerification::Pinned(pin))
-        .await
-        .expect("connect quic");
+    let conn = connect_quic(
+        server,
+        "example.test",
+        [1; 8],
+        CertVerification::Pinned(pin),
+    )
+    .await
+    .expect("connect quic");
     let mut flow = conn
         .open_datagram(&udp_echo)
         .await
@@ -659,7 +668,9 @@ async fn connect_udp_datagram_echo() {
     // Send a datagram to the echo through the QUIC tunnel; expect it back. Retry a couple of
     // times: the very first HTTP datagram can race the server-side association setup.
     for attempt in 0..5 {
-        flow.send(Bytes::from_static(b"quic-udp-e2e")).await.unwrap();
+        flow.send(Bytes::from_static(b"quic-udp-e2e"))
+            .await
+            .unwrap();
         match tokio::time::timeout(Duration::from_millis(500), flow.recv()).await {
             Ok(Some(got)) => {
                 assert_eq!(got.as_ref(), b"quic-udp-e2e");

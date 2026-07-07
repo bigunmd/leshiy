@@ -94,7 +94,10 @@ impl PrivilegedOps for LinuxOps {
                 continue;
             }
             batch.push_str(&format!("route add {} via {}\n", b.dest, b.gateway));
-            installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).push(b.dest.clone());
+            installed_bypass
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(b.dest.clone());
         }
         ip_batch(&batch).await?;
 
@@ -188,7 +191,10 @@ impl RouteController for LinuxController {
         self.handle
             .add(&Route::new(c.addr, c.prefix).with_gateway(gw))
             .await?;
-        self.installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).push(c.clone());
+        self.installed_bypass
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(c.clone());
         Ok(())
     }
     async fn remove_bypass(&self, c: &Cidr) -> std::io::Result<()> {
@@ -199,7 +205,10 @@ impl RouteController for LinuxController {
             .handle
             .delete(&Route::new(c.addr, c.prefix).with_gateway(gw))
             .await;
-        self.installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| x != c);
+        self.installed_bypass
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|x| x != c);
         Ok(())
     }
     async fn add_via_tun(&self, c: &Cidr) -> std::io::Result<()> {

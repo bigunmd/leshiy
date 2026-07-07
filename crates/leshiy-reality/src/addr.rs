@@ -100,11 +100,17 @@ mod tests {
 
     #[test]
     fn split_host_port_handles_all_forms() {
-        assert_eq!(split_host_port("example.com:22"), ("example.com", Some("22")));
+        assert_eq!(
+            split_host_port("example.com:22"),
+            ("example.com", Some("22"))
+        );
         assert_eq!(split_host_port("1.2.3.4:22"), ("1.2.3.4", Some("22")));
         assert_eq!(split_host_port("example.com"), ("example.com", None));
         // Bracketed v6, with and without a port — host comes back unbracketed.
-        assert_eq!(split_host_port("[2001:db8::1]:22"), ("2001:db8::1", Some("22")));
+        assert_eq!(
+            split_host_port("[2001:db8::1]:22"),
+            ("2001:db8::1", Some("22"))
+        );
         assert_eq!(split_host_port("[2001:db8::1]"), ("2001:db8::1", None));
         // Bare v6 literal: the colons are the address, not a port separator.
         assert_eq!(split_host_port("2001:db8::1"), ("2001:db8::1", None));

@@ -92,7 +92,11 @@ impl PrivilegedOps for WindowsOps {
             .and_then(|r| r.ifindex);
         let exc = &plan.server_exception;
         // Attach the v4 egress ifindex only for a v4 exception; let the OS pick for v6.
-        let exc_idx = if exc.dest.addr.is_ipv4() { orig_idx } else { None };
+        let exc_idx = if exc.dest.addr.is_ipv4() {
+            orig_idx
+        } else {
+            None
+        };
         let exc_route = gateway_route(exc.dest.addr, exc.dest.prefix, exc.gateway, exc_idx);
         if handle.add(&exc_route).await.is_err() && exc.dest.addr.is_ipv4() {
             // netsh fallback is v4 (ipv4) syntax only; net_route handles the v6 exception.
@@ -148,11 +152,18 @@ impl PrivilegedOps for WindowsOps {
             if b.dest.addr.is_ipv6() && !carry_v6 {
                 continue;
             }
-            let idx = if b.dest.addr.is_ipv4() { orig_idx } else { None };
+            let idx = if b.dest.addr.is_ipv4() {
+                orig_idx
+            } else {
+                None
+            };
             let _ = handle
                 .add(&gateway_route(b.dest.addr, b.dest.prefix, b.gateway, idx))
                 .await; // best-effort, fast (IP Helper API)
-            installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).push(b.dest.clone());
+            installed_bypass
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(b.dest.clone());
         }
 
         // 3. DNS on the tun interface (static), so queries ride the tunnel. Plus DNS-leak
@@ -274,7 +285,10 @@ impl RouteController for WindowsController {
         self.handle
             .add(&gateway_route(c.addr, c.prefix, gw, self.orig_idx))
             .await?;
-        self.installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).push(c.clone());
+        self.installed_bypass
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(c.clone());
         Ok(())
     }
     async fn remove_bypass(&self, c: &Cidr) -> std::io::Result<()> {
@@ -285,7 +299,10 @@ impl RouteController for WindowsController {
             .handle
             .delete(&gateway_route(c.addr, c.prefix, gw, self.orig_idx))
             .await;
-        self.installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| x != c);
+        self.installed_bypass
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|x| x != c);
         Ok(())
     }
     async fn add_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
@@ -307,7 +324,12 @@ impl RouteController for WindowsController {
         // Drain the shared list so the guard's `Drop` (which shares the same Arc) finds it empty
         // and skips its slow per-route `netsh` fallback. Delete each route in-process via the
         // net_route Handle (IP Helper API) — orders of magnitude faster than a subprocess per CIDR.
-        let routes: Vec<Cidr> = std::mem::take(&mut *self.installed_bypass.lock().unwrap_or_else(|e| e.into_inner()));
+        let routes: Vec<Cidr> = std::mem::take(
+            &mut *self
+                .installed_bypass
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
         for c in &routes {
             let Some(gw) = self.bypass_gateway(c) else {
                 continue;
@@ -380,7 +402,12 @@ struct WindowsTeardown {
 impl Drop for WindowsTeardown {
     fn drop(&mut self) {
         // Best-effort; teardown must never panic.
-        for c in self.installed_bypass.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        for c in self
+            .installed_bypass
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+        {
             let dest = format!("{}/{}", c.addr, c.prefix);
             let args = cmd::win_route_del_via_gateway_args(&dest, &self.gateway, &self.orig_iface);
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();

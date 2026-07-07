@@ -57,7 +57,10 @@ pub(crate) async fn demux_loop(conn: quinn::Connection, registry: DatagramRegist
 
 /// Register an association's inbound channel; returns the receiver the relay reads from. Bounded so
 /// a stalled association can't grow unboundedly (excess inbound datagrams are dropped, UDP-style).
-pub(crate) async fn register(registry: &DatagramRegistry, stream_id: StreamId) -> mpsc::Receiver<Bytes> {
+pub(crate) async fn register(
+    registry: &DatagramRegistry,
+    stream_id: StreamId,
+) -> mpsc::Receiver<Bytes> {
     let (tx, rx) = mpsc::channel(256);
     registry.lock().await.insert(stream_id.into_inner(), tx);
     rx

@@ -72,7 +72,8 @@ impl TunConfig {
     /// With a v6 TUN address, IPv6 rides the tunnel via the `::/1` override, so killing it would
     /// break connectivity; under an Include base the un-tunneled majority must stay reachable.
     pub fn ipv6_killswitch(&self) -> bool {
-        self.tun_addr6.is_none() && matches!(self.split.base_mode, leshiy_client::SplitMode::Exclude)
+        self.tun_addr6.is_none()
+            && matches!(self.split.base_mode, leshiy_client::SplitMode::Exclude)
     }
 }
 

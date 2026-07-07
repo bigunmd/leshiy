@@ -128,13 +128,13 @@ impl Egress for DirectEgress {
             // Bind the wildcard of the target's family: an IPv4 `0.0.0.0` socket
             // cannot `connect` an IPv6 dest (and vice versa).
             match tokio::net::UdpSocket::bind(udp_bind_wildcard(&addr)).await {
-                Ok(sock) => match tokio::time::timeout(TARGET_CONNECT_TIMEOUT, sock.connect(addr))
-                    .await
-                {
-                    Ok(Ok(())) => return Ok(Box::new(UdpEgressSock(sock))),
-                    Ok(Err(e)) => last_err = Some(e),
-                    Err(_) => last_err = Some(timed_out(addr)),
-                },
+                Ok(sock) => {
+                    match tokio::time::timeout(TARGET_CONNECT_TIMEOUT, sock.connect(addr)).await {
+                        Ok(Ok(())) => return Ok(Box::new(UdpEgressSock(sock))),
+                        Ok(Err(e)) => last_err = Some(e),
+                        Err(_) => last_err = Some(timed_out(addr)),
+                    }
+                }
                 Err(e) => last_err = Some(e),
             }
         }

@@ -71,8 +71,8 @@ pub fn server_endpoint(
     // Build the UDP socket ourselves so a v6 wildcard is dual-stack (accepts
     // IPv4 clients as v4-mapped), then hand it to quinn via Endpoint::new.
     let socket = server_udp_socket(listen)?;
-    let runtime =
-        quinn::default_runtime().ok_or_else(|| crate::QuicError::Conn("no async runtime".into()))?;
+    let runtime = quinn::default_runtime()
+        .ok_or_else(|| crate::QuicError::Conn("no async runtime".into()))?;
     Endpoint::new(quinn::EndpointConfig::default(), Some(cfg), socket, runtime).map_err(Into::into)
 }
 

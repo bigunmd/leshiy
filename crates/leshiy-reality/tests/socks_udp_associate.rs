@@ -102,7 +102,9 @@ async fn try_once(saddr: &str, server_public: [u8; 32], echo: SocketAddr) -> Res
         .map_err(|e| e.to_string())?;
 
     // Serve SOCKS5 on an ephemeral loopback port.
-    let socks_listener = TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
+    let socks_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| e.to_string())?;
     let socks_addr = socks_listener.local_addr().map_err(|e| e.to_string())?;
     drop(socks_listener); // free the port for serve_socks5 to re-bind
     tokio::spawn(async move {
@@ -116,7 +118,9 @@ async fn try_once(saddr: &str, server_public: [u8; 32], echo: SocketAddr) -> Res
         .await
         .map_err(|e| e.to_string())?;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    ctrl.write_all(&[0x05, 0x01, 0x00]).await.map_err(|e| e.to_string())?; // VER, 1 method, no-auth
+    ctrl.write_all(&[0x05, 0x01, 0x00])
+        .await
+        .map_err(|e| e.to_string())?; // VER, 1 method, no-auth
     let mut sel = [0u8; 2];
     ctrl.read_exact(&mut sel).await.map_err(|e| e.to_string())?;
     if sel != [0x05, 0x00] {
@@ -128,7 +132,9 @@ async fn try_once(saddr: &str, server_public: [u8; 32], echo: SocketAddr) -> Res
         .map_err(|e| e.to_string())?;
     // Reply: VER, REP, RSV, ATYP=1, BND.ADDR(4), BND.PORT(2).
     let mut reply = [0u8; 10];
-    ctrl.read_exact(&mut reply).await.map_err(|e| e.to_string())?;
+    ctrl.read_exact(&mut reply)
+        .await
+        .map_err(|e| e.to_string())?;
     if reply[1] != 0x00 {
         return Err(format!("associate rejected: rep={}", reply[1]));
     }
@@ -138,9 +144,13 @@ async fn try_once(saddr: &str, server_public: [u8; 32], echo: SocketAddr) -> Res
     ));
 
     // Send a UDP datagram (wrapped in the SOCKS UDP header) to the relay, expect the echo back.
-    let sock = UdpSocket::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
+    let sock = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| e.to_string())?;
     let req = socks_udp_request(echo, b"socks-udp-e2e");
-    sock.send_to(&req, relay_addr).await.map_err(|e| e.to_string())?;
+    sock.send_to(&req, relay_addr)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let mut buf = [0u8; 2048];
     let (n, _) = tokio::time::timeout(Duration::from_secs(2), sock.recv_from(&mut buf))
