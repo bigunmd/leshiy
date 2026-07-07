@@ -254,6 +254,15 @@ async fn provision_inner<T: Transport>(
             t.run(docker::detect_host_ipv6_cmd()).await,
             Ok(o) if o.stdout.trim() == "yes"
         );
+        // On a dual-stack host (`net.ipv6.bindv6only=0`, the Linux default) an `[::]` publish also
+        // serves IPv4, so we must publish ONLY `[::]` — adding the v4 wildcard `-p P:P` collides on
+        // the host bind ("address already in use"). Only when sockets are v6-only (`bindv6only=1`)
+        // do we publish both. Any probe hiccup defaults to dual-stack (the common case).
+        let v6_dual_stack = publish_v6
+            && !matches!(
+                t.run(docker::detect_bindv6only_cmd()).await,
+                Ok(o) if o.stdout.trim() == "1"
+            );
         // Bind dual-stack (`[::]`) so the server accepts both IPv4 (v4-mapped) and IPv6 clients
         // on one socket — but only when the host has IPv6, since binding `[::]` fails inside the
         // container on a kernel with IPv6 disabled (same kernel as the host). Fall back to
@@ -282,6 +291,7 @@ async fn provision_inner<T: Transport>(
             p.listen_port,
             p.quic_port,
             publish_v6,
+            v6_dual_stack,
             &dns_refs,
             &envs,
         ))
@@ -870,6 +880,60 @@ mod tests {
             run.contains("LESHIY_LISTEN='[::]:443'"),
             "dual-stack bind: {run}"
         );
+        // On the default host (net.ipv6.bindv6only=0), `[::]` is a dual-stack socket that already
+        // serves IPv4; publishing the bare v4 wildcard `-p 443:443` too collides on the host bind
+        // ("address already in use"). So only the `[::]` publish is emitted.
+        assert!(
+            !run.contains("-p 443:443"),
+            "must not also publish the v4 wildcard on a dual-stack host: {run}"
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_publishes_both_wildcards_when_bindv6only() {
+        // On a host with net.ipv6.bindv6only=1, `[::]` is v6-only, so BOTH the v4 wildcard and the
+        // v6 wildcard must be published for dual-stack reachability (they don't collide).
+        let mut t = FakeTransport::new();
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "if_inet6",
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "bindv6only",
+            CommandOutput {
+                code: 0,
+                stdout: "1".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 0,
+                stdout: format!("{}\n", issued_uri()),
+                stderr: String::new(),
+            },
+        );
+        provision(&mut t, &params(), &mut |_| {}).await.unwrap();
+        let run = t
+            .calls()
+            .into_iter()
+            .find(|c| c.contains("docker run"))
+            .expect("a docker run");
+        assert!(run.contains("-p 443:443"), "v4 wildcard: {run}");
+        assert!(run.contains("-p '[::]:443:443'"), "v6 wildcard: {run}");
     }
 
     #[tokio::test]
