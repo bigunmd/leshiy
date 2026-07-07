@@ -50,28 +50,14 @@ pub fn detect_host_ipv6_cmd() -> &'static str {
     "[ -e /proc/net/if_inet6 ] && echo yes || echo no"
 }
 
-/// Read `net.ipv6.bindv6only`. When `0` (the Linux default), an `[::]` socket is **dual-stack**
-/// and also accepts IPv4, so publishing BOTH the v4 wildcard (`-p P:P`) and the v6 wildcard
-/// (`-p '[::]:P:P'`) makes the second bind collide with the first ("address already in use"). When
-/// `1`, `[::]` is v6-only and both publishes are needed. Prints the sysctl value; defaults to `0`
-/// (dual-stack, the common case) when the file is unreadable.
-pub fn detect_bindv6only_cmd() -> &'static str {
-    "cat /proc/sys/net/ipv6/bindv6only 2>/dev/null || echo 0"
-}
-
-/// Emit the `docker run -p` publish(es) for one host port. On a dual-stack host (`bindv6only=0`)
-/// a single `[::]` publish serves both families; on a v6-only host (`bindv6only=1`) both the v4
-/// and v6 wildcards are published. `proto` is `""` (TCP) or `"/udp"`.
-fn push_publish(s: &mut String, port: u16, proto: &str, publish_v6: bool, v6_dual_stack: bool) {
-    if publish_v6 && v6_dual_stack {
-        // `[::]` is dual-stack here: one publish covers v4 and v6. Publishing `-p P:P` as well
-        // would try to bind `0.0.0.0:P`, which overlaps the dual-stack `[::]:P` → bind conflict.
+/// Emit the `docker run -p` publish(es) for one host port. The v4 wildcard (`-p P:P`, binds
+/// `0.0.0.0`) is always published so IPv4 clients reach the container; on a host with IPv6 the v6
+/// wildcard (`-p '[::]:P:P'`) is added too. Docker's proxy sets `IPV6_V6ONLY` on the `[::]` socket,
+/// so the two coexist (they do NOT collide on a dual-stack host). `proto` is `""` (TCP) or `"/udp"`.
+fn push_publish(s: &mut String, port: u16, proto: &str, publish_v6: bool) {
+    s.push_str(&format!(" -p {port}:{port}{proto}"));
+    if publish_v6 {
         s.push_str(&format!(" -p '[::]:{port}:{port}{proto}'"));
-    } else {
-        s.push_str(&format!(" -p {port}:{port}{proto}"));
-        if publish_v6 {
-            s.push_str(&format!(" -p '[::]:{port}:{port}{proto}'"));
-        }
     }
 }
 
@@ -85,7 +71,6 @@ pub fn run_cmd(
     listen_port: u16,
     quic_port: Option<u16>,
     publish_v6: bool,
-    v6_dual_stack: bool,
     dns: &[&str],
     envs: &[(String, String)],
 ) -> String {
@@ -98,9 +83,9 @@ pub fn run_cmd(
         "sudo docker run -d --name {container} --restart=unless-stopped \
          --user 0:0 --cap-add=NET_ADMIN -v {DATA_VOLUME}:/etc/leshiy"
     );
-    // Publish the REALITY/TCP port. On a dual-stack host (`bindv6only=0`) `[::]` alone serves both
-    // families; on a v6-only host both wildcards are published. The container binds `[::]` inside.
-    push_publish(&mut s, listen_port, "", publish_v6, v6_dual_stack);
+    // Publish the REALITY/TCP port on the v4 wildcard, plus the v6 wildcard when the host has
+    // IPv6. The container binds `[::]` internally (dual-stack).
+    push_publish(&mut s, listen_port, "", publish_v6);
     // --dns: the REALITY server must resolve `dest` from *inside* the container.
     // Docker's default resolver (8.8.8.8, or the host's 127.0.0.53 systemd stub)
     // is unreachable on many clouds (Yandex, GCP), so DNS silently black-holes and
@@ -111,7 +96,7 @@ pub fn run_cmd(
         s.push_str(&format!(" --dns {server}"));
     }
     if let Some(q) = quic_port {
-        push_publish(&mut s, q, "/udp", publish_v6, v6_dual_stack);
+        push_publish(&mut s, q, "/udp", publish_v6);
     }
     for (k, v) in envs {
         // values are operator-supplied host:port / sni; single-quote-escape for safety.
@@ -235,16 +220,21 @@ mod tests {
                 "www.microsoft.com:443".to_string(),
             ),
         ];
-        // v6-only host (`bindv6only=1`): both the v4 and v6 wildcards are published.
-        let run = run_cmd("leshiy", "img:1", 443, Some(8443), true, false, &[], &envs);
+        // A host with IPv6 publishes BOTH the v4 wildcard (0.0.0.0) and the v6 wildcard ([::]) —
+        // Docker's proxy makes the `[::]` socket v6-only, so they coexist (no bind conflict).
+        let run = run_cmd("leshiy", "img:1", 443, Some(8443), true, &[], &envs);
         assert!(run.contains("--name leshiy"));
         assert!(run.contains("--restart=unless-stopped"));
         assert!(run.contains("--user 0:0"));
         assert!(run.contains("--cap-add=NET_ADMIN"));
-        assert!(run.contains("-p 443:443"));
-        assert!(run.contains("-p 8443:8443/udp"));
-        assert!(run.contains("-p '[::]:443:443'"), "run: {run}");
-        assert!(run.contains("-p '[::]:8443:8443/udp'"), "run: {run}");
+        // Both families are published so IPv4 AND IPv6 clients reach the container.
+        assert!(run.contains("-p 443:443"), "v4 tcp publish: {run}");
+        assert!(run.contains("-p 8443:8443/udp"), "v4 udp publish: {run}");
+        assert!(run.contains("-p '[::]:443:443'"), "v6 tcp publish: {run}");
+        assert!(
+            run.contains("-p '[::]:8443:8443/udp'"),
+            "v6 udp publish: {run}"
+        );
         assert!(run.contains("-v leshiy-data:/etc/leshiy"));
         assert!(run.contains("-e LESHIY_HOST='1.2.3.4:443'"));
         assert!(run.contains("-e LESHIY_DEST='www.microsoft.com:443'"));
@@ -252,23 +242,9 @@ mod tests {
     }
 
     #[test]
-    fn run_cmd_dual_stack_publishes_only_v6_wildcard() {
-        // Dual-stack host (`bindv6only=0`, the default): `[::]` alone serves both families, so the
-        // bare v4 wildcard is NOT published (it would collide on the host bind).
-        let run = run_cmd("leshiy", "img:1", 443, Some(8443), true, true, &[], &[]);
-        assert!(run.contains("-p '[::]:443:443'"), "run: {run}");
-        assert!(run.contains("-p '[::]:8443:8443/udp'"), "run: {run}");
-        assert!(!run.contains("-p 443:443"), "no bare v4 tcp publish: {run}");
-        assert!(
-            !run.contains("-p 8443:8443/udp"),
-            "no bare v4 udp publish: {run}"
-        );
-    }
-
-    #[test]
     fn run_cmd_omits_v6_publish_when_host_has_no_ipv6() {
         // publish_v6=false → no `-p '[::]:…'` (would otherwise fail the run on a v6-less host).
-        let run = run_cmd("leshiy", "img:1", 443, Some(8443), false, false, &[], &[]);
+        let run = run_cmd("leshiy", "img:1", 443, Some(8443), false, &[], &[]);
         assert!(run.contains("-p 443:443"));
         assert!(run.contains("-p 8443:8443/udp"));
         assert!(!run.contains("[::]"), "run: {run}");
@@ -276,7 +252,7 @@ mod tests {
 
     #[test]
     fn run_cmd_without_quic_has_no_udp() {
-        let run = run_cmd("leshiy", "img:1", 443, None, true, true, &[], &[]);
+        let run = run_cmd("leshiy", "img:1", 443, None, true, &[], &[]);
         assert!(!run.contains("/udp"));
         assert!(run.trim_end().ends_with("img:1 boot"));
     }
@@ -319,7 +295,6 @@ mod tests {
             443,
             None,
             true,
-            true,
             &["10.130.0.2", "1.1.1.1"],
             &[],
         );
@@ -359,22 +334,13 @@ mod tests {
 
     #[test]
     fn run_cmd_injects_dns_when_present() {
-        let run = run_cmd(
-            "leshiy",
-            "img:1",
-            443,
-            None,
-            true,
-            true,
-            &["10.130.0.2"],
-            &[],
-        );
+        let run = run_cmd("leshiy", "img:1", 443, None, true, &["10.130.0.2"], &[]);
         assert!(run.contains("--dns 10.130.0.2"), "run: {run}");
     }
 
     #[test]
     fn run_cmd_omits_dns_when_absent() {
-        let run = run_cmd("leshiy", "img:1", 443, None, true, true, &[], &[]);
+        let run = run_cmd("leshiy", "img:1", 443, None, true, &[], &[]);
         assert!(!run.contains("--dns"));
     }
 
