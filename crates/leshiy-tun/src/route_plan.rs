@@ -1,10 +1,12 @@
-//! Pure route planning. The split-tunnel inclusion/exclusion layer (a later phase) will
-//! extend this without touching the engine. No OS calls here — `sys` applies the plan.
+//! Pure route planning. The split-tunnel inclusion/exclusion layer extends this without
+//! touching the engine. No OS calls here — `sys` applies the plan.
 //!
-//! **IPv6 (Phase 2 scope):** `via_tun` is intentionally IPv4-only. Carrying IPv6 *through*
-//! the tunnel is Phase 3. To avoid a silent IPv6 leak on dual-stack hosts in the meantime,
-//! the Linux `sys` backend disables IPv6 (sysctl kill-switch) while the session is up and
-//! restores it on teardown — fail-closed, never leaking around the tunnel.
+//! **IPv6:** when a v6 TUN address is present (`tun_addr6`), IPv6 is carried *through* the
+//! tunnel — the `::/1`+`8000::/1` override rides the device the same way the v4 `0.0.0.0/1`
+//! halves do, and v6 excludes bypass via the original v6 gateway ([`RoutePlan::orig_gateway6`]).
+//! When no v6 TUN address is present, IPv6 is fail-closed: the backend disables it (sysctl /
+//! per-service kill-switch) while the session is up and restores it on teardown — never leaking
+//! around the tunnel.
 use std::net::IpAddr;
 
 /// Errors from building a route plan.
@@ -51,6 +53,11 @@ pub struct RoutePlan {
     /// original gateway of its own address family (structurally a `ServerException`). Empty
     /// for plain full-tunnel and for Include mode (where only `via_tun` carries them instead).
     pub bypass: Vec<ServerException>,
+    /// The original IPv6 default gateway, when known. The static `bypass` entries already carry
+    /// their own per-family gateway, but the live resolver installs v6 domain-rule bypass routes
+    /// at runtime and needs this to route them via the right next-hop. `None` when v6 is not
+    /// carried (or no v6 default route exists) — a resolved v6 bypass is then a safe no-op.
+    pub orig_gateway6: Option<IpAddr>,
 }
 
 /// Convert a `leshiy-client` split CIDR into the route planner's `Cidr` at the crate boundary
@@ -218,6 +225,7 @@ impl RoutePlan {
             via_tun,
             server_exception,
             bypass,
+            orig_gateway6: v6_gateway,
         })
     }
 }
@@ -308,7 +316,13 @@ mod tests {
             Some("fd00:71::2".parse().unwrap()),
         )
         .unwrap();
-        assert!(plan.bypass.is_empty(), "v6 exclude must not bypass via a v4 gateway");
+        assert!(
+            plan.bypass.is_empty(),
+            "v6 exclude must not bypass via a v4 gateway"
+        );
+        // No v6 gateway known → the live resolver has none either, so a resolved v6 bypass is a
+        // safe no-op rather than being routed via the v4 gateway.
+        assert_eq!(plan.orig_gateway6, None);
     }
 
     #[test]
@@ -331,6 +345,12 @@ mod tests {
         assert_eq!(plan.bypass.len(), 1);
         assert_eq!(plan.bypass[0].dest.to_string(), "2001:db8::/32");
         assert_eq!(plan.bypass[0].gateway, "fe80::1".parse::<IpAddr>().unwrap());
+        // The same v6 gateway is exposed on the plan so the live resolver can bypass runtime-
+        // resolved v6 domain rules through it (not just the static excludes above).
+        assert_eq!(
+            plan.orig_gateway6,
+            Some("fe80::1".parse::<IpAddr>().unwrap())
+        );
     }
 
     #[test]

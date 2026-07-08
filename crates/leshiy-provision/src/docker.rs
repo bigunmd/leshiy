@@ -42,10 +42,9 @@ pub fn pull_cmd(image_ref: &str) -> String {
     format!("sudo docker pull {image_ref}")
 }
 
-/// Whether the host has IPv6 at all (prints `yes`/`no`). Publishing a container port on the
-/// host's v6 wildcard (`-p '[::]:…'`) fails the whole `docker run` on a kernel with IPv6
-/// disabled, so we only add the v6 publish when this says `yes`. `/proc/net/if_inet6` exists
-/// iff the kernel has IPv6; no sudo (world-readable).
+/// Whether the host has IPv6 at all (prints `yes`/`no`). Used only to decide whether the server
+/// binds `[::]` (dual-stack) or `0.0.0.0` *inside* the container — binding `[::]` fails on a kernel
+/// with IPv6 disabled. `/proc/net/if_inet6` exists iff the kernel has IPv6; no sudo (world-readable).
 pub fn detect_host_ipv6_cmd() -> &'static str {
     "[ -e /proc/net/if_inet6 ] && echo yes || echo no"
 }
@@ -58,7 +57,6 @@ pub fn run_cmd(
     image_ref: &str,
     listen_port: u16,
     quic_port: Option<u16>,
-    publish_v6: bool,
     dns: &[&str],
     envs: &[(String, String)],
 ) -> String {
@@ -69,15 +67,14 @@ pub fn run_cmd(
     // the install.sh docker path.
     let mut s = format!(
         "sudo docker run -d --name {container} --restart=unless-stopped \
-         --user 0:0 --cap-add=NET_ADMIN -v {DATA_VOLUME}:/etc/leshiy -p {listen_port}:{listen_port}"
+         --user 0:0 --cap-add=NET_ADMIN -v {DATA_VOLUME}:/etc/leshiy"
     );
-    // Dual-stack publish: also map the host IPv6 wildcard so v6 clients reach the container
-    // (which binds `[::]`). The v4 publish above serves v4 clients. Only when the host has IPv6
-    // (`publish_v6`) — otherwise `-p '[::]:…'` fails the whole run. Brackets single-quoted for
-    // the shell.
-    if publish_v6 {
-        s.push_str(&format!(" -p '[::]:{listen_port}:{listen_port}'"));
-    }
+    // Publish with a BARE `-p P:P` (empty host-ip). On a host with IPv6, Docker auto-publishes it
+    // on BOTH `0.0.0.0` and `[::]` (correctly making the `[::]` socket v6-only, so they don't
+    // collide); on an IPv6-less host it's v4-only. Do NOT add an explicit `-p '[::]:P:P'` — that
+    // binds `[::]` as a second dual-stack socket that conflicts with the v4 bind ("address already
+    // in use"). The container binds `[::]` internally (dual-stack).
+    s.push_str(&format!(" -p {listen_port}:{listen_port}"));
     // --dns: the REALITY server must resolve `dest` from *inside* the container.
     // Docker's default resolver (8.8.8.8, or the host's 127.0.0.53 systemd stub)
     // is unreachable on many clouds (Yandex, GCP), so DNS silently black-holes and
@@ -89,9 +86,6 @@ pub fn run_cmd(
     }
     if let Some(q) = quic_port {
         s.push_str(&format!(" -p {q}:{q}/udp"));
-        if publish_v6 {
-            s.push_str(&format!(" -p '[::]:{q}:{q}/udp'"));
-        }
     }
     for (k, v) in envs {
         // values are operator-supplied host:port / sni; single-quote-escape for safety.
@@ -102,8 +96,15 @@ pub fn run_cmd(
     s
 }
 
+/// Names of **running** containers.
 pub fn ps_names_cmd() -> &'static str {
     "sudo docker ps --format '{{.Names}}'"
+}
+
+/// Force-remove a container by name. The persistent data volume is separate, so removing the
+/// container keeps the server's users/config; only the (stale) container instance is discarded.
+pub fn container_rm_cmd(container: &str) -> String {
+    format!("sudo docker rm -f {container}")
 }
 
 /// Print the host's first container-usable **IPv4** DNS server (or nothing).
@@ -201,16 +202,17 @@ mod tests {
                 "www.microsoft.com:443".to_string(),
             ),
         ];
-        let run = run_cmd("leshiy", "img:1", 443, Some(8443), true, &[], &envs);
+        let run = run_cmd("leshiy", "img:1", 443, Some(8443), &[], &envs);
         assert!(run.contains("--name leshiy"));
         assert!(run.contains("--restart=unless-stopped"));
         assert!(run.contains("--user 0:0"));
         assert!(run.contains("--cap-add=NET_ADMIN"));
-        assert!(run.contains("-p 443:443"));
-        assert!(run.contains("-p 8443:8443/udp"));
-        // Dual-stack publish: v6 clients reach the container (which binds [::]).
-        assert!(run.contains("-p '[::]:443:443'"), "run: {run}");
-        assert!(run.contains("-p '[::]:8443:8443/udp'"), "run: {run}");
+        // Bare `-p P:P` publishes; Docker auto-dual-stacks it at runtime (both 0.0.0.0 and [::]).
+        // We must NOT emit an explicit `-p '[::]:…'` — that binds a second dual-stack socket that
+        // collides with the v4 bind ("address already in use").
+        assert!(run.contains("-p 443:443"), "tcp publish: {run}");
+        assert!(run.contains("-p 8443:8443/udp"), "udp publish: {run}");
+        assert!(!run.contains("[::]"), "no explicit v6 publish: {run}");
         assert!(run.contains("-v leshiy-data:/etc/leshiy"));
         assert!(run.contains("-e LESHIY_HOST='1.2.3.4:443'"));
         assert!(run.contains("-e LESHIY_DEST='www.microsoft.com:443'"));
@@ -218,17 +220,8 @@ mod tests {
     }
 
     #[test]
-    fn run_cmd_omits_v6_publish_when_host_has_no_ipv6() {
-        // publish_v6=false → no `-p '[::]:…'` (would otherwise fail the run on a v6-less host).
-        let run = run_cmd("leshiy", "img:1", 443, Some(8443), false, &[], &[]);
-        assert!(run.contains("-p 443:443"));
-        assert!(run.contains("-p 8443:8443/udp"));
-        assert!(!run.contains("[::]"), "run: {run}");
-    }
-
-    #[test]
     fn run_cmd_without_quic_has_no_udp() {
-        let run = run_cmd("leshiy", "img:1", 443, None, true, &[], &[]);
+        let run = run_cmd("leshiy", "img:1", 443, None, &[], &[]);
         assert!(!run.contains("/udp"));
         assert!(run.trim_end().ends_with("img:1 boot"));
     }
@@ -265,10 +258,20 @@ mod tests {
     fn run_cmd_injects_multiple_dns_in_order() {
         // Docker tries `--dns` servers in order, so the host resolver must precede
         // the public fallback.
-        let run = run_cmd("leshiy", "img:1", 443, None, true, &["10.130.0.2", "1.1.1.1"], &[]);
+        let run = run_cmd(
+            "leshiy",
+            "img:1",
+            443,
+            None,
+            &["10.130.0.2", "1.1.1.1"],
+            &[],
+        );
         let host_at = run.find("--dns 10.130.0.2").expect("host --dns present");
         let fb_at = run.find("--dns 1.1.1.1").expect("fallback --dns present");
-        assert!(host_at < fb_at, "host resolver must come before fallback: {run}");
+        assert!(
+            host_at < fb_at,
+            "host resolver must come before fallback: {run}"
+        );
     }
 
     #[test]
@@ -278,7 +281,10 @@ mod tests {
         assert!(!DNS_PUBLIC_FALLBACK.is_empty());
         for f in DNS_PUBLIC_FALLBACK {
             assert!(valid_dns_addr(f), "fallback must be a valid dns addr: {f}");
-            assert!(f.contains('.') && !f.contains(':'), "fallback must be IPv4: {f}");
+            assert!(
+                f.contains('.') && !f.contains(':'),
+                "fallback must be IPv4: {f}"
+            );
         }
     }
 
@@ -296,13 +302,13 @@ mod tests {
 
     #[test]
     fn run_cmd_injects_dns_when_present() {
-        let run = run_cmd("leshiy", "img:1", 443, None, true, &["10.130.0.2"], &[]);
+        let run = run_cmd("leshiy", "img:1", 443, None, &["10.130.0.2"], &[]);
         assert!(run.contains("--dns 10.130.0.2"), "run: {run}");
     }
 
     #[test]
     fn run_cmd_omits_dns_when_absent() {
-        let run = run_cmd("leshiy", "img:1", 443, None, true, &[], &[]);
+        let run = run_cmd("leshiy", "img:1", 443, None, &[], &[]);
         assert!(!run.contains("--dns"));
     }
 

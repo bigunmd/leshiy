@@ -79,7 +79,7 @@ impl SqliteUserStore {
     }
 
     fn persist_def(&self, u: &User) -> rusqlite::Result<()> {
-        let c = self.db.lock().unwrap();
+        let c = self.db.lock().unwrap_or_else(|e| e.into_inner());
         c.execute(
             "INSERT INTO users (short_id,enabled,expires_at,data_cap,rate_up,rate_down,used_up,used_down)
              VALUES (?1,?2,?3,?4,?5,?6,COALESCE((SELECT used_up FROM users WHERE short_id=?1),0),
@@ -100,7 +100,7 @@ impl SqliteUserStore {
     /// Persist the current in-memory usage counters for all users (what the bg flusher runs).
     pub fn flush_now(&self) -> rusqlite::Result<()> {
         let snap = self.mem.snapshot();
-        let c = self.db.lock().unwrap();
+        let c = self.db.lock().unwrap_or_else(|e| e.into_inner());
         for s in snap {
             c.execute(
                 "UPDATE users SET used_up=?2, used_down=?3 WHERE short_id=?1",
@@ -135,7 +135,7 @@ impl UserAdmin for SqliteUserStore {
     fn remove(&self, id: &[u8; 8]) -> bool {
         let r = self.mem.remove(id);
         if r {
-            let c = self.db.lock().unwrap();
+            let c = self.db.lock().unwrap_or_else(|e| e.into_inner());
             if let Err(e) = c.execute(
                 "DELETE FROM users WHERE short_id=?1",
                 rusqlite::params![&id[..]],
@@ -148,7 +148,7 @@ impl UserAdmin for SqliteUserStore {
     fn set_enabled(&self, id: &[u8; 8], on: bool) -> bool {
         let r = self.mem.set_enabled(id, on);
         if r {
-            let c = self.db.lock().unwrap();
+            let c = self.db.lock().unwrap_or_else(|e| e.into_inner());
             if let Err(e) = c.execute(
                 "UPDATE users SET enabled=?2 WHERE short_id=?1",
                 rusqlite::params![&id[..], on as i64],
@@ -161,7 +161,7 @@ impl UserAdmin for SqliteUserStore {
     fn reset_usage(&self, id: &[u8; 8]) -> bool {
         let r = self.mem.reset_usage(id);
         if r {
-            let c = self.db.lock().unwrap();
+            let c = self.db.lock().unwrap_or_else(|e| e.into_inner());
             if let Err(e) = c.execute(
                 "UPDATE users SET used_up=0,used_down=0 WHERE short_id=?1",
                 rusqlite::params![&id[..]],

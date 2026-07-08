@@ -47,8 +47,8 @@ impl Default for TunConfig {
             mtu: 1400,
             tun_addr: "10.71.0.2".parse().unwrap(),
             // Dual-stack by default: a ULA on the TUN so IPv6 rides the tunnel. Backends that
-            // don't carry v6 (Windows/Android/stub) zero this in the engine via CARRIES_V6 and
-            // fail closed to the kill-switch, so this default is safe on every platform.
+            // don't carry v6 (Android/stub) zero this in the engine via CARRIES_V6 and fail
+            // closed to the kill-switch, so this default is safe on every platform.
             tun_addr6: Some("fd00:71::2".parse().unwrap()),
             server_ip: "0.0.0.0".parse().unwrap(),
             orig_gateway: "0.0.0.0".parse().unwrap(),
@@ -72,7 +72,8 @@ impl TunConfig {
     /// With a v6 TUN address, IPv6 rides the tunnel via the `::/1` override, so killing it would
     /// break connectivity; under an Include base the un-tunneled majority must stay reachable.
     pub fn ipv6_killswitch(&self) -> bool {
-        self.tun_addr6.is_none() && matches!(self.split.base_mode, leshiy_client::SplitMode::Exclude)
+        self.tun_addr6.is_none()
+            && matches!(self.split.base_mode, leshiy_client::SplitMode::Exclude)
     }
 }
 
@@ -116,9 +117,9 @@ impl TunEngine {
         counters: Arc<ByteCounters>,
         cancel: Arc<Notify>,
     ) -> std::io::Result<()> {
-        // Platforms whose backend doesn't carry IPv6 (Windows/Android/stub, for now) must not
-        // leave a v6 TUN address set — otherwise the kill-switch would be skipped and v6 would
-        // leak around a v6-unaware backend. Zero it here so those platforms fail closed.
+        // Platforms whose backend doesn't carry IPv6 (Android/stub) must not leave a v6 TUN
+        // address set — otherwise the kill-switch would be skipped and v6 would leak around a
+        // v6-unaware backend. Zero it here so those platforms fail closed.
         let mut cfg = cfg;
         if !<PlatformOps as PrivilegedOps>::CARRIES_V6 {
             cfg.tun_addr6 = None;

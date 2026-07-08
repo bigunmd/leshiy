@@ -1,10 +1,10 @@
 //! QUIC transport adapter: wraps `QuicConn` and its h3 CONNECT streams.
 use crate::error::{ClientError, Result};
-use crate::stream::ProxyStream;
+use crate::stream::{DatagramFlow, ProxyStream};
 use crate::transport::Tunnel;
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
-use leshiy_quic::client::{QuicConn, open_connect};
+use leshiy_quic::client::{QuicConn, QuicDatagramFlow, open_connect};
 
 /// `ProxyStream` over an h3 CONNECT stream pair.
 struct QuicProxyStream {
@@ -53,7 +53,41 @@ impl Tunnel for QuicTunnel {
             .map_err(|_| ClientError::ConnectFailed)?;
         Ok(Box::new(QuicProxyStream { send, recv }))
     }
+    async fn open_datagram(&self, target: &str) -> Result<Box<dyn DatagramFlow>> {
+        let flow = self
+            .conn
+            .open_datagram(target)
+            .await
+            .map_err(|_| ClientError::ConnectFailed)?;
+        Ok(Box::new(QuicDatagram { flow }))
+    }
     async fn closed(&self) {
         self.conn.closed().await;
+    }
+}
+
+/// `DatagramFlow` over a QUIC CONNECT-UDP association.
+struct QuicDatagram {
+    flow: QuicDatagramFlow,
+}
+
+#[async_trait]
+impl DatagramFlow for QuicDatagram {
+    async fn send(&mut self, data: Bytes) -> Result<()> {
+        self.flow
+            .send(data)
+            .await
+            .map_err(|_| ClientError::ConnectFailed)
+    }
+    async fn recv(&mut self) -> Result<Bytes> {
+        match self.flow.recv().await {
+            Some(b) => Ok(b),
+            None => Ok(Bytes::new()), // association/connection closed
+        }
+    }
+    async fn close(&mut self) -> Result<()> {
+        // Dropping `QuicDatagramFlow` closes the underlying request stream and deregisters the
+        // association; there's no separate graceful-close step.
+        Ok(())
     }
 }

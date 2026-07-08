@@ -204,19 +204,23 @@ async fn provision_inner<T: Transport>(
     let fw_detail = firewall_step(t, p.listen_port, p.quic_port).await;
     on_event(ev(Step::Firewall, Status::Done, fw_detail));
 
-    // 4. Detect existing container (idempotent re-run).
+    // 4. Detect existing container (idempotent re-run). Reuse only a genuinely RUNNING container
+    //    (the reuse path `docker exec`s into it, which needs it up). Anything else — a stopped,
+    //    exited, or half-created leftover (a failed `docker run --name` leaves a `Created`
+    //    container that still owns the name) — is force-removed by `run_container` right before it
+    //    recreates. The persistent data volume is separate, so users/config survive.
     *current = Step::DetectExisting;
     on_event(ev(Step::DetectExisting, Status::Started, ""));
-    let names = docker::parse_ps_names(&t.run(docker::ps_names_cmd()).await?.stdout);
-    let exists = names.iter().any(|n| n == &p.container);
+    let running = docker::parse_ps_names(&t.run(docker::ps_names_cmd()).await?.stdout);
+    let running_exists = running.iter().any(|n| n == &p.container);
     on_event(ev(
         Step::DetectExisting,
         Status::Done,
-        format!("exists={exists}"),
+        format!("running={running_exists}"),
     ));
 
-    // 5/6. Pull + run (skipped if exists).
-    if !exists {
+    // 5/6. Pull + run (skipped only when reusing a running container).
+    if !running_exists {
         *current = Step::PullImage;
         on_event(ev(Step::PullImage, Status::Started, &p.image_ref));
         t.run(&docker::pull_cmd(&p.image_ref)).await?.ok()?;
@@ -232,18 +236,18 @@ async fn provision_inner<T: Transport>(
         let host_dns = detect_host_dns(t).await;
         let dns = dns_servers(host_dns, p.dns_override.as_deref());
         let dns_refs: Vec<&str> = dns.iter().map(String::as_str).collect();
-        // Publish the container port on the host's IPv6 wildcard too, but only when the host
-        // has IPv6 — `-p '[::]:…'` otherwise fails the whole `docker run`. Best-effort: on any
-        // probe hiccup we skip the v6 publish (v4 still works).
-        let publish_v6 = matches!(
+        // Whether the host has IPv6, used to pick the server's *in-container* bind address. The
+        // host-port publish is a bare `-p P:P` (Docker auto-dual-stacks it), so this no longer
+        // affects publishing. Best-effort: on any probe hiccup, fall back to the v4 bind.
+        let host_has_ipv6 = matches!(
             t.run(docker::detect_host_ipv6_cmd()).await,
             Ok(o) if o.stdout.trim() == "yes"
         );
-        // Bind dual-stack (`[::]`) so the server accepts both IPv4 (v4-mapped) and IPv6 clients
-        // on one socket — but only when the host has IPv6, since binding `[::]` fails inside the
+        // Bind dual-stack (`[::]`) so the server accepts both IPv4 (v4-mapped) and IPv6 clients on
+        // one socket — but only when the host has IPv6, since binding `[::]` fails inside the
         // container on a kernel with IPv6 disabled (same kernel as the host). Fall back to
         // `0.0.0.0` there.
-        let listen_host = if publish_v6 { "[::]" } else { "0.0.0.0" };
+        let listen_host = if host_has_ipv6 { "[::]" } else { "0.0.0.0" };
         let mut envs = vec![
             ("LESHIY_HOST".to_string(), p.public_host.clone()),
             ("LESHIY_DEST".to_string(), p.dest_sni.clone()),
@@ -253,22 +257,23 @@ async fn provision_inner<T: Transport>(
             ),
         ];
         if let Some(q) = p.quic_port {
-            envs.push(("LESHIY_QUIC_LISTEN".to_string(), format!("{listen_host}:{q}")));
+            envs.push((
+                "LESHIY_QUIC_LISTEN".to_string(),
+                format!("{listen_host}:{q}"),
+            ));
         }
         if let Some(conn) = &p.connector {
             envs.push(("LESHIY_CONNECTOR".to_string(), conn.clone()));
         }
-        t.run(&docker::run_cmd(
+        let run = docker::run_cmd(
             &p.container,
             &p.image_ref,
             p.listen_port,
             p.quic_port,
-            publish_v6,
             &dns_refs,
             &envs,
-        ))
-        .await?
-        .ok()?;
+        );
+        run_container(t, &p.container, &run).await?;
         on_event(ev(
             Step::RunContainer,
             Status::Done,
@@ -512,6 +517,46 @@ fn is_control_socket_unready(stderr: &str) -> bool {
     stderr.contains("control socket") || stderr.contains("is the server running")
 }
 
+/// Bound on the `docker run` retry. A `docker run` right after a container is removed can
+/// transiently fail to bind the host port: Docker tears down the old container's port bindings
+/// (userland proxy / iptables) slightly after `docker rm` returns, so the new bind races the
+/// release with "address already in use". Bounded so a genuine, persistent conflict (another
+/// service on the port) still fails promptly.
+const RUN_ATTEMPTS: usize = 5;
+const RUN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn is_port_bind_race(stderr: &str) -> bool {
+    stderr.contains("address already in use")
+}
+
+/// Create the container, force-removing any existing one of the same name FIRST — a stopped/exited
+/// container, or the `Created` leftover a *failed* `docker run --name` leaves behind (which would
+/// otherwise make the next run collide on the name). Retries only the transient port-bind race; a
+/// transport error or any other command failure (bad image, invalid flag, …) fails fast.
+async fn run_container<T: Transport>(t: &mut T, container: &str, cmd: &str) -> Result<()> {
+    let mut last_err = None;
+    for attempt in 0..RUN_ATTEMPTS {
+        // Clear any container of this name — a pre-existing stale one, or the leftover from a
+        // previous failed attempt in this loop. Best-effort (it may legitimately not exist).
+        let _ = t.run(&docker::container_rm_cmd(container)).await;
+        if attempt > 0 {
+            tokio::time::sleep(RUN_RETRY_DELAY).await;
+        }
+        match t.run(cmd).await?.ok() {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                let transient =
+                    matches!(&e, Error::Command { stderr, .. } if is_port_bind_race(stderr));
+                if !transient {
+                    return Err(e);
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.expect("loop body runs at least once"))
+}
+
 /// Run `docker exec ... user add` and return captured stdout, retrying while the
 /// server's control socket is not yet up (fresh-container startup race).
 ///
@@ -706,6 +751,86 @@ mod tests {
         assert_eq!(execs, 1, "non-transient error must not retry");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn provision_retries_docker_run_on_port_bind_race() {
+        // Right after removing a stale container, the first `docker run` can transiently fail with
+        // "address already in use" (the old port bindings release just after `docker rm`); the
+        // retry succeeds. `start_paused` makes the retry delay instant.
+        let mut t = FakeTransport::new();
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on_seq(
+            "docker run",
+            vec![
+                CommandOutput {
+                    code: 125,
+                    stdout: String::new(),
+                    stderr: "docker: Error response from daemon: failed to set up container networking: failed to bind host port [::]:443/tcp: address already in use".into(),
+                },
+                CommandOutput {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+            ],
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 0,
+                stdout: format!("{}\n", issued_uri()),
+                stderr: String::new(),
+            },
+        );
+        let rec = provision(&mut t, &params(), &mut |_| {}).await.unwrap();
+        assert_eq!(rec.clients.len(), 1);
+        let runs = t
+            .calls()
+            .iter()
+            .filter(|c| c.contains("docker run"))
+            .count();
+        assert_eq!(
+            runs, 2,
+            "must retry the port-bind race exactly once then succeed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn provision_does_not_retry_non_race_run_errors() {
+        // A genuine run failure (e.g. a bad image ref) must fail immediately, not spin the budget.
+        let mut t = FakeTransport::new();
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker run",
+            CommandOutput {
+                code: 125,
+                stdout: String::new(),
+                stderr: "docker: invalid reference format".into(),
+            },
+        );
+        let err = provision(&mut t, &params(), &mut |_| {}).await.unwrap_err();
+        assert!(matches!(err, crate::error::Error::Command { .. }));
+        let runs = t
+            .calls()
+            .iter()
+            .filter(|c| c.contains("docker run"))
+            .count();
+        assert_eq!(runs, 1, "a non-race run error must not retry");
+    }
+
     #[tokio::test]
     async fn provision_passes_host_dns_to_docker_run() {
         let mut t = FakeTransport::new();
@@ -847,8 +972,18 @@ mod tests {
             .into_iter()
             .find(|c| c.contains("docker run"))
             .expect("a docker run");
-        assert!(run.contains("-p '[::]:443:443'"), "v6 publish: {run}");
-        assert!(run.contains("LESHIY_LISTEN='[::]:443'"), "dual-stack bind: {run}");
+        // The port is published with a bare `-p P:P` — Docker auto-dual-stacks it at runtime. We
+        // must NOT emit an explicit `-p '[::]:…'` (it collides with the v4 bind). On a host with
+        // IPv6 the server still binds `[::]` INSIDE the container (dual-stack).
+        assert!(run.contains("-p 443:443"), "bare port publish: {run}");
+        assert!(
+            !run.contains("[::]:443:443"),
+            "no explicit v6 publish: {run}"
+        );
+        assert!(
+            run.contains("LESHIY_LISTEN='[::]:443'"),
+            "dual-stack bind inside container: {run}"
+        );
     }
 
     #[tokio::test]
@@ -878,7 +1013,10 @@ mod tests {
             .find(|c| c.contains("docker run"))
             .expect("a docker run");
         assert!(!run.contains("[::]"), "must stay IPv4-only: {run}");
-        assert!(run.contains("LESHIY_LISTEN='0.0.0.0:443'"), "v4 bind: {run}");
+        assert!(
+            run.contains("LESHIY_LISTEN='0.0.0.0:443'"),
+            "v4 bind: {run}"
+        );
     }
 
     #[test]
@@ -1078,6 +1216,67 @@ mod tests {
         );
         provision(&mut t, &params(), &mut |_| {}).await.unwrap();
         assert!(!t.calls().iter().any(|c| c.contains("docker run")));
+    }
+
+    #[tokio::test]
+    async fn provision_removes_stale_stopped_container_before_run() {
+        // A container named `leshiy` exists but is STOPPED: `docker ps` (running) does not list
+        // it, while `docker ps -a` (all) does. `docker run --name` would collide with it, so
+        // provision must force-remove the stale container first, then recreate.
+        let mut t = FakeTransport::new();
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        // Most-specific first: `docker ps -a` lists the stopped container...
+        .on(
+            "docker ps -a",
+            CommandOutput {
+                code: 0,
+                stdout: "leshiy\n".into(),
+                stderr: String::new(),
+            },
+        )
+        // ...while `docker ps` (running only) is empty.
+        .on(
+            "docker ps",
+            CommandOutput {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker exec",
+            CommandOutput {
+                code: 0,
+                stdout: format!("{}\n", issued_uri()),
+                stderr: String::new(),
+            },
+        );
+        provision(&mut t, &params(), &mut |_| {}).await.unwrap();
+        let calls = t.calls();
+        // The stale container is force-removed before a fresh one is created.
+        let rm = calls
+            .iter()
+            .position(|c| c.contains("docker rm -f") && c.contains("leshiy"));
+        let run = calls.iter().position(|c| c.contains("docker run"));
+        assert!(
+            rm.is_some(),
+            "expected stale container removal; calls: {calls:?}"
+        );
+        assert!(
+            run.is_some(),
+            "expected a fresh docker run; calls: {calls:?}"
+        );
+        assert!(
+            rm < run,
+            "stale removal must precede docker run; calls: {calls:?}"
+        );
     }
 
     #[tokio::test]

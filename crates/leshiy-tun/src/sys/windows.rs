@@ -92,7 +92,11 @@ impl PrivilegedOps for WindowsOps {
             .and_then(|r| r.ifindex);
         let exc = &plan.server_exception;
         // Attach the v4 egress ifindex only for a v4 exception; let the OS pick for v6.
-        let exc_idx = if exc.dest.addr.is_ipv4() { orig_idx } else { None };
+        let exc_idx = if exc.dest.addr.is_ipv4() {
+            orig_idx
+        } else {
+            None
+        };
         let exc_route = gateway_route(exc.dest.addr, exc.dest.prefix, exc.gateway, exc_idx);
         if handle.add(&exc_route).await.is_err() && exc.dest.addr.is_ipv4() {
             // netsh fallback is v4 (ipv4) syntax only; net_route handles the v6 exception.
@@ -110,6 +114,10 @@ impl PrivilegedOps for WindowsOps {
         // needs the Wintun adapter's ifindex (from the device); if unavailable, fall back to
         // netsh by name. Best-effort: a bad/duplicate route in a list must not fail the session.
         let tun_idx = device.tun_index().ok().map(|i| i as u32);
+        // Count via_tun install failures: unlike a failed bypass (the CIDR then rides the tunnel —
+        // safe), a failed via_tun means that CIDR is NOT routed through the tunnel. Under an
+        // Include base that is a silent direct-traffic leak, so surface it instead of swallowing.
+        let mut via_tun_failures = 0usize;
         for c in &plan.via_tun {
             // A v6 via-tun route needs IPv6 carried AND the adapter ifindex (the v4-gateway
             // fallback can't carry v6); otherwise skip it.
@@ -122,7 +130,15 @@ impl PrivilegedOps for WindowsOps {
                 Some(idx) => Route::new(c.addr, c.prefix).with_ifindex(idx),
                 None => Route::new(c.addr, c.prefix).with_gateway(IpAddr::V4(tun4)),
             };
-            let _ = handle.add(&route).await;
+            if handle.add(&route).await.is_err() {
+                via_tun_failures += 1;
+            }
+        }
+        if via_tun_failures > 0 {
+            tracing::warn!(
+                failures = via_tun_failures,
+                "some via-tun routes failed to install; matching traffic may bypass the tunnel"
+            );
         }
 
         // 2b. Split-tunnel bypass routes (Exclude): each CIDR escapes via the original gateway.
@@ -136,11 +152,18 @@ impl PrivilegedOps for WindowsOps {
             if b.dest.addr.is_ipv6() && !carry_v6 {
                 continue;
             }
-            let idx = if b.dest.addr.is_ipv4() { orig_idx } else { None };
+            let idx = if b.dest.addr.is_ipv4() {
+                orig_idx
+            } else {
+                None
+            };
             let _ = handle
                 .add(&gateway_route(b.dest.addr, b.dest.prefix, b.gateway, idx))
                 .await; // best-effort, fast (IP Helper API)
-            installed_bypass.lock().unwrap().push(b.dest.clone());
+            installed_bypass
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(b.dest.clone());
         }
 
         // 3. DNS on the tun interface (static), so queries ride the tunnel. Plus DNS-leak
@@ -190,6 +213,7 @@ impl PrivilegedOps for WindowsOps {
             tun_idx,
             tun_addr: tun4,
             gateway: plan.server_exception.gateway,
+            gateway6: plan.orig_gateway6,
             orig_idx,
             carry_v6,
             installed_bypass: installed_bypass.clone(),
@@ -220,9 +244,12 @@ struct WindowsController {
     tun_idx: Option<u32>,
     tun_addr: std::net::Ipv4Addr,
     gateway: IpAddr,
+    /// Original IPv6 default gateway (from the plan), used to route resolved v6 bypass rules.
+    /// `None` when v6 isn't carried or no v6 default route exists — a v6 bypass is then a no-op.
+    gateway6: Option<IpAddr>,
     /// Physical NIC ifindex — required for net_route to install a gateway route on Windows.
     orig_idx: Option<u32>,
-    /// Whether IPv6 is carried this session (gates resolved v6 domain via-tun routes).
+    /// Whether IPv6 is carried this session (gates resolved v6 domain via-tun / bypass routes).
     carry_v6: bool,
     installed_bypass: Arc<Mutex<Vec<Cidr>>>,
 }
@@ -234,36 +261,48 @@ impl WindowsController {
             None => Route::new(c.addr, c.prefix).with_gateway(IpAddr::V4(self.tun_addr)),
         }
     }
+
+    /// The original gateway to bypass a resolved CIDR through, by address family. `None` for a v6
+    /// CIDR when v6 isn't carried or no v6 gateway is known — the CIDR then rides the tunnel (safe).
+    fn bypass_gateway(&self, c: &Cidr) -> Option<IpAddr> {
+        if c.addr.is_ipv4() {
+            self.gateway.is_ipv4().then_some(self.gateway)
+        } else if self.carry_v6 {
+            self.gateway6
+        } else {
+            None
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl RouteController for WindowsController {
     async fn add_bypass(&self, c: &Cidr) -> std::io::Result<()> {
-        let IpAddr::V4(_) = c.addr else {
+        let Some(gw) = self.bypass_gateway(c) else {
+            tracing::debug!(cidr = %c, "split-tunnel: no gateway for this family; bypass rides the tunnel");
             return Ok(());
         };
         self.handle
-            .add(&gateway_route(
-                c.addr,
-                c.prefix,
-                self.gateway,
-                self.orig_idx,
-            ))
+            .add(&gateway_route(c.addr, c.prefix, gw, self.orig_idx))
             .await?;
-        self.installed_bypass.lock().unwrap().push(c.clone());
+        self.installed_bypass
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(c.clone());
         Ok(())
     }
     async fn remove_bypass(&self, c: &Cidr) -> std::io::Result<()> {
+        let Some(gw) = self.bypass_gateway(c) else {
+            return Ok(());
+        };
         let _ = self
             .handle
-            .delete(&gateway_route(
-                c.addr,
-                c.prefix,
-                self.gateway,
-                self.orig_idx,
-            ))
+            .delete(&gateway_route(c.addr, c.prefix, gw, self.orig_idx))
             .await;
-        self.installed_bypass.lock().unwrap().retain(|x| x != c);
+        self.installed_bypass
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|x| x != c);
         Ok(())
     }
     async fn add_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
@@ -285,16 +324,19 @@ impl RouteController for WindowsController {
         // Drain the shared list so the guard's `Drop` (which shares the same Arc) finds it empty
         // and skips its slow per-route `netsh` fallback. Delete each route in-process via the
         // net_route Handle (IP Helper API) — orders of magnitude faster than a subprocess per CIDR.
-        let routes: Vec<Cidr> = std::mem::take(&mut *self.installed_bypass.lock().unwrap());
+        let routes: Vec<Cidr> = std::mem::take(
+            &mut *self
+                .installed_bypass
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
         for c in &routes {
+            let Some(gw) = self.bypass_gateway(c) else {
+                continue;
+            };
             let _ = self
                 .handle
-                .delete(&gateway_route(
-                    c.addr,
-                    c.prefix,
-                    self.gateway,
-                    self.orig_idx,
-                ))
+                .delete(&gateway_route(c.addr, c.prefix, gw, self.orig_idx))
                 .await;
         }
     }
@@ -360,7 +402,12 @@ struct WindowsTeardown {
 impl Drop for WindowsTeardown {
     fn drop(&mut self) {
         // Best-effort; teardown must never panic.
-        for c in self.installed_bypass.lock().unwrap().iter() {
+        for c in self
+            .installed_bypass
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+        {
             let dest = format!("{}/{}", c.addr, c.prefix);
             let args = cmd::win_route_del_via_gateway_args(&dest, &self.gateway, &self.orig_iface);
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();

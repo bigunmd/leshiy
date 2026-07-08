@@ -12,6 +12,11 @@ pub struct RealityServerConfig {
     pub listen: String,
     pub dest: String,
     pub server_names: Vec<String>,
+    /// Optional per-SNI borrowed-site overrides (`sni -> host:port`). When advertising multiple
+    /// `server_names`, map each to its own real origin so the borrowed cert matches the SNI. Any
+    /// SNI not listed falls back to `dest`.
+    #[serde(default)]
+    pub dest_by_sni: std::collections::HashMap<String, String>,
     pub static_private_key_b64: String,
     pub short_ids: Vec<String>, // hex, 8 bytes each
     pub max_time_diff_secs: u64,
@@ -51,6 +56,11 @@ pub struct RealityServerConfig {
     /// deliberately run to reach an internal network.
     #[serde(default)]
     pub allow_private_egress: bool,
+    /// Reverse-proxy the QUIC web masquerade to this real HTTP origin (`host:port`) instead of
+    /// serving the built-in static page — a more credible cover for probers. When absent, the
+    /// static "It works!" page is used.
+    #[serde(default)]
+    pub masquerade_origin: Option<String>,
 }
 
 impl RealityServerConfig {
@@ -77,6 +87,7 @@ impl RealityServerConfig {
             short_ids,
             max_time_diff: Duration::from_secs(self.max_time_diff_secs),
             dest: self.dest.clone(),
+            dest_by_sni: self.dest_by_sni.clone(),
         })
     }
 }
@@ -90,6 +101,7 @@ mod tests {
         let c = RealityServerConfig {
             listen: "0.0.0.0:443".into(),
             dest: "www.microsoft.com:443".into(),
+            dest_by_sni: Default::default(),
             server_names: vec!["www.microsoft.com".into()],
             static_private_key_b64: base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode([5u8; 32]),
@@ -105,6 +117,7 @@ mod tests {
             quic_cert_sha256: None,
             connector: None,
             allow_private_egress: false,
+            masquerade_origin: None,
         };
         let ac = c.to_auth_config().unwrap();
         assert_eq!(ac.dest, "www.microsoft.com:443");

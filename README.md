@@ -53,13 +53,24 @@ like an ordinary visit to a real website — not a VPN.
 
 - **Two cloaked transports, picked automatically.**
   - **REALITY (TCP/443):** borrows a real site's TLS identity (SNI-borrowing). To a
-    prober, an unauthenticated connection is transparently relayed to that real site.
+    prober, an unauthenticated connection is transparently relayed to that real site —
+    with **per-SNI origins** when you advertise several names, so each borrowed cert
+    matches its name.
   - **QUIC / HTTP-3:** a real HTTP/3 server; authenticated clients tunnel via HTTP/3
-    `CONNECT`, while probers get a normal web response (masquerade). Cert-pinned.
+    `CONNECT`, while probers get a normal web response — a static page or, for a more
+    convincing cover, a **reverse proxy to a real backend** you run. Cert-pinned.
   - **`--transport auto`** uses QUIC where UDP is open and **falls back to REALITY/TCP
     when UDP is blocked** — automatically.
+- **Carries UDP, not just TCP.** DNS, QUIC, WebRTC, games and other UDP apps ride the
+  tunnel: the full-device VPN tunnels UDP over **either** transport (REALITY mux
+  datagrams or QUIC `CONNECT-UDP`, RFC 9298), and the local proxy speaks **SOCKS5 UDP
+  ASSOCIATE**.
+- **Full dual-stack (IPv6).** IPv6 is carried through the tunnel alongside IPv4, with a
+  fail-closed kill-switch so it can never leak around a v6-unaware path; split-tunnel
+  include/exclude rules apply to IPv6 domains and CIDRs too.
 - **Post-quantum key exchange** (X25519MLKEM768 hybrid) on the REALITY path.
-- **Anti-active-probing** on both transports (a wrong key / no key never reveals a proxy).
+- **Anti-active-probing** on both transports (a wrong key / no key never reveals a proxy),
+  with replay protection and handshake deadlines that shrug off connection-holding probes.
 - **Stream multiplexing** — the published defense against TLS-in-TLS traffic analysis.
 - **Built-in multi-user management** — per-user **data caps, up/down speed limits, and
   expiry**, enforced in the data path and persisted (no external panel required); manage
@@ -94,7 +105,8 @@ camera on Android, or from an image file), or reading it from the clipboard.
 
 **Split tunnel — decide what actually goes through the tunnel:**
 
-- **By network / domain** — include or exclude specific IP ranges (CIDRs) and domains.
+- **By network / domain** — include or exclude specific IP ranges (CIDRs) and domains,
+  IPv4 and IPv6 alike.
 - **Community rule lists** — subscribe to curated preset lists (e.g. route or bypass
   whole regions); they refresh automatically.
 - **Per-app (Android)** — tunnel only the apps you choose, or everything _except_ them.

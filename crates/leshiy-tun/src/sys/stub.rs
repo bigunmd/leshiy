@@ -1,5 +1,6 @@
-//! Non-Linux placeholder. Windows (Wintun) and macOS (utun) backends land in Phase 3;
-//! until then the engine refuses to start on those platforms rather than misbehaving.
+//! Fallback for exotic targets only. Linux, macOS (utun), Windows (Wintun), and Android
+//! (`VpnService`) all have real backends; this stub covers any other OS by refusing to start
+//! rather than misbehaving.
 use super::{PrivilegedOps, TunSession};
 use crate::route_plan::RoutePlan;
 use std::net::IpAddr;
@@ -19,7 +20,7 @@ impl PrivilegedOps for StubOps {
     ) -> std::io::Result<TunSession> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "VPN mode is Linux-only in this phase (Windows/macOS land in Phase 3)",
+            "VPN mode is unsupported on this platform",
         ))
     }
 }
