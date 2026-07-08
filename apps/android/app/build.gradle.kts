@@ -1,7 +1,22 @@
+import java.io.File
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+// Single source of truth for the version: the workspace Cargo.toml. Keeps the APK in lockstep
+// with the CLI/desktop/server release instead of drifting.
+val leshiyVersion: String = run {
+    val toml = File(rootProject.projectDir, "../../Cargo.toml").readText()
+    val block = toml.substringAfter("[workspace.package]")
+    Regex("""version\s*=\s*"([^"]+)"""").find(block)?.groupValues?.get(1) ?: "0.0.0"
+}
+
+fun versionToCode(v: String): Int {
+    val p = v.split(".").map { it.trim().toIntOrNull() ?: 0 }
+    return p.getOrElse(0) { 0 } * 10000 + p.getOrElse(1) { 0 } * 100 + p.getOrElse(2) { 0 }
 }
 
 android {
@@ -12,8 +27,8 @@ android {
         applicationId = "dev.leshiy"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.6.4"
+        versionCode = versionToCode(leshiyVersion)
+        versionName = leshiyVersion
     }
 
     buildTypes {
