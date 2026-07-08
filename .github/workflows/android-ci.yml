@@ -1,36 +1,62 @@
 name: android-ci
 on:
   push:
-    paths: ["apps/gui/**", "crates/**", ".github/workflows/android-ci.yml"]
+    paths:
+      - "apps/android/**"
+      - "crates/**"
+      - "scripts/build-android-jni.sh"
+      - ".github/workflows/android-ci.yml"
   pull_request:
-    paths: ["apps/gui/**", "crates/**", ".github/workflows/android-ci.yml"]
+    paths:
+      - "apps/android/**"
+      - "crates/**"
+      - "scripts/build-android-jni.sh"
+      - ".github/workflows/android-ci.yml"
 permissions:
   contents: read
 jobs:
+  # Native Kotlin/Compose app: cross-compile the leshiy-mobile bridge, generate the Kotlin
+  # bindings, run the Kotlin unit tests, and assemble the debug APK. (The Rust side of
+  # leshiy-mobile — clippy/fmt/tests — is covered by the main `ci` workflow's `cargo test --all`.)
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
-      - uses: pnpm/action-setup@v4
-        with: { version: 9 }
-      - uses: actions/setup-node@v4
+
+      - uses: actions/setup-java@v4
         with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: apps/gui/pnpm-lock.yaml
-      # Compile-gate the engine for every Android ABI (uses the runner's preinstalled NDK). This
-      # catches Android breakage early without the full (slow) Gradle/APK build the release does.
-      - name: Cross-compile the core for Android (3 ABIs)
+          distribution: temurin
+          java-version: "17"
+
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+
+      # Cross-compile the bridge for all 3 ABIs + generate Kotlin bindings. This also
+      # compile-gates leshiy-client / leshiy-tun for Android (the bridge pulls them in).
+      - name: Build native bridge (.so + Kotlin bindings)
         run: |
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
-          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 build -p leshiy-client -p leshiy-tun
-      - name: Frontend build
-        working-directory: apps/gui
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm build
+          ./scripts/build-android-jni.sh
+
+      # Kotlin unit tests + debug APK. AGP downloads any missing SDK platform/build-tools.
+      - name: Gradle test + assemble
+        working-directory: apps/android
+        run: ./gradlew --no-daemon testDebugUnitTest assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: leshiy-android-debug-apk
+          path: apps/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
