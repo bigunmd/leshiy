@@ -10,16 +10,24 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.leshiy.data.AppPrefs
 import dev.leshiy.ui.components.NavRow
+import dev.leshiy.ui.components.PanelCard
 import dev.leshiy.ui.components.ScreenFrame
 import dev.leshiy.ui.components.SectionLabel
 import dev.leshiy.ui.i18n.Lang
@@ -53,6 +61,29 @@ fun SettingsScreen(
             SectionLabel(s.secYourServers)
             NavRow(LeshiyIcons.Rocket, s.deploy, s.deploySub, tint = Wisp, onClick = onDeploy)
             NavRow(LeshiyIcons.Gear, s.manage, s.manageSub, tint = Warn, onClick = onManage)
+
+            Spacer(Modifier.size(6.dp))
+            SectionLabel(s.secNetwork)
+            var blockV6 by remember { mutableStateOf(AppPrefs.blockIpv6(context)) }
+            PanelCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(s.blockIpv6Title, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onBackground)
+                        Text(s.blockIpv6Sub, style = MaterialTheme.typography.labelSmall, color = Dim)
+                    }
+                    Spacer(Modifier.size(12.dp))
+                    Switch(
+                        checked = blockV6,
+                        onCheckedChange = { blockV6 = it; AppPrefs.setBlockIpv6(context, it) },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Bg0,
+                            checkedTrackColor = Wisp,
+                            uncheckedTrackColor = MaterialTheme.colorScheme.surface,
+                            uncheckedBorderColor = MaterialTheme.colorScheme.outline,
+                        ),
+                    )
+                }
+            }
 
             Spacer(Modifier.size(6.dp))
             SectionLabel(s.language)
