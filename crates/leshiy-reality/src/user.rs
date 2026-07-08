@@ -147,11 +147,11 @@ impl UserStore for InMemoryUserStore {
     fn authorize(&self, short_id: &[u8; 8], now: u64) -> Option<UserLimits> {
         // Read-lock the map, clone the Arc, then DROP the map lock before touching the def mutex.
         let e = {
-            let g = self.users.read().unwrap();
+            let g = self.users.read().unwrap_or_else(|e| e.into_inner());
             g.get(short_id)?.clone() // drop g here
         };
         // Map lock is gone. Briefly lock the per-entry def — no await, no I/O.
-        let def = e.def.lock().unwrap();
+        let def = e.def.lock().unwrap_or_else(|e| e.into_inner());
         let used = e
             .used_up
             .load(Ordering::Relaxed)
@@ -166,7 +166,7 @@ impl UserStore for InMemoryUserStore {
     }
 
     fn add_usage(&self, short_id: &[u8; 8], up: u64, down: u64) {
-        let g = self.users.read().unwrap();
+        let g = self.users.read().unwrap_or_else(|e| e.into_inner());
         if let Some(e) = g.get(short_id) {
             if up > 0 {
                 e.used_up.fetch_add(up, Ordering::Relaxed);
@@ -179,7 +179,7 @@ impl UserStore for InMemoryUserStore {
     }
 
     fn still_allowed(&self, short_id: &[u8; 8], now: u64) -> bool {
-        let g = self.users.read().unwrap();
+        let g = self.users.read().unwrap_or_else(|e| e.into_inner());
         let Some(e) = g.get(short_id) else {
             return false;
         };
@@ -187,7 +187,7 @@ impl UserStore for InMemoryUserStore {
             .used_up
             .load(Ordering::Relaxed)
             .saturating_add(e.used_down.load(Ordering::Relaxed));
-        let def = e.def.lock().unwrap();
+        let def = e.def.lock().unwrap_or_else(|e| e.into_inner());
         Self::ok(&def, used, now)
         // g (read-lock) + def (Mutex) both dropped here
     }
@@ -195,11 +195,11 @@ impl UserStore for InMemoryUserStore {
 
 impl UserAdmin for InMemoryUserStore {
     fn upsert(&self, user: User) {
-        let mut g = self.users.write().unwrap();
+        let mut g = self.users.write().unwrap_or_else(|e| e.into_inner());
         match g.get(&user.short_id) {
             Some(e) => {
                 // Existing entry: replace the def but keep usage atomics.
-                *e.def.lock().unwrap() = Self::def_of(&user);
+                *e.def.lock().unwrap_or_else(|e| e.into_inner()) = Self::def_of(&user);
             }
             None => {
                 g.insert(
@@ -216,14 +216,18 @@ impl UserAdmin for InMemoryUserStore {
     }
 
     fn remove(&self, short_id: &[u8; 8]) -> bool {
-        self.users.write().unwrap().remove(short_id).is_some()
+        self.users
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(short_id)
+            .is_some()
     }
 
     fn set_enabled(&self, short_id: &[u8; 8], on: bool) -> bool {
-        let g = self.users.read().unwrap();
+        let g = self.users.read().unwrap_or_else(|e| e.into_inner());
         match g.get(short_id) {
             Some(e) => {
-                e.def.lock().unwrap().enabled = on;
+                e.def.lock().unwrap_or_else(|e| e.into_inner()).enabled = on;
                 true
             }
             None => false,
@@ -231,7 +235,7 @@ impl UserAdmin for InMemoryUserStore {
     }
 
     fn reset_usage(&self, short_id: &[u8; 8]) -> bool {
-        let g = self.users.read().unwrap();
+        let g = self.users.read().unwrap_or_else(|e| e.into_inner());
         match g.get(short_id) {
             Some(e) => {
                 e.used_up.store(0, Ordering::Relaxed);
@@ -243,10 +247,10 @@ impl UserAdmin for InMemoryUserStore {
     }
 
     fn snapshot(&self) -> Vec<UserStatus> {
-        let g = self.users.read().unwrap();
+        let g = self.users.read().unwrap_or_else(|e| e.into_inner());
         g.values()
             .map(|e| {
-                let d = e.def.lock().unwrap();
+                let d = e.def.lock().unwrap_or_else(|e| e.into_inner());
                 UserStatus {
                     user: User {
                         short_id: e.short_id,

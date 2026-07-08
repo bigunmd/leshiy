@@ -71,6 +71,20 @@ impl Default for DirectEgress {
     }
 }
 
+/// Per-attempt bound on dialing a user-chosen target. The exit dials arbitrary destinations, so a
+/// black-holed target would otherwise pin a relay task on the OS connect timeout (tens of seconds)
+/// — a cheap resource-exhaustion lever. Generous enough for a genuinely distant/slow host, while
+/// bounding a dead one; a timed-out address falls through to the next resolved address.
+const TARGET_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `io::Error` for a dial attempt that exceeded [`TARGET_CONNECT_TIMEOUT`].
+fn timed_out(addr: std::net::SocketAddr) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("connect to {addr} timed out"),
+    )
+}
+
 /// Wildcard bind address matching the family of a resolved target. A UDP egress
 /// socket must be the same address family as its `connect` peer — a `0.0.0.0`
 /// socket cannot reach an IPv6 dest (`EAFNOSUPPORT`) and vice versa.
@@ -90,13 +104,16 @@ impl Egress for DirectEgress {
         // an IPv4-only host) falls through to the next instead of failing the dial.
         let mut last_err = None;
         for addr in addrs {
-            match tokio::net::TcpStream::connect(addr).await {
-                Ok(s) => {
+            match tokio::time::timeout(TARGET_CONNECT_TIMEOUT, tokio::net::TcpStream::connect(addr))
+                .await
+            {
+                Ok(Ok(s)) => {
                     s.set_nodelay(true).ok();
                     let (r, w) = s.into_split();
                     return Ok((Box::new(TcpEgressRead(r)), Box::new(TcpEgressWrite(w))));
                 }
-                Err(e) => last_err = Some(e),
+                Ok(Err(e)) => last_err = Some(e),
+                Err(_) => last_err = Some(timed_out(addr)),
             }
         }
         Err(crate::RealityError::Io(last_err.unwrap_or_else(|| {
@@ -111,10 +128,13 @@ impl Egress for DirectEgress {
             // Bind the wildcard of the target's family: an IPv4 `0.0.0.0` socket
             // cannot `connect` an IPv6 dest (and vice versa).
             match tokio::net::UdpSocket::bind(udp_bind_wildcard(&addr)).await {
-                Ok(sock) => match sock.connect(addr).await {
-                    Ok(()) => return Ok(Box::new(UdpEgressSock(sock))),
-                    Err(e) => last_err = Some(e),
-                },
+                Ok(sock) => {
+                    match tokio::time::timeout(TARGET_CONNECT_TIMEOUT, sock.connect(addr)).await {
+                        Ok(Ok(())) => return Ok(Box::new(UdpEgressSock(sock))),
+                        Ok(Err(e)) => last_err = Some(e),
+                        Err(_) => last_err = Some(timed_out(addr)),
+                    }
+                }
                 Err(e) => last_err = Some(e),
             }
         }

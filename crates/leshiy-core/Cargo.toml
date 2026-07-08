@@ -14,4 +14,6 @@ bytes.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-tokio = { workspace = true, features = ["full"] }
+# `test-util` (not part of `full`) enables `#[tokio::test(start_paused = true)]` so timeout
+# tests fast-forward virtual time instead of blocking on the real wall clock.
+tokio = { workspace = true, features = ["full", "test-util"] }

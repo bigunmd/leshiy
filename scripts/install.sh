@@ -171,7 +171,13 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-ReadWritePaths=/etc/leshiy
+# systemd creates /etc/leshiy (owned by the service user, 0700) BEFORE ExecStart and makes it
+# read-write under ProtectSystem=strict. This replaces a bare `ReadWritePaths=/etc/leshiy`, which
+# crash-loops opaquely with 226/NAMESPACE if the dir is ever missing (the sandbox mount can't be
+# set up). With ConfigurationDirectory a missing dir is recreated, so a missing *config file*
+# surfaces as a clear "config not found" from the binary instead of a cryptic namespace error.
+ConfigurationDirectory=leshiy
+ConfigurationDirectoryMode=0700
 Restart=on-failure
 RestartSec=2
 

@@ -316,7 +316,14 @@ mod tests {
         let args = win_v6_addr_add_args("leshiy0", "fd00:71::2");
         assert_eq!(
             args,
-            vec!["interface", "ipv6", "add", "address", "leshiy0", "fd00:71::2"]
+            vec![
+                "interface",
+                "ipv6",
+                "add",
+                "address",
+                "leshiy0",
+                "fd00:71::2"
+            ]
         );
     }
 

@@ -7,17 +7,25 @@ use std::sync::Arc;
 use quinn::{Endpoint, ServerConfig, TransportConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
+/// Tear down a QUIC connection after this long with no activity. Keepalive PINGs (below) refresh
+/// it, so this only fires when the path is genuinely dead.
+const QUIC_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Keepalive PING cadence — comfortably inside [`QUIC_IDLE_TIMEOUT`] so an otherwise-idle tunnel
+/// (or one whose UDP path briefly rebinds on sleep/resume) stays alive and a real break is detected
+/// promptly. Must stay well below the idle timeout.
+const QUIC_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn bbr_transport() -> Arc<TransportConfig> {
     let mut transport = TransportConfig::default();
     transport.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+    // `try_from` only fails for a duration exceeding quinn's varint ceiling — impossible for a
+    // fixed 30s const, so the expect is unreachable in practice.
     transport.max_idle_timeout(Some(
-        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(30)).unwrap(),
+        quinn::IdleTimeout::try_from(QUIC_IDLE_TIMEOUT).expect("30s is a valid QUIC idle timeout"),
     ));
-    // Send keepalive PINGs well within the idle timeout so an otherwise-idle tunnel — or one whose
-    // UDP path is briefly disrupted (e.g. WSL2 NAT rebind, sleep/resume) — stays alive and the
-    // break is detected promptly, instead of the connection silently dying after 30s idle. Quinn
-    // disables keepalive by default; without it an idle QUIC tunnel is torn down on idle timeout.
-    transport.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
+    // Quinn disables keepalive by default; without it an idle QUIC tunnel is torn down on idle
+    // timeout even when both ends are healthy.
+    transport.keep_alive_interval(Some(QUIC_KEEPALIVE_INTERVAL));
     Arc::new(transport)
 }
 
@@ -63,8 +71,8 @@ pub fn server_endpoint(
     // Build the UDP socket ourselves so a v6 wildcard is dual-stack (accepts
     // IPv4 clients as v4-mapped), then hand it to quinn via Endpoint::new.
     let socket = server_udp_socket(listen)?;
-    let runtime =
-        quinn::default_runtime().ok_or_else(|| crate::QuicError::Conn("no async runtime".into()))?;
+    let runtime = quinn::default_runtime()
+        .ok_or_else(|| crate::QuicError::Conn("no async runtime".into()))?;
     Endpoint::new(quinn::EndpointConfig::default(), Some(cfg), socket, runtime).map_err(Into::into)
 }
 
