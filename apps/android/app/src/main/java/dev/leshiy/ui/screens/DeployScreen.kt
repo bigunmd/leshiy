@@ -54,11 +54,12 @@ import uniffi.leshiy_mobile.ProvisionConfig
 @Composable
 fun DeployScreen(
     vm: ProvisionViewModel,
-    onProvisioned: (String, String) -> Unit,
+    onStarted: () -> Unit,
     onBack: () -> Unit,
 ) {
     val s = LocalStrings.current
     val state by vm.state.collectAsStateWithLifecycle()
+    var vaultPass by remember { mutableStateOf("") }
 
     // Required.
     var host by remember { mutableStateOf("") }
@@ -149,10 +150,22 @@ fun DeployScreen(
                 HelpField(dns, { dns = it }, s.dnsOverrideOpt, s.helpDns)
             }
 
+            // Save-for-management (vault) setup.
+            SectionLabel(s.saveForManagement)
+            if (dev.leshiy.data.VaultHolder.unlocked) {
+                Text(s.vaultUnlockedNote, style = MaterialTheme.typography.labelSmall, color = Dim)
+            } else {
+                HelpField(vaultPass, { vaultPass = it }, s.vaultPassphraseOptDeploy, s.helpVaultDeploy)
+            }
+
             Spacer(Modifier.size(2.dp))
             PrimaryButton(
                 text = if (state.running) s.provisioning else s.provision,
                 onClick = {
+                    // If a vault passphrase was given, unlock first so the server is saved for management.
+                    if (!dev.leshiy.data.VaultHolder.unlocked && vaultPass.isNotBlank()) {
+                        dev.leshiy.data.VaultHolder.unlock(context, vaultPass)
+                    }
                     val cfg = ProvisionConfig(
                         host = host.trim(),
                         sshPort = sshPort.trim().toUShortOrNull() ?: 22u,
@@ -169,25 +182,14 @@ fun DeployScreen(
                         userLabel = userLabel.trim().ifBlank { null },
                         dnsOverride = dns.trim().ifBlank { null },
                     )
-                    vm.provision(cfg) { uri -> onProvisioned(uri, host.trim()) }
+                    val serverName = label.trim().ifBlank { host.trim() }
+                    vm.provision(cfg, serverName)
+                    onStarted()
                 },
                 enabled = !state.running && host.isNotBlank() &&
                     (if (useKey) pem.isNotBlank() else password.isNotBlank()),
                 modifier = Modifier.fillMaxWidth(),
             )
-
-            state.error?.let { Text(it, color = Warn, style = MaterialTheme.typography.labelSmall) }
-
-            if (state.log.isNotEmpty()) {
-                SectionLabel(s.progress)
-                PanelCard {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        state.log.forEach { line ->
-                            Text(line, fontFamily = PlexMono, style = MaterialTheme.typography.labelSmall, color = Dim)
-                        }
-                    }
-                }
-            }
         }
     }
 }
