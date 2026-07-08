@@ -125,6 +125,17 @@ data class Strings(
     val loadKeyFile: String,
     val helpKey: String,
     val helpKeyPassphrase: String,
+    // Provisioning progress + vault setup
+    val provisioningTitle: String,
+    val stepOf: String,
+    val serverReady: String,
+    val provisionFailed: String,
+    val goToServers: String,
+    val logs: String,
+    val saveForManagement: String,
+    val vaultUnlockedNote: String,
+    val vaultPassphraseOptDeploy: String,
+    val helpVaultDeploy: String,
     // Common
     val back: String,
 )
@@ -236,6 +247,16 @@ val EnStrings = Strings(
     loadKeyFile = "Load key from file",
     helpKey = "Paste your OpenSSH/PEM private key, or load it from a file. It's used once to set up and stored only in the encrypted vault.",
     helpKeyPassphrase = "If your private key is encrypted, its passphrase. Leave empty otherwise.",
+    provisioningTitle = "Provisioning",
+    stepOf = "Step %1\$d of %2\$d",
+    serverReady = "Server ready",
+    provisionFailed = "Provisioning failed",
+    goToServers = "Add to servers",
+    logs = "Logs",
+    saveForManagement = "Save for management",
+    vaultUnlockedNote = "This server will be saved to your unlocked vault, so you can manage it later.",
+    vaultPassphraseOptDeploy = "Vault passphrase (optional)",
+    helpVaultDeploy = "Set a passphrase to save this server (with its SSH credentials) in an encrypted vault, so you can add users, check status or tear it down later. Leave empty to just get a client config.",
     back = "Back",
 )
 
@@ -346,6 +367,16 @@ val RuStrings = Strings(
     loadKeyFile = "Загрузить ключ из файла",
     helpKey = "Вставьте приватный ключ OpenSSH/PEM или загрузите из файла. Используется один раз при настройке и хранится только в зашифрованном хранилище.",
     helpKeyPassphrase = "Если ключ зашифрован — его пароль. Иначе оставьте пустым.",
+    provisioningTitle = "Развёртывание",
+    stepOf = "Шаг %1\$d из %2\$d",
+    serverReady = "Сервер готов",
+    provisionFailed = "Развёртывание не удалось",
+    goToServers = "Добавить в серверы",
+    logs = "Журнал",
+    saveForManagement = "Сохранить для управления",
+    vaultUnlockedNote = "Сервер будет сохранён в разблокированное хранилище, чтобы им можно было управлять позже.",
+    vaultPassphraseOptDeploy = "Пароль хранилища (необязательно)",
+    helpVaultDeploy = "Задайте пароль, чтобы сохранить сервер (с его SSH-данными) в зашифрованном хранилище — тогда позже можно добавлять пользователей, проверять статус и удалять его. Пусто — только клиентский конфиг.",
     back = "Назад",
 )
 

@@ -34,6 +34,7 @@ import dev.leshiy.ui.i18n.stringsFor
 import dev.leshiy.ui.screens.ConnectScreen
 import dev.leshiy.ui.screens.DeployScreen
 import dev.leshiy.ui.screens.ManageScreen
+import dev.leshiy.ui.screens.ProvisioningScreen
 import dev.leshiy.ui.screens.ServersScreen
 import dev.leshiy.ui.screens.SettingsScreen
 import dev.leshiy.ui.screens.SplitScreen
@@ -91,6 +92,7 @@ private object Route {
     const val SERVERS = "servers"
     const val SPLIT = "split"
     const val DEPLOY = "deploy"
+    const val PROVISIONING = "provisioning"
     const val MANAGE = "manage"
 }
 
@@ -150,8 +152,19 @@ private fun AppNav(onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
         composable(Route.DEPLOY) {
             DeployScreen(
                 vm = provisionVm,
-                onProvisioned = { uri, host -> profilesVm.add(uri, host); nav.popBackStack() },
+                onStarted = { nav.navigate(Route.PROVISIONING) },
                 onBack = { nav.popBackStack() },
+            )
+        }
+        composable(Route.PROVISIONING) {
+            ProvisioningScreen(
+                vm = provisionVm,
+                onDone = { uri, label ->
+                    profilesVm.add(uri, label)
+                    provisionVm.reset()
+                    nav.popBackStack(Route.CONNECT, inclusive = false)
+                },
+                onBack = { provisionVm.reset(); nav.popBackStack() },
             )
         }
         composable(Route.MANAGE) {

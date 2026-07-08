@@ -1,0 +1,39 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+    <!-- Wisp leaf, ported from apps/gui/icon-src.svg. Scaled up into the adaptive safe zone. -->
+    <group
+        android:pivotX="512"
+        android:pivotY="500"
+        android:scaleX="1.45"
+        android:scaleY="1.45">
+        <!-- soft glow behind -->
+        <path
+            android:pathData="M512 270 C 636 470 612 612 512 690 C 412 612 388 470 512 270 Z"
+            android:fillColor="#7CE07A"
+            android:fillAlpha="0.28" />
+        <!-- leaf body -->
+        <path android:pathData="M512 300 C 612 480 596 600 512 668 C 428 600 412 480 512 300 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="radial"
+                    android:centerX="512"
+                    android:centerY="530"
+                    android:gradientRadius="300">
+                    <item android:offset="0" android:color="#EBFFE0" />
+                    <item android:offset="0.35" android:color="#9DF59B" />
+                    <item android:offset="0.75" android:color="#7CE07A" />
+                    <item android:offset="1" android:color="#4FA64E" />
+                </gradient>
+            </aapt:attr>
+        </path>
+        <!-- bright node -->
+        <path
+            android:pathData="M512 516 a44 44 0 1 0 0.1 0 z"
+            android:fillColor="#EBFFE0"
+            android:fillAlpha="0.92" />
+    </group>
+</vector>
