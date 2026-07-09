@@ -1,6 +1,6 @@
 [package]
 name = "leshiy-gui"
-version = "1.7.2"
+version = "1.7.3"
 description = "Leshiy desktop application"
 authors = ["Mikhail Bigun"]
 edition = "2021"
