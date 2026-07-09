@@ -7,7 +7,7 @@
 //! When no v6 TUN address is present, IPv6 is fail-closed: the backend disables it (sysctl /
 //! per-service kill-switch) while the session is up and restores it on teardown — never leaking
 //! around the tunnel.
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Errors from building a route plan.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -26,6 +26,28 @@ pub struct Cidr {
 impl std::fmt::Display for Cidr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}", self.addr, self.prefix)
+    }
+}
+
+impl Cidr {
+    /// True for one of the four default-override halves a full-tunnel (Exclude-base) plan
+    /// installs: `0.0.0.0/1`, `128.0.0.0/1`, and (dual-stack) `::/1`, `8000::/1`. Together each
+    /// pair blankets an entire address family — the WireGuard "override the default without
+    /// deleting it" trick. In the *main* routing table those covering routes trip docker/IPAM's
+    /// "candidate subnet overlaps an existing host route" check ("all predefined address pools
+    /// have been fully subnetted"); a backend that uses policy routing pulls these out of
+    /// `via_tun` and installs a single `default`/`::/0` in a private table instead, keeping the
+    /// main table free of any covering route.
+    pub fn is_default_override(&self) -> bool {
+        if self.prefix != 1 {
+            return false;
+        }
+        match self.addr {
+            IpAddr::V4(a) => a == Ipv4Addr::UNSPECIFIED || a == Ipv4Addr::new(128, 0, 0, 0),
+            IpAddr::V6(a) => {
+                a == Ipv6Addr::UNSPECIFIED || a == Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)
+            }
+        }
     }
 }
 
@@ -435,6 +457,37 @@ mod tests {
         .unwrap();
         assert!(!plan.via_tun.iter().any(|r| r.to_string() == "0.0.0.0/1"));
         assert_eq!(plan.via_tun.len(), 1);
+    }
+
+    #[test]
+    fn default_override_halves_are_recognized() {
+        for s in ["0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"] {
+            let (addr, prefix) = s.split_once('/').unwrap();
+            let c = Cidr {
+                addr: addr.parse().unwrap(),
+                prefix: prefix.parse().unwrap(),
+            };
+            assert!(c.is_default_override(), "{s} should be a default override");
+        }
+        // Specific includes / excludes and the true default are NOT override halves.
+        for s in [
+            "0.0.0.0/0",
+            "10.0.0.0/8",
+            "192.168.1.0/24",
+            "1.2.3.0/1",
+            "::/0",
+            "2000::/1",
+        ] {
+            let (addr, prefix) = s.split_once('/').unwrap();
+            let c = Cidr {
+                addr: addr.parse().unwrap(),
+                prefix: prefix.parse().unwrap(),
+            };
+            assert!(
+                !c.is_default_override(),
+                "{s} must not be a default override"
+            );
+        }
     }
 
     #[test]
