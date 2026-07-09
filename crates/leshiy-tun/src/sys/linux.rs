@@ -15,6 +15,21 @@ const IPV6_DEFAULT: &str = "/proc/sys/net/ipv6/conf/default/disable_ipv6";
 /// not async, and unlike the via-tun routes these don't auto-clear when the device drops).
 const IP: &str = "ip";
 
+/// Policy routing for the full-tunnel default override. Rather than blanket the *main* table
+/// with `0.0.0.0/1`+`128.0.0.0/1` (which trips docker/IPAM's "candidate subnet overlaps a host
+/// route" check → "all predefined address pools have been fully subnetted"), the override rides
+/// a private table selected by two `ip rule`s, leaving the main table with only specific routes
+/// plus the untouched real default (which docker ignores):
+///   pref 32764: `table main suppress_prefixlength 0` — use main but NOT its default route, so
+///               the server `/32`, LAN, docker bridges, and split includes/excludes still win.
+///   pref 32765: `table 51821`                         — else fall through to the tunnel default.
+/// Both priorities sit just above the main table's own rule (32766) so main's specific routes
+/// are consulted first. The private-table routes point at the TUN and auto-clear when it drops;
+/// the two rules do NOT, so teardown deletes them explicitly.
+const RT_TABLE: &str = "51821";
+const RULE_PREF_SUPPRESS: &str = "32764";
+const RULE_PREF_TUN: &str = "32765";
+
 #[async_trait::async_trait]
 impl PrivilegedOps for LinuxOps {
     const CARRIES_V6: bool = true;
@@ -64,42 +79,22 @@ impl PrivilegedOps for LinuxOps {
         };
 
         // 2. Routes — applied in ONE `ip -batch` process: the server-host exception (so
-        //    encrypted packets to the server escape the tunnel), the via-TUN routes (default
-        //    override and/or include CIDRs, routed through the device), and the bypass routes
-        //    (excluded CIDRs via the original gateway). A subscription can carry thousands of
-        //    CIDRs; installing them one per netlink round-trip stalls connect, so we batch.
+        //    encrypted packets to the server escape the tunnel), the specific include CIDRs
+        //    (`dev tun`, main table), the bypass routes (excluded CIDRs via the original
+        //    gateway), and — for the full-tunnel default override — a single `default`/`::/0` in
+        //    the private [`RT_TABLE`] selected by policy `ip rule`s. The override is deliberately
+        //    kept OUT of the main table so it can't blanket every candidate subnet docker's IPAM
+        //    might pick (which yields "all predefined address pools have been fully subnetted").
+        //    A subscription can carry thousands of CIDRs; batching keeps connect fast, and
         //    `-force` keeps going past a bad/duplicate line instead of failing the session.
-        //    IPv4-only this phase; IPv6 entries are skipped (logged).
         let ifindex = ifindex_of(tun_name)?;
-        let installed_bypass: Arc<Mutex<Vec<Cidr>>> = Arc::new(Mutex::new(Vec::new()));
-        let mut batch = String::new();
-        // `ip -batch` infers the address family from each route's address, so v4 and v6 lines
-        // coexist in one batch. IPv6 routes are only emitted when v6 is actually carried.
-        let exc = &plan.server_exception;
-        if exc.dest.addr.is_ipv4() || carry_v6 {
-            batch.push_str(&format!("route add {} via {}\n", exc.dest, exc.gateway));
-        }
-        for c in &plan.via_tun {
-            if c.addr.is_ipv4() || carry_v6 {
-                batch.push_str(&format!("route add {} dev {}\n", c, tun_name));
-            } else {
-                tracing::warn!(cidr = %c, "skipping IPv6 via_tun route (IPv6 not carried)");
-            }
-        }
-        // Bypass routes escape via the family-appropriate gateway the planner chose for each.
-        // A v6 bypass needs IPv6 carried; otherwise skip it (it then rides the tunnel — safe).
-        for b in &plan.bypass {
-            if b.dest.addr.is_ipv6() && !carry_v6 {
-                tracing::warn!(cidr = %b.dest, "skipping IPv6 split-tunnel bypass (IPv6 not carried)");
-                continue;
-            }
-            batch.push_str(&format!("route add {} via {}\n", b.dest, b.gateway));
-            installed_bypass
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(b.dest.clone());
-        }
-        ip_batch(&batch).await?;
+        let batch = build_route_batch(plan, tun_name, carry_v6);
+        let installed_bypass: Arc<Mutex<Vec<Cidr>>> = Arc::new(Mutex::new(batch.bypass));
+        // Best-effort pre-clean of any policy rules a prior (hard-killed) session left behind.
+        // Expected to no-op on a clean connect, so its stderr is ignored — counting it would fire
+        // a spurious "traffic may not be routed" warning every time.
+        ip_batch_quiet(&batch.preclean).await;
+        ip_batch(&batch.install).await?;
 
         // 3. DNS: force the configured resolver(s) so queries ride the tunnel. Skipped in
         //    Include mode (most traffic is direct; the system resolver is left untouched).
@@ -140,6 +135,7 @@ impl PrivilegedOps for LinuxOps {
             ipv6_all_backup,
             ipv6_default_backup,
             installed_bypass,
+            policy_rules_teardown: batch.teardown_rules,
         };
         Ok(TunSession {
             device,
@@ -251,28 +247,34 @@ async fn add_v6_addr(tun_name: &str, v6: Ipv6Addr) -> std::io::Result<()> {
     }
 }
 
-/// Restores DNS + IPv6 state on drop, and removes any split-tunnel `bypass` routes. The
-/// default-override / via-tun routes auto-clear when the TUN device is dropped (the interface
-/// disappears); the `bypass` routes point at the original gateway, so they're deleted here.
+/// Restores DNS + IPv6 state on drop, removes any split-tunnel `bypass` routes, and deletes the
+/// policy `ip rule`s that selected the private-table default override. The default-override /
+/// via-tun routes auto-clear when the TUN device is dropped (the interface disappears); the
+/// `bypass` routes point at the original gateway and the policy rules aren't tied to any device,
+/// so both are removed here.
 struct LinuxTeardown {
     resolv_backup: Option<Vec<u8>>,
     ipv6_all_backup: Option<String>,
     ipv6_default_backup: Option<String>,
     /// All bypass routes still installed (static + resolver-added) — removed on teardown.
     installed_bypass: Arc<Mutex<Vec<Cidr>>>,
+    /// `ip -batch` `rule del` lines for the policy rules (empty when no override was installed).
+    policy_rules_teardown: String,
 }
 
 impl Drop for LinuxTeardown {
     fn drop(&mut self) {
         // Best-effort; teardown must never panic. `Drop` is synchronous, so batch the deletes
         // through one `ip -batch` process (sync) rather than thousands of `ip route del` spawns.
-        let batch: String = self
+        // The bypass route deletes and the policy-rule deletes share the one batch.
+        let mut batch: String = self
             .installed_bypass
             .lock()
             .unwrap()
             .iter()
             .map(|c| format!("route del {c}\n"))
             .collect();
+        batch.push_str(&self.policy_rules_teardown);
         if !batch.is_empty() {
             use std::io::Write;
             if let Ok(mut child) = std::process::Command::new(IP)
@@ -297,6 +299,113 @@ impl Drop for LinuxTeardown {
         if let Some(v) = &self.ipv6_default_backup {
             let _ = std::fs::write(IPV6_DEFAULT, v.trim());
         }
+    }
+}
+
+/// The `ip -batch` scripts derived from a [`RoutePlan`], plus the bypass CIDRs to track.
+struct RouteBatch {
+    /// Best-effort `rule del`s run BEFORE `install`, uncounted, to clear any policy rules a
+    /// prior session left behind (a hard kill skips teardown, and `ip rule add` doesn't dedupe).
+    /// These are EXPECTED to fail when nothing matches, so they run in their own pass whose
+    /// stderr is ignored — otherwise they'd inflate `install`'s failure count and fire a
+    /// misleading "traffic may not be routed" warning on every clean connect.
+    preclean: String,
+    /// Route/rule commands to install (main-table specifics + the private-table default + the
+    /// two policy `ip rule`s). One `ip -batch` line each. These SHOULD succeed, so their failures
+    /// are counted and warned about.
+    install: String,
+    /// Commands run on teardown to delete the policy `ip rule`s (empty when no override was
+    /// installed). The private-table routes auto-clear with the TUN, so only the rules are here.
+    teardown_rules: String,
+    /// Bypass CIDRs installed in the main table (via the original gateway) — tracked so teardown
+    /// removes them (they point at the original gateway, so they don't auto-clear with the TUN).
+    bypass: Vec<Cidr>,
+}
+
+/// Pure translation of a [`RoutePlan`] into `ip -batch` scripts. Kept side-effect-free (no
+/// process spawns, no logging) so it's unit-testable on any host — the privileged `ip` calls
+/// live in [`LinuxOps::start`]. `carry_v6` gates whether IPv6 entries are emitted (the TUN got a
+/// v6 address); when false, v6 is fail-closed by the caller's kill-switch and skipped here.
+///
+/// The default-override halves (`0.0.0.0/1`+`128.0.0.0/1`, `::/1`+`8000::/1`) are pulled OUT of
+/// the main table and expressed as a single `default`/`::/0` in the private [`RT_TABLE`] plus
+/// the policy rules — this is what keeps the main table free of a covering route so docker's
+/// IPAM can still auto-allocate a bridge subnet while the tunnel is up.
+fn build_route_batch(plan: &RoutePlan, tun_name: &str, carry_v6: bool) -> RouteBatch {
+    let mut install = String::new();
+    let mut preclean = String::new();
+    let mut bypass = Vec::new();
+
+    // The server-host exception escapes the tunnel via the original gateway (main table), so
+    // the encrypted packets to the server don't loop back in. Under policy routing it's a
+    // specific `/32`|`/128` in main, honored ahead of the tunnel default by the suppress rule.
+    let exc = &plan.server_exception;
+    if exc.dest.addr.is_ipv4() || carry_v6 {
+        install.push_str(&format!("route add {} via {}\n", exc.dest, exc.gateway));
+    }
+
+    // Partition `via_tun` into the default-override halves (→ private-table default, below) and
+    // the specific include routes (→ main table, `dev tun`, as before). Includes stay in main so
+    // the suppress rule lets them win over the tunnel default via longest-prefix-match.
+    let mut v4_override = false;
+    let mut v6_override = false;
+    for c in &plan.via_tun {
+        if c.is_default_override() {
+            if c.addr.is_ipv4() {
+                v4_override = true;
+            } else if carry_v6 {
+                v6_override = true;
+            }
+            continue;
+        }
+        if c.addr.is_ipv4() || carry_v6 {
+            install.push_str(&format!("route add {} dev {}\n", c, tun_name));
+        }
+    }
+
+    // Bypass (Exclude) routes escape via the family-appropriate original gateway (main table).
+    for b in &plan.bypass {
+        if b.dest.addr.is_ipv6() && !carry_v6 {
+            continue;
+        }
+        install.push_str(&format!("route add {} via {}\n", b.dest, b.gateway));
+        bypass.push(b.dest.clone());
+    }
+
+    // Policy routing for the default override(s): a single default in the private table plus the
+    // two selector rules, per address family that carries an override.
+    let mut teardown_rules = String::new();
+    let mut emit_policy = |fam6: bool| {
+        let p = if fam6 { "-6 " } else { "" };
+        let dst = if fam6 { "::/0" } else { "default" };
+        let suppress = format!("priority {RULE_PREF_SUPPRESS} table main suppress_prefixlength 0");
+        let tun_rule = format!("priority {RULE_PREF_TUN} table {RT_TABLE}");
+        // Pre-delete (in the uncounted `preclean` pass) makes install idempotent: a session
+        // hard-killed before teardown leaves its rules behind, and `ip rule add` doesn't dedupe —
+        // without the pre-delete each reconnect would stack another identical rule. These deletes
+        // are expected to no-op on a clean connect, so they're kept OUT of the counted `install`.
+        preclean.push_str(&format!("{p}rule del {suppress}\n"));
+        preclean.push_str(&format!("{p}rule del {tun_rule}\n"));
+        install.push_str(&format!(
+            "{p}route add {dst} dev {tun_name} table {RT_TABLE}\n"
+        ));
+        install.push_str(&format!("{p}rule add {suppress}\n"));
+        install.push_str(&format!("{p}rule add {tun_rule}\n"));
+        teardown_rules.push_str(&format!("{p}rule del {suppress}\n"));
+        teardown_rules.push_str(&format!("{p}rule del {tun_rule}\n"));
+    };
+    if v4_override {
+        emit_policy(false);
+    }
+    if v6_override {
+        emit_policy(true);
+    }
+
+    RouteBatch {
+        preclean,
+        install,
+        teardown_rules,
+        bypass,
     }
 }
 
@@ -337,6 +446,29 @@ async fn ip_batch(script: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Like [`ip_batch`] but for commands EXPECTED to fail harmlessly (the idempotency pre-clean
+/// `rule del`s): stderr is discarded and no warning is emitted. A missing rule is the normal
+/// case on a clean connect, so counting these would cry wolf about routing every time.
+async fn ip_batch_quiet(script: &str) {
+    use tokio::io::AsyncWriteExt;
+    if script.is_empty() {
+        return;
+    }
+    let Ok(mut child) = tokio::process::Command::new(IP)
+        .args(["-force", "-batch", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(script.as_bytes()).await;
+    }
+    let _ = child.wait().await;
+}
+
 fn to_io<E: std::fmt::Display>(e: E) -> std::io::Error {
     std::io::Error::other(e.to_string())
 }
@@ -354,6 +486,147 @@ mod tests {
     use super::*;
     use crate::route_plan::RoutePlan;
     use leshiy_client::SplitMode;
+
+    fn v4_full_tunnel() -> RoutePlan {
+        RoutePlan::full_tunnel(
+            "203.0.113.7".parse().unwrap(),
+            "192.168.1.1".parse().unwrap(),
+            "10.71.0.2".parse().unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn full_tunnel_keeps_main_table_clear_of_the_override() {
+        let b = build_route_batch(&v4_full_tunnel(), "leshiy0", false);
+        // The default override rides a PRIVATE table + policy rules, never the main table — this
+        // is what stops docker's IPAM seeing every candidate subnet as already routed.
+        assert!(
+            b.install
+                .contains("route add default dev leshiy0 table 51821")
+        );
+        assert!(
+            b.install
+                .contains("rule add priority 32764 table main suppress_prefixlength 0")
+        );
+        assert!(b.install.contains("rule add priority 32765 table 51821"));
+        // No blanket /1 halves anywhere (they'd trip the docker overlap check).
+        assert!(
+            !b.install.contains("0.0.0.0/1"),
+            "no v4 override in the batch"
+        );
+        assert!(!b.install.contains("128.0.0.0/1"));
+        // The server host still escapes via the original gateway (specific route, main table).
+        assert!(
+            b.install
+                .contains("route add 203.0.113.7/32 via 192.168.1.1")
+        );
+        // v4-only: nothing v6.
+        assert!(!b.install.contains("-6 "));
+        // The counted install batch adds rules but never deletes — the idempotency pre-deletes
+        // live in the uncounted `preclean` pass so they can't inflate the failure warning.
+        assert!(
+            !b.install.contains("rule del"),
+            "install must not delete rules"
+        );
+        assert!(
+            b.preclean
+                .contains("rule del priority 32764 table main suppress_prefixlength 0")
+        );
+        assert!(b.preclean.contains("rule del priority 32765 table 51821"));
+        // Teardown removes exactly the two policy rules; the private-table route auto-clears.
+        assert!(
+            b.teardown_rules
+                .contains("rule del priority 32764 table main suppress_prefixlength 0")
+        );
+        assert!(
+            b.teardown_rules
+                .contains("rule del priority 32765 table 51821")
+        );
+        assert!(b.bypass.is_empty());
+    }
+
+    #[test]
+    fn dual_stack_full_tunnel_adds_v6_policy_routing() {
+        let plan = RoutePlan::with_split(
+            SplitMode::Exclude,
+            &[],
+            "203.0.113.7".parse().unwrap(),
+            "192.168.1.1".parse().unwrap(),
+            "10.71.0.2".parse().unwrap(),
+            Some("fd00:71::2".parse().unwrap()),
+        )
+        .unwrap();
+        let b = build_route_batch(&plan, "leshiy0", true);
+        assert!(
+            b.install
+                .contains("-6 route add ::/0 dev leshiy0 table 51821")
+        );
+        assert!(
+            b.install
+                .contains("-6 rule add priority 32764 table main suppress_prefixlength 0")
+        );
+        assert!(
+            b.teardown_rules
+                .contains("-6 rule del priority 32765 table 51821")
+        );
+        // No blanket v6 override halves in the batch.
+        assert!(!b.install.contains("::/1"));
+        assert!(!b.install.contains("8000::/1"));
+    }
+
+    #[test]
+    fn include_mode_installs_no_policy_routing() {
+        // Include mode has no default override → no private table, no rules, and it never had the
+        // docker collision (the main table's default is untouched).
+        let plan = RoutePlan::with_split(
+            SplitMode::Include,
+            &[Cidr {
+                addr: "10.0.0.0".parse().unwrap(),
+                prefix: 8,
+            }],
+            "203.0.113.7".parse().unwrap(),
+            "192.168.1.1".parse().unwrap(),
+            "10.71.0.2".parse().unwrap(),
+            None,
+        )
+        .unwrap();
+        let b = build_route_batch(&plan, "leshiy0", false);
+        assert!(b.install.contains("route add 10.0.0.0/8 dev leshiy0"));
+        assert!(!b.install.contains("table 51821"));
+        assert!(!b.install.contains("rule add"));
+        assert!(b.teardown_rules.is_empty());
+    }
+
+    #[test]
+    fn exclude_bypass_is_tracked_for_teardown() {
+        let plan = RoutePlan::with_split(
+            SplitMode::Exclude,
+            &[Cidr {
+                addr: "198.51.100.0".parse().unwrap(),
+                prefix: 24,
+            }],
+            "203.0.113.7".parse().unwrap(),
+            "192.168.1.1".parse().unwrap(),
+            "10.71.0.2".parse().unwrap(),
+            None,
+        )
+        .unwrap();
+        let b = build_route_batch(&plan, "leshiy0", false);
+        // The excluded net bypasses via the original gateway (main table) and is tracked so the
+        // teardown guard removes it (it doesn't auto-clear with the device).
+        assert!(
+            b.install
+                .contains("route add 198.51.100.0/24 via 192.168.1.1")
+        );
+        assert_eq!(b.bypass.len(), 1);
+        assert_eq!(b.bypass[0].to_string(), "198.51.100.0/24");
+        // The default override still applies under an Exclude base.
+        assert!(
+            b.install
+                .contains("route add default dev leshiy0 table 51821")
+        );
+    }
 
     // Needs root + CAP_NET_ADMIN to create a real TUN and install routes, so it can't run on
     // a sandboxed host. `#[ignore]`d; an operator opts in explicitly. The non-ignored value is
