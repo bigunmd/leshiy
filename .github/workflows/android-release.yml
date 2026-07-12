@@ -6,7 +6,8 @@ permissions:
   contents: write
 jobs:
   apk:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
     # Release signing is opt-in: set ANDROID_KEYSTORE_B64 (base64 of the .jks) + the password/alias
     # secrets to produce a signed APK. Absent (e.g. forks) → an unsigned APK (still installable for
     # testing, but not updatable). Secrets are read via env (never interpolated into run scripts).
@@ -16,46 +17,57 @@ jobs:
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
-      - uses: pnpm/action-setup@v4
-        with: { version: 9 }
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: apps/gui/pnpm-lock.yaml
-      - name: Install JS deps
-        working-directory: apps/gui
-        run: pnpm install --frozen-lockfile
+
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+
       - name: Decode release keystore
         env:
           KS: ${{ secrets.ANDROID_KEYSTORE_B64 }}
         run: |
           if [ -n "$KS" ]; then
             echo "$KS" | base64 -d > "$RUNNER_TEMP/release.jks"
-            # build.gradle.kts reads this to enable the release signingConfig.
+            # app/build.gradle.kts reads this to enable the release signingConfig.
             echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
           else
             echo "No ANDROID_KEYSTORE_B64 secret — building an UNSIGNED release APK."
           fi
-      - name: Build APK(s)
-        working-directory: apps/gui
+
+      # Cross-compile the leshiy-mobile bridge for all 3 ABIs + generate the Kotlin bindings,
+      # staged into apps/android/app/src/main/jniLibs (same as android-ci.yml).
+      - name: Build native bridge (.so + Kotlin bindings)
         run: |
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
-          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
-          pnpm tauri android build --apk --target aarch64 --target armv7 --target x86_64
-      - name: Collect APKs + checksums
+          ./scripts/build-android-jni.sh
+
+      # Assemble the release APK. versionName/versionCode derive from the workspace Cargo.toml.
+      - name: Assemble release APK
+        working-directory: apps/android
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: Collect APK(s) + checksums
         run: |
           mkdir -p dist
-          find apps/gui/src-tauri/gen/android/app/build/outputs/apk -name "*.apk" -exec cp {} dist/ \;
+          # Signed → app-release.apk; unsigned (no keystore) → app-release-unsigned.apk.
+          find apps/android/app/build/outputs/apk/release -name "*.apk" -exec cp {} dist/ \;
           ( cd dist && sha256sum *.apk > SHA256SUMS )
           ls -la dist
+
       - name: Publish draft release
         uses: softprops/action-gh-release@v2
         with:
@@ -65,7 +77,7 @@ jobs:
           # releases/latest install URLs 404 once an Android release is published.
           make_latest: false
           name: Leshiy Android ${{ github.ref_name }}
-          body: "Android APKs for ${{ github.ref_name }}. arm64-v8a / armeabi-v7a / x86_64."
+          body: "Native Android APK for ${{ github.ref_name }} (universal). Kotlin/Compose app."
           files: |
             dist/*.apk
             dist/SHA256SUMS
