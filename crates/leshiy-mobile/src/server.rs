@@ -19,6 +19,9 @@ pub struct ServerInfo {
     pub label: String,
     pub host: String,
     pub port: u16,
+    /// True when this server runs privileged commands via `sudo` (non-root SSH
+    /// user). Day-2 ops must supply the sudo password; it's never persisted.
+    pub sudo: bool,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -119,6 +122,7 @@ impl ServerManager {
                 label: r.label.clone(),
                 host: r.host.clone(),
                 port: r.port,
+                sudo: r.sudo,
             })
             .collect()
     }
@@ -295,6 +299,26 @@ mod tests {
         let servers = sm.servers();
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].id, "berlin");
+    }
+
+    #[test]
+    fn servers_expose_sudo_flag() {
+        let path = tmp();
+        let mut v = Vault::new();
+        let mut r = rec("berlin");
+        r.sudo = true;
+        v.upsert(r);
+        v.upsert(rec("oslo")); // sudo: false
+        v.save(std::path::Path::new(&path), "pass").unwrap();
+
+        let sm = ServerManager::open(path, "pass".into()).unwrap();
+        let by_id: std::collections::HashMap<_, _> = sm
+            .servers()
+            .into_iter()
+            .map(|s| (s.id.clone(), s))
+            .collect();
+        assert!(by_id["berlin"].sudo, "sudo server must report sudo=true");
+        assert!(!by_id["oslo"].sudo, "root server must report sudo=false");
     }
 
     #[test]
