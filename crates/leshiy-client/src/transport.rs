@@ -21,6 +21,12 @@ pub trait Tunnel: Send + Sync {
     /// `select!`s on this to trigger reconnect. Implementations without a usable
     /// close signal may never resolve.
     async fn closed(&self);
+
+    /// Last measured round-trip latency to the peer in microseconds, if known. Transports
+    /// with a keepalive (REALITY) report it; others inherit `None`.
+    fn rtt_micros(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Dials a `leshiy://` URI and returns a live tunnel, or `ClientError::ConnectFailed`.

@@ -188,6 +188,11 @@ impl Tunnel for ReconnectingTunnel {
         // The wrapper self-heals, so from the engine's perspective it never closes.
         std::future::pending::<()>().await;
     }
+
+    fn rtt_micros(&self) -> Option<u64> {
+        // Report the live generation's latency.
+        self.current.borrow().as_ref().and_then(|t| t.rtt_micros())
+    }
 }
 
 #[cfg(test)]
