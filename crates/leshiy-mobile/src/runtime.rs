@@ -8,6 +8,7 @@ use leshiy_client::{
 use leshiy_reality::config::RealityUri;
 use leshiy_tun::{TunConfig, TunEngine};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Notify;
 use tokio::sync::watch;
 
@@ -27,6 +28,7 @@ pub async fn run_engine(
     counters: Arc<ByteCounters>,
     cancel: Arc<Notify>,
     state_tx: watch::Sender<ConnState>,
+    rtt_ms: Arc<AtomicU64>,
 ) -> std::io::Result<()> {
     let _ = state_tx.send(ConnState::Connecting);
     let parsed = validate_uri(&uri).map_err(|e| {
@@ -51,6 +53,29 @@ pub async fn run_engine(
         Arc::from(dial.map_err(|e| std::io::Error::other(format!("dial: {e}")))?);
     let tunnel =
         ReconnectingTunnel::spawn(RealTransport, &uri, pref, seed, ReconnectParams::default());
+
+    // Sample the tunnel's keepalive RTT (~1 Hz) into the shared cell the status poller reads.
+    // Runs until the engine is cancelled; `tunnel` is an `Arc`, so this clone is cheap.
+    {
+        let rtt_tunnel = tunnel.clone();
+        let rtt_cancel = cancel.clone();
+        let rtt_cell = rtt_ms.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                tokio::select! {
+                    _ = rtt_cancel.notified() => break,
+                    _ = tick.tick() => {
+                        let ms = rtt_tunnel
+                            .rtt_micros()
+                            .map(|us| ((us + 500) / 1000).max(1))
+                            .unwrap_or(0);
+                        rtt_cell.store(ms, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+    }
     // On Android the VpnService owns routing/DNS; `server_ip` is still excepted from the
     // tunnel to avoid a routing loop. `orig_gateway` is unused by the android backend.
     let cfg = TunConfig {
