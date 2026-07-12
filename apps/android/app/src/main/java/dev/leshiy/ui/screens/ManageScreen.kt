@@ -48,6 +48,12 @@ fun ManageScreen(
     val s = LocalStrings.current
     var unlocked by remember { mutableStateOf(VaultHolder.unlocked) }
 
+    // Refresh whenever the screen is shown with an unlocked vault — e.g. after deploying a
+    // server, where the vault was already unlocked so the unlock branch below never runs.
+    androidx.compose.runtime.LaunchedEffect(unlocked) {
+        if (unlocked) vm.refreshServers()
+    }
+
     ScreenFrame(s.manage, onBack = onBack) {
         if (!unlocked) {
             var pass by remember { mutableStateOf("") }
@@ -62,7 +68,7 @@ fun ManageScreen(
                 PrimaryButton(
                     s.unlock,
                     onClick = {
-                        if (VaultHolder.unlock(context, pass)) { unlocked = true; vm.refreshServers() } else failed = true
+                        if (VaultHolder.unlock(context, pass)) unlocked = true else failed = true
                     },
                     enabled = pass.isNotBlank(),
                     modifier = Modifier.fillMaxWidth(),
@@ -77,6 +83,7 @@ fun ManageScreen(
         val selected by vm.selected.collectAsStateWithLifecycle()
         val busy by vm.busy.collectAsStateWithLifecycle()
         val message by vm.message.collectAsStateWithLifecycle()
+        val sudoPw by vm.sudo.collectAsStateWithLifecycle()
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             message?.let { m -> item { Text(m, color = Moss, style = MaterialTheme.typography.labelSmall) } }
@@ -102,7 +109,26 @@ fun ManageScreen(
                         Icon(if (open) LeshiyIcons.ChevronDown else LeshiyIcons.ChevronRight, null, tint = Moss, modifier = Modifier.size(18.dp))
                     }
 
-                    if (open) {
+                    // A sudo-user server needs its sudo password before any day-2 op works.
+                    val sudoGate = open && server.sudo && sudoPw[server.id].isNullOrBlank()
+
+                    if (sudoGate) {
+                        Spacer(Modifier.size(12.dp))
+                        SectionLabel(s.sudoPasswordManage)
+                        Text(s.sudoRequiredNote, style = MaterialTheme.typography.labelSmall, color = Dim)
+                        Spacer(Modifier.size(8.dp))
+                        var pw by remember(server.id) { mutableStateOf("") }
+                        Field(pw, { pw = it }, s.sudoPasswordManage)
+                        Spacer(Modifier.size(10.dp))
+                        PrimaryButton(
+                            s.sudoApply,
+                            onClick = { vm.submitSudo(server.id, pw) },
+                            enabled = pw.isNotBlank() && !busy,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+
+                    if (open && !sudoGate) {
                         Spacer(Modifier.size(12.dp))
                         SectionLabel(s.users)
                         users.forEach { u ->
