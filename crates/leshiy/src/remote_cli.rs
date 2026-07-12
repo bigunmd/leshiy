@@ -168,6 +168,7 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
             host,
             key,
             password_stdin,
+            key_passphrase_stdin,
             sudo,
             sudo_password_stdin,
             dest,
@@ -182,12 +183,24 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
         } => {
             let (user, h, port) = parse_ssh_host(&host)?;
             let secret = if let Some(keypath) = key {
-                let pem = std::fs::read_to_string(&keypath)
-                    .with_context(|| format!("read key {keypath}"))?;
-                SshSecret::PrivateKey {
-                    pem: Zeroizing::new(pem),
-                    passphrase: None,
-                }
+                let pem = Zeroizing::new(
+                    std::fs::read_to_string(&keypath)
+                        .with_context(|| format!("read key {keypath}"))?,
+                );
+                // Encrypted keys can't be decoded without their passphrase; prompt
+                // (or read stdin) only when the key actually needs one.
+                let passphrase = if leshiy_provision::ssh::key_needs_passphrase(&pem) {
+                    Some(if key_passphrase_stdin {
+                        let mut line = String::new();
+                        std::io::Read::read_to_string(&mut std::io::stdin(), &mut line)?;
+                        Zeroizing::new(line.trim_end_matches(['\n', '\r']).to_string())
+                    } else {
+                        Zeroizing::new(rpassword::prompt_password("SSH key passphrase: ")?)
+                    })
+                } else {
+                    None
+                };
+                SshSecret::PrivateKey { pem, passphrase }
             } else if password_stdin {
                 let mut line = String::new();
                 std::io::Read::read_to_string(&mut std::io::stdin(), &mut line)?;

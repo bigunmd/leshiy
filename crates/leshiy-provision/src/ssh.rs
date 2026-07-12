@@ -7,6 +7,15 @@ use crate::error::{Error, Result};
 use crate::vault::SshSecret;
 use async_trait::async_trait;
 
+/// True when the private key in `pem` cannot be decoded without a passphrase —
+/// i.e. it is encrypted (or otherwise unreadable as-is). Callers use this to
+/// decide whether to prompt for a key passphrase. It runs the same decoder as
+/// the connect path, so detection and use stay consistent across key formats
+/// (OpenSSH, PKCS#5, PuTTY).
+pub fn key_needs_passphrase(pem: &str) -> bool {
+    russh::keys::decode_secret_key(pem, None).is_err()
+}
+
 /// Format a raw SHA-256 digest as an OpenSSH-style `SHA256:<base64-nopad>` string.
 pub fn format_fp_sha256(digest: &[u8; 32]) -> String {
     use base64::Engine;
@@ -133,6 +142,46 @@ impl Transport for FakeTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Throwaway ed25519 keys generated with ssh-keygen (test-only; not used anywhere).
+    // ENC is protected by the passphrase "testpass"; UNENC has none.
+    const UNENC: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\n\
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n\
+QyNTUxOQAAACCHfQtthGgl0YI5RpdlF6WedpxTRszeHbx+zKRrlyxDDQAAAIix6z3Cses9\n\
+wgAAAAtzc2gtZWQyNTUxOQAAACCHfQtthGgl0YI5RpdlF6WedpxTRszeHbx+zKRrlyxDDQ\n\
+AAAEBcxI43IsG4/ySrTIUnXxBTx30NQJfsRqPEq3dyTImQMId9C22EaCXRgjlGl2UXpZ52\n\
+nFNGzN4dvH7MpGuXLEMNAAAABHRlc3QB\n\
+-----END OPENSSH PRIVATE KEY-----\n";
+
+    const ENC: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\n\
+b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABBPJME7Ni\n\
+VI98JGK/2Jrqw+AAAAGAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIJzox0Yy523PWLsa\n\
+CB8kyN3R0GIrjEhcAiFevSmoTbplAAAAkBN4QKpoYEXnkocY9X1Yx3N8NOmglOSgQgiNiI\n\
+NleEAFznDtKLf+gdceGjzxkUbcWTZmL6o1/xhq/a2aGdx6v179U6u9Af4kRYbuxYabvDNF\n\
+sr91fZSqBMVzKYgwF8/R+z7gi4hnqNneeL8xXlc3ss8ZYipZXaceE9E8rHp6E5tEjHqGGX\n\
+DVDe8dQbh7Yei35g==\n\
+-----END OPENSSH PRIVATE KEY-----\n";
+
+    #[test]
+    fn unencrypted_key_needs_no_passphrase() {
+        assert!(!key_needs_passphrase(UNENC));
+    }
+
+    #[test]
+    fn encrypted_key_needs_passphrase() {
+        assert!(key_needs_passphrase(ENC));
+    }
+
+    #[test]
+    fn garbage_reports_needs_passphrase() {
+        assert!(key_needs_passphrase("not a key at all"));
+    }
+
+    #[test]
+    fn encrypted_key_decodes_with_correct_passphrase() {
+        assert!(russh::keys::decode_secret_key(ENC, Some("testpass")).is_ok());
+        assert!(russh::keys::decode_secret_key(ENC, Some("wrong")).is_err());
+    }
 
     #[test]
     fn fingerprint_has_sha256_prefix() {
