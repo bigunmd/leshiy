@@ -69,4 +69,7 @@ impl Tunnel for RealityTunnel {
     async fn closed(&self) {
         self.conn.closed().await;
     }
+    fn rtt_micros(&self) -> Option<u64> {
+        self.conn.rtt_micros()
+    }
 }

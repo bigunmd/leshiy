@@ -186,9 +186,16 @@ async fn read_socks_addr<S: AsyncRead + Unpin>(io: &mut S, atyp: u8) -> crate::R
 /// An established REALITY tunnel, ready for SOCKS5 serving.
 pub struct RealityConn {
     pub(crate) mux: Arc<Mutex<Mux>>,
+    /// Lock-free view of the mux's last keepalive round-trip latency.
+    rtt: leshiy_core::mux::RttHandle,
 }
 
 impl RealityConn {
+    /// Last keepalive round-trip latency to the server in microseconds, if measured.
+    pub fn rtt_micros(&self) -> Option<u64> {
+        self.rtt.micros()
+    }
+
     /// Open a tunneled stream to `target` ("host:port") over the mux.
     pub async fn open(&self, target: &str) -> crate::Result<leshiy_core::mux::Stream> {
         self.mux
@@ -303,13 +310,14 @@ pub async fn connect_reality(
 
     let (session, r, w) = establish_client(cr, cw, &ch, &ephem, &auth_key, &mlkem_dk).await?;
     let (tr, tw) = into_transport(&session, Role::Client, r, w);
-    let mux = Arc::new(Mutex::new(
-        Mux::start(tr, tw, client_hello_version(), Role::Client)
-            .await
-            .map_err(|e| crate::RealityError::Malformed(e.to_string()))?,
-    ));
+    let started = Mux::start(tr, tw, client_hello_version(), Role::Client)
+        .await
+        .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
+    // Grab the lock-free RTT handle before the mux moves behind the async mutex.
+    let rtt = started.rtt_handle();
+    let mux = Arc::new(Mutex::new(started));
 
-    Ok(RealityConn { mux })
+    Ok(RealityConn { mux, rtt })
 }
 
 /// Bind a SOCKS5 listener on `socks_addr` and serve tunneled connections over `conn`.
