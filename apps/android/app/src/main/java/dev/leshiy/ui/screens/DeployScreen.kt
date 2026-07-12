@@ -52,11 +52,21 @@ import dev.leshiy.ui.theme.Wisp
 import uniffi.leshiy_mobile.ProvisionConfig
 import uniffi.leshiy_mobile.keyNeedsPassphrase
 
+/** Preset injected by the Cascade Builder: fixes this deploy's role + downstream wiring. */
+data class ProvisionPreset(
+    val role: String,          // "entry" | "middle" | "exit"
+    val connector: String?,    // downstream connector uri (entry/middle)
+    val downstreamId: String?, // downstream server id (local ref)
+    val labelHint: String,     // default label, e.g. "riga-entry"
+    val nextHopName: String?,  // for the banner, e.g. "Oslo"
+)
+
 @Composable
 fun DeployScreen(
     vm: ProvisionViewModel,
     onStarted: () -> Unit,
     onBack: () -> Unit,
+    preset: ProvisionPreset? = null,
 ) {
     val s = LocalStrings.current
     val state by vm.state.collectAsStateWithLifecycle()
@@ -98,7 +108,17 @@ fun DeployScreen(
             modifier = Modifier.verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text(s.deployIntro, style = MaterialTheme.typography.labelSmall, color = Dim)
+            if (preset != null) {
+                PanelCard {
+                    Text(
+                        s.cascadeDeployBanner.format(s.roleName(preset.role), preset.nextHopName ?: s.internet),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Wisp,
+                    )
+                }
+            } else {
+                Text(s.deployIntro, style = MaterialTheme.typography.labelSmall, color = Dim)
+            }
 
             SectionLabel(s.target)
             HelpField(host, { host = it }, s.vpsHost, s.helpHost)
@@ -158,12 +178,15 @@ fun DeployScreen(
                 HelpField(dns, { dns = it }, s.dnsOverrideOpt, s.helpDns)
             }
 
-            // Save-for-management (vault) setup.
-            SectionLabel(s.saveForManagement)
-            if (dev.leshiy.data.VaultHolder.unlocked) {
-                Text(s.vaultUnlockedNote, style = MaterialTheme.typography.labelSmall, color = Dim)
-            } else {
-                HelpField(vaultPass, { vaultPass = it }, s.vaultPassphraseOptDeploy, s.helpVaultDeploy)
+            // Save-for-management (vault) setup. The Cascade Builder owns the vault, so hide
+            // this when arriving with a preset (the vault is already unlocked there).
+            if (preset == null) {
+                SectionLabel(s.saveForManagement)
+                if (dev.leshiy.data.VaultHolder.unlocked) {
+                    Text(s.vaultUnlockedNote, style = MaterialTheme.typography.labelSmall, color = Dim)
+                } else {
+                    HelpField(vaultPass, { vaultPass = it }, s.vaultPassphraseOptDeploy, s.helpVaultDeploy)
+                }
             }
 
             Spacer(Modifier.size(2.dp))
@@ -189,6 +212,9 @@ fun DeployScreen(
                         imageRef = image.trim().ifBlank { null },
                         userLabel = userLabel.trim().ifBlank { null },
                         dnsOverride = dns.trim().ifBlank { null },
+                        role = preset?.role ?: "single",
+                        downstream = preset?.downstreamId,
+                        connector = preset?.connector,
                     )
                     val serverName = label.trim().ifBlank { host.trim() }
                     vm.provision(cfg, serverName)
