@@ -29,6 +29,10 @@ pub struct RemoteUserInfo {
     pub short_id: String,
     pub label: Option<String>,
     pub enabled: bool,
+    /// The client's `leshiy://` URI from the vault, if we issued it (empty for an
+    /// orphan credential seen on the server but not in our records). Lets the UI
+    /// show a QR / copyable link for re-provisioning a device.
+    pub uri: String,
 }
 
 /// Vault-backed manager for provisioned servers (one unlocked instance per session).
@@ -177,15 +181,12 @@ impl ServerManager {
         Ok(users
             .into_iter()
             .map(|u| {
-                let label = rec
-                    .clients
-                    .iter()
-                    .find(|c| c.short_id == u.short_id)
-                    .map(|c| c.label.clone());
+                let client = rec.clients.iter().find(|c| c.short_id == u.short_id);
                 RemoteUserInfo {
                     short_id: u.short_id,
-                    label,
+                    label: client.map(|c| c.label.clone()),
                     enabled: u.enabled,
+                    uri: client.map(|c| c.uri.clone()).unwrap_or_default(),
                 }
             })
             .collect())
