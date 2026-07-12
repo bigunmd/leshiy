@@ -14,6 +14,8 @@ pub struct Status {
     pub state: ConnState,
     pub up_bytes: u64,
     pub down_bytes: u64,
+    /// Last keepalive round-trip latency to the server in milliseconds; 0 = unknown.
+    pub rtt_ms: u32,
 }
 
 /// The state to publish once the initial dial resolves. The mobile path runs `TunEngine`

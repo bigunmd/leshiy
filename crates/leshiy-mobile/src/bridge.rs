@@ -63,16 +63,24 @@ impl LeshiyBridge {
             })?;
         let counters = Arc::new(ByteCounters::new());
         let cancel = Arc::new(Notify::new());
+        // Shared cell holding the latest keepalive RTT (ms); the engine updates it, poller reads it.
+        let rtt_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (state_tx, state_rx) = tokio::sync::watch::channel(ConnState::Disconnected);
 
         // Engine driver task.
         let engine_uri = uri.clone();
         let engine_counters = counters.clone();
         let engine_cancel = cancel.clone();
+        let engine_rtt = rtt_ms.clone();
         rt.spawn(async move {
-            if let Err(e) =
-                crate::runtime::run_engine(engine_uri, engine_counters, engine_cancel, state_tx)
-                    .await
+            if let Err(e) = crate::runtime::run_engine(
+                engine_uri,
+                engine_counters,
+                engine_cancel,
+                state_tx,
+                engine_rtt,
+            )
+            .await
             {
                 tracing::warn!("engine stopped: {e}");
             }
@@ -82,6 +90,7 @@ impl LeshiyBridge {
         let poll_counters = counters.clone();
         let poll_cancel = cancel.clone();
         let poll_state_rx = state_rx.clone();
+        let poll_rtt = rtt_ms.clone();
         rt.spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
@@ -93,6 +102,7 @@ impl LeshiyBridge {
                             state: *poll_state_rx.borrow(),
                             up_bytes: up,
                             down_bytes: down,
+                            rtt_ms: poll_rtt.load(std::sync::atomic::Ordering::Relaxed) as u32,
                         });
                     }
                 }
