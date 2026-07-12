@@ -29,6 +29,13 @@ ignore = [
     # a one-shot client auth does not expose. Password / Ed25519 auth never
     # touches `rsa`. Revisit when RustCrypto/RSA ships a constant-time release.
     "RUSTSEC-2023-0071",
+    # bincode 1.3.3 (unmaintained) — RUSTSEC-2025-0141. Deep transitive via
+    # uniffi_macros -> uniffi 0.28 (the Android UniFFI bridge in leshiy-mobile).
+    # This is an `unmaintained` notice, NOT a vulnerability: the bincode team
+    # declared 1.3.3 a complete, final version needing no further updates. No safe
+    # upgrade is available (uniffi 0.28.x pins bincode 1.x), and it runs only in
+    # uniffi's build-time codegen. Revisit when uniffi moves off bincode.
+    "RUSTSEC-2025-0141",
 ]
 
 [bans]
