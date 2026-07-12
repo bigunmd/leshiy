@@ -57,6 +57,21 @@ object LeshiyIcons {
 
     val Wisp = filled("M12 2.5c4.2 4.8 3.4 9.2 0 12.2C8.6 11.7 7.8 7.3 12 2.5Z")
 
+    // Two people — the users/credentials collection.
+    val Users = stroked(
+        "M9 11 a3 3 0 1 0 0.001 0 z M3.5 20 c0 -3.2 2.5 -5.5 5.5 -5.5 s5.5 2.3 5.5 5.5 " +
+            "M16 5.2 a2.7 2.7 0 0 1 0 5.3 M17 14.7 c2.2 0.3 4 2.3 4 5.3",
+        sw = 1.7f,
+    )
+
+    // Upload/share: an arrow rising out of a tray.
+    val Share = stroked(
+        "M12 3 v11 M8.5 6.5 L12 3 l3.5 3.5 " +
+            "M7 10 H5.5 a1.5 1.5 0 0 0 -1.5 1.5 v7 a1.5 1.5 0 0 0 1.5 1.5 h13 " +
+            "a1.5 1.5 0 0 0 1.5 -1.5 v-7 a1.5 1.5 0 0 0 -1.5 -1.5 H17",
+        sw = 1.7f,
+    )
+
     val ChevronDown = stroked("m6 9 6 6 6-6", sw = 2.2f)
     val ChevronRight = stroked("m9 6 6 6 -6 6", sw = 2.2f)
     val Back = stroked("M19 12 H5 M11 6 l-6 6 6 6", sw = 2f)
