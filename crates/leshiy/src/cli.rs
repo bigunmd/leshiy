@@ -372,6 +372,10 @@ pub enum RemoteCmd {
         /// Read the SSH password from stdin (first line).
         #[arg(long)]
         password_stdin: bool,
+        /// Read the private key's passphrase from stdin instead of prompting. Only
+        /// meaningful with --key; ignored for an unencrypted key.
+        #[arg(long, conflicts_with_all = ["password_stdin", "sudo_password_stdin"])]
+        key_passphrase_stdin: bool,
         /// Connect as a non-root user and run privileged commands via sudo.
         /// Prompts for the sudo password unless --sudo-password-stdin is set.
         #[arg(long)]
