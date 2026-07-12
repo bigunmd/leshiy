@@ -3,6 +3,8 @@ package dev.leshiy.ui.screens
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
@@ -53,7 +55,10 @@ fun SettingsScreen(
     val lang by LangState.lang.collectAsStateWithLifecycle()
 
     ScreenFrame(s.settings, onBack = onBack) {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(
+            modifier = Modifier.verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
             SectionLabel(s.secConnection)
             NavRow(LeshiyIcons.Server, s.servers, s.serversSub, tint = Wisp, onClick = onServers)
             NavRow(LeshiyIcons.Shield, s.splitTunnel, s.splitSub, tint = Wisp, onClick = onSplit)
