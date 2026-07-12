@@ -78,6 +78,10 @@ pub struct Settings {
     pub vpn_mtu: u16,
     #[serde(default = "default_vpn_dns")]
     pub vpn_dns: String,
+    /// Carry IPv6 through the tunnel (dual-stack). Off by default: only safe when the server has
+    /// working outbound IPv6, else v6-preferred traffic blackholes and the VPN appears dead.
+    #[serde(default)]
+    pub vpn_ipv6: bool,
     #[serde(default = "default_socks_port")]
     pub socks_port: u16,
     #[serde(default)]
@@ -121,6 +125,7 @@ impl Default for Settings {
             mode: Mode::Proxy,
             vpn_mtu: default_vpn_mtu(),
             vpn_dns: default_vpn_dns(),
+            vpn_ipv6: false,
             socks_port: default_socks_port(),
             start_minimized: false,
             close_behavior: CloseBehavior::Ask,

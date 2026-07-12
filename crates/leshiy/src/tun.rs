@@ -14,6 +14,7 @@ pub async fn run(
     mtu: u16,
     tun_name: &str,
     dns: &str,
+    ipv6: bool,
 ) -> Result<()> {
     let parsed = RealityUri::parse(uri).map_err(|e| anyhow!("bad uri: {e}"))?;
     // Resolve the server's IP for the /32 route exception (avoids the routing loop).
@@ -62,6 +63,8 @@ pub async fn run(
         server_ip,
         orig_gateway,
         orig_gateway6,
+        // Dual-stack is opt-in (`--ipv6`): only carry v6 when asked, else fail-closed (kill-switch).
+        tun_addr6: ipv6.then(TunConfig::default_tun_addr6),
         dns: vec![dns.parse().context("parse --dns")?],
         ..TunConfig::default()
     };

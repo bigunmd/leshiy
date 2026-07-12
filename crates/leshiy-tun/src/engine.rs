@@ -46,10 +46,12 @@ impl Default for TunConfig {
             tun_name: "leshiy0".into(),
             mtu: 1400,
             tun_addr: "10.71.0.2".parse().unwrap(),
-            // Dual-stack by default: a ULA on the TUN so IPv6 rides the tunnel. Backends that
-            // don't carry v6 (Android/stub) zero this in the engine via CARRIES_V6 and fail
-            // closed to the kill-switch, so this default is safe on every platform.
-            tun_addr6: Some("fd00:71::2".parse().unwrap()),
+            // IPv4-only by default; dual-stack is opt-in via `with_ipv6()`. Carrying IPv6 through
+            // the tunnel requires the *server* to have working outbound v6 — otherwise the client
+            // OS (which prefers IPv6) blackholes every v6-preferred flow and the VPN appears dead.
+            // The default therefore fail-closes v6 with the kill-switch; callers that know their
+            // server carries v6 opt in explicitly.
+            tun_addr6: None,
             server_ip: "0.0.0.0".parse().unwrap(),
             orig_gateway: "0.0.0.0".parse().unwrap(),
             orig_gateway6: None,
@@ -60,6 +62,23 @@ impl Default for TunConfig {
 }
 
 impl TunConfig {
+    /// The IPv6 ULA assigned to the TUN interface when dual-stack is opted into. A ULA
+    /// (`fd00::/8`) so it never collides with a real prefix; the `::/1`+`8000::/1` override
+    /// carries all v6 through the tunnel.
+    pub fn default_tun_addr6() -> IpAddr {
+        "fd00:71::2".parse().unwrap()
+    }
+
+    /// Opt into carrying IPv6 *through* the tunnel (dual-stack), assigning the TUN's v6 ULA.
+    /// Only meaningful when the server has working outbound IPv6; otherwise leave it off so v6
+    /// is fail-closed by the kill-switch. Backends that can't carry v6 (Android/stub) still zero
+    /// this via the [`PrivilegedOps::CARRIES_V6`](crate::sys::PrivilegedOps::CARRIES_V6) gate.
+    #[must_use]
+    pub fn with_ipv6(mut self) -> Self {
+        self.tun_addr6 = Some(Self::default_tun_addr6());
+        self
+    }
+
     /// Force the system DNS through the tunnel? Only when the base policy is Exclude
     /// (full-tunnel-ish); under an Include base most traffic is direct, so the resolver is left
     /// untouched.
@@ -369,9 +388,21 @@ mod tests {
     }
 
     #[test]
-    fn dual_stack_default_forces_dns_but_not_killswitch() {
-        // Default is Exclude + dual-stack (tun_addr6 Some): DNS forced, IPv6 carried (not killed).
+    fn default_is_ipv4_only_with_killswitch() {
+        // Dual-stack is opt-in: the default session is IPv4-only (Exclude base), so DNS is forced
+        // and IPv6 is fail-closed by the kill-switch rather than carried through the tunnel.
         let c = TunConfig::default();
+        assert_eq!(c.tun_addr6, None);
+        assert!(c.force_dns());
+        assert!(c.ipv6_killswitch());
+    }
+
+    #[test]
+    fn opt_in_ipv6_carries_v6_and_drops_killswitch() {
+        // Explicitly opting into dual-stack assigns the TUN's v6 ULA and, under the Exclude base,
+        // carries IPv6 through the tunnel (no kill-switch).
+        let c = TunConfig::default().with_ipv6();
+        assert_eq!(c.tun_addr6, Some(TunConfig::default_tun_addr6()));
         assert!(c.force_dns());
         assert!(!c.ipv6_killswitch());
     }

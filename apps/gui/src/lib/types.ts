@@ -28,6 +28,7 @@ export interface Settings {
   mode: Mode;
   vpn_mtu: number;
   vpn_dns: string;
+  vpn_ipv6: boolean;
   socks_port: number;
   start_minimized: boolean;
   close_behavior: CloseBehavior;

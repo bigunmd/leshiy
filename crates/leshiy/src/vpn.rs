@@ -11,6 +11,7 @@ pub async fn run(
     tun_name: &str,
     dns: &str,
     socket: &str,
+    ipv6: bool,
 ) -> Result<()> {
     let pref = match transport {
         crate::cli::Transport::Auto => TransportPref::Auto,
@@ -28,6 +29,8 @@ pub async fn run(
             dns: dns.to_string(),
             // The CLI is full-tunnel for now; split-tunnel is configured via the desktop app.
             split_tunnel: Default::default(),
+            // Dual-stack is opt-in (`--ipv6`): only carry v6 when the server supports it.
+            ipv6,
         })
         .await
         .context("start VPN via helper")?;

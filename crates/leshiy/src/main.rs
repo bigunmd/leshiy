@@ -135,7 +135,8 @@ async fn run() -> anyhow::Result<()> {
             mtu,
             tun_name,
             dns,
-        } => tun::run(&uri, transport, mtu, &tun_name, &dns).await?,
+            ipv6,
+        } => tun::run(&uri, transport, mtu, &tun_name, &dns, ipv6).await?,
         cli::Cmd::Vpn {
             uri,
             transport,
@@ -143,7 +144,8 @@ async fn run() -> anyhow::Result<()> {
             tun_name,
             dns,
             socket,
-        } => vpn::run(&uri, transport, mtu, &tun_name, &dns, &socket).await?,
+            ipv6,
+        } => vpn::run(&uri, transport, mtu, &tun_name, &dns, &socket, ipv6).await?,
         cli::Cmd::User { cmd } => user_cli::run(cmd).await?,
         cli::Cmd::Status { config } => {
             lifecycle::status(&config, &host::RealHostOps)?;

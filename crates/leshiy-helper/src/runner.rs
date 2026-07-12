@@ -192,6 +192,9 @@ impl EngineRunner {
                     .map_err(|_| HelperError::Engine("invalid dns address".into()))?,
             ],
             split: params.split_tunnel.clone(),
+            // Dual-stack is opt-in: only carry v6 when the caller asked (and the server supports
+            // it), else stay IPv4-only with the v6 kill-switch.
+            tun_addr6: params.ipv6.then(TunConfig::default_tun_addr6),
             ..TunConfig::default()
         };
 
@@ -335,6 +338,7 @@ mod tests {
             tun_name: "leshiy0".into(),
             dns: "1.1.1.1".into(),
             split_tunnel: Default::default(),
+            ipv6: false,
         }
     }
 

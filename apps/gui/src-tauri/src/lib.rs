@@ -195,6 +195,7 @@ fn build_start_params(
         tun_name: "leshiy0".into(),
         dns: settings.vpn_dns.clone(),
         split_tunnel: build_split_plan(settings, cache),
+        ipv6: settings.vpn_ipv6,
     }
 }
 
