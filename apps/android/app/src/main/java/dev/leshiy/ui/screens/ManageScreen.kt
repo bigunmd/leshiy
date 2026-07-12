@@ -74,8 +74,14 @@ fun ManageScreen(
         }
 
         val servers by vm.servers.collectAsStateWithLifecycle()
+        val cascades = androidx.compose.runtime.remember(servers) { dev.leshiy.ui.buildCascades(servers) }
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (cascades.isNotEmpty()) {
+                item { SectionLabel(s.cascades) }
+                items(cascades) { c -> CascadeCard(c) }
+                item { Spacer(Modifier.size(6.dp)) }
+            }
             item { SectionLabel(s.savedServers) }
             if (servers.isEmpty()) {
                 item { Text(s.noSavedServers, style = MaterialTheme.typography.labelSmall, color = Dim) }
@@ -89,10 +95,43 @@ fun ManageScreen(
                             Text(server.label, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onBackground, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(server.host, style = MaterialTheme.typography.labelSmall, color = Dim)
                         }
+                        if (server.role != "single") {
+                            dev.leshiy.ui.components.RoleBadge(server.role)
+                            Spacer(Modifier.width(8.dp))
+                        }
                         Icon(LeshiyIcons.ChevronRight, null, tint = Moss, modifier = Modifier.size(18.dp))
                     }
                 }
             }
+        }
+    }
+}
+
+/** Compact one-line view of an assembled cascade: 📱 ▸ entry⭐ ▸ … ▸ exit ▸ 🌐. */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun CascadeCard(cascade: dev.leshiy.ui.Cascade) {
+    val s = LocalStrings.current
+    PanelCard {
+        androidx.compose.foundation.layout.FlowRow(
+            verticalArrangement = Arrangement.Center,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text("📱", style = MaterialTheme.typography.bodyMedium)
+            cascade.nodes.forEachIndexed { i, node ->
+                Text("▸", color = Moss)
+                if (node.server != null) {
+                    Text(
+                        node.server.label + if (i == 0) " ⭐" else "",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (i == 0) Wisp else MaterialTheme.colorScheme.onBackground,
+                    )
+                } else {
+                    Text("⚠ ${node.missingId} (${s.missingHop})", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+                }
+            }
+            Text("▸", color = Moss)
+            Text("🌐", style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
