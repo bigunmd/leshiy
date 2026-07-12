@@ -79,6 +79,10 @@ export function SettingsSheet(p: Props) {
                   onChange={(e) => p.onChange({ vpn_dns: e.target.value })} />
               </div>
               <div className={row}>
+                <Label className="text-[13px]">{t("settings.vpnIpv6")}</Label>
+                <Switch checked={p.settings.vpn_ipv6} onCheckedChange={(v) => p.onChange({ vpn_ipv6: v })} />
+              </div>
+              <div className={row}>
                 <Label className="text-[13px]">{t("settings.splitTunnel")}</Label>
                 <Button size="sm" variant="ghost" className="font-mono text-[10px] uppercase tracking-widest text-wisp" onClick={p.onOpenSplit}>
                   {p.settings.split_tunnel.cidrs.length + p.settings.split_tunnel.domains.length + p.settings.rule_subscriptions.filter((s) => s.enabled).length || t("splitTunnel.none")}

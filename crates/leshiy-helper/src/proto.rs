@@ -23,6 +23,11 @@ pub struct StartParams {
     /// Omitted by older callers → empty (plain full tunnel).
     #[serde(default)]
     pub split_tunnel: leshiy_client::SplitPlan,
+    /// Carry IPv6 *through* the tunnel (dual-stack). Omitted by older callers → `false`, i.e.
+    /// IPv4-only with the v6 kill-switch. Only enable when the server has working outbound v6;
+    /// otherwise the client (which prefers IPv6) blackholes every v6-preferred flow.
+    #[serde(default)]
+    pub ipv6: bool,
 }
 
 /// A request from the caller to the helper. One JSON object per line.
@@ -88,6 +93,7 @@ mod tests {
             tun_name: "leshiy0".into(),
             dns: "1.1.1.1".into(),
             split_tunnel: leshiy_client::SplitPlan::default(),
+            ipv6: false,
         }
     }
 

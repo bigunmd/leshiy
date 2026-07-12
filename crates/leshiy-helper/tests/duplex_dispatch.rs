@@ -16,6 +16,7 @@ fn params() -> StartParams {
         tun_name: "leshiy0".into(),
         dns: "1.1.1.1".into(),
         split_tunnel: Default::default(),
+        ipv6: false,
     }
 }
 

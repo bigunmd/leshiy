@@ -102,6 +102,10 @@ pub enum Cmd {
         /// DNS resolver forced through the tunnel.
         #[arg(long, default_value = "1.1.1.1")]
         dns: String,
+        /// Carry IPv6 through the tunnel (dual-stack). Off by default: only enable when the
+        /// server has working outbound IPv6, else v6-preferred traffic blackholes.
+        #[arg(long)]
+        ipv6: bool,
     },
     /// Run a full-tunnel VPN via the privileged `leshiy-helper` daemon (this process
     /// stays unprivileged). Requires `leshiy-helper` to be installed + running.
@@ -124,6 +128,10 @@ pub enum Cmd {
         /// Path to the helper's control socket.
         #[arg(long, default_value = "/run/leshiy/helper.sock")]
         socket: String,
+        /// Carry IPv6 through the tunnel (dual-stack). Off by default: only enable when the
+        /// server has working outbound IPv6, else v6-preferred traffic blackholes.
+        #[arg(long)]
+        ipv6: bool,
     },
     /// Interactive (or flag-driven) single-server setup: probe dest, init, print URI + QR.
     Quickstart {
@@ -476,13 +484,32 @@ mod tests {
                 transport,
                 mtu,
                 tun_name,
+                ipv6,
                 ..
             } => {
                 assert_eq!(uri, "leshiy://abc@1.2.3.4:443?sni=x&sid=0102030400000000");
                 assert!(matches!(transport, Transport::Tcp));
                 assert_eq!(mtu, 1400);
                 assert_eq!(tun_name, "leshiy0");
+                // Dual-stack is opt-in: absent `--ipv6` means IPv4-only.
+                assert!(!ipv6);
             }
+            _ => panic!("expected Tun"),
+        }
+    }
+
+    #[test]
+    fn tun_ipv6_flag_opts_into_dual_stack() {
+        let cli = Cli::try_parse_from([
+            "leshiy",
+            "tun",
+            "--uri",
+            "leshiy://abc@1.2.3.4:443?sni=x&sid=0102030400000000",
+            "--ipv6",
+        ])
+        .expect("tun --ipv6 should parse");
+        match cli.cmd {
+            Cmd::Tun { ipv6, .. } => assert!(ipv6),
             _ => panic!("expected Tun"),
         }
     }
