@@ -50,6 +50,7 @@ import dev.leshiy.ui.theme.PlexMono
 import dev.leshiy.ui.theme.Warn
 import dev.leshiy.ui.theme.Wisp
 import uniffi.leshiy_mobile.ProvisionConfig
+import uniffi.leshiy_mobile.keyNeedsPassphrase
 
 @Composable
 fun DeployScreen(
@@ -122,7 +123,14 @@ fun DeployScreen(
                     Spacer(Modifier.width(6.dp))
                     Text(s.loadKeyFile, color = Wisp, style = MaterialTheme.typography.labelLarge)
                 }
+                // Detect an encrypted key so we can point the user at the passphrase field.
+                val keyEncrypted = remember(pem) {
+                    pem.isNotBlank() && runCatching { keyNeedsPassphrase(pem) }.getOrDefault(false)
+                }
                 HelpField(keyPass, { keyPass = it }, s.keyPassphraseOpt, s.helpKeyPassphrase)
+                if (keyEncrypted && keyPass.isBlank()) {
+                    Text(s.keyEncryptedHint, style = MaterialTheme.typography.labelSmall, color = Warn, modifier = Modifier.padding(start = 4.dp))
+                }
             } else {
                 HelpField(password, { password = it }, s.sshPassword, s.helpSshPassword)
             }

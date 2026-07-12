@@ -148,6 +148,7 @@ data class Strings(
     val loadKeyFile: String,
     val helpKey: String,
     val helpKeyPassphrase: String,
+    val keyEncryptedHint: String,
     // Provisioning progress + vault setup
     val provisioningTitle: String,
     val stepOf: String,
@@ -293,6 +294,7 @@ val EnStrings = Strings(
     loadKeyFile = "Load key from file",
     helpKey = "Paste your OpenSSH/PEM private key, or load it from a file. It's used once to set up and stored only in the encrypted vault.",
     helpKeyPassphrase = "If your private key is encrypted, its passphrase. Leave empty otherwise.",
+    keyEncryptedHint = "This key is encrypted — enter its passphrase above.",
     provisioningTitle = "Provisioning",
     stepOf = "Step %1\$d of %2\$d",
     serverReady = "Server ready",
@@ -436,6 +438,7 @@ val RuStrings = Strings(
     loadKeyFile = "Загрузить ключ из файла",
     helpKey = "Вставьте приватный ключ OpenSSH/PEM или загрузите из файла. Используется один раз при настройке и хранится только в зашифрованном хранилище.",
     helpKeyPassphrase = "Если ключ зашифрован — его пароль. Иначе оставьте пустым.",
+    keyEncryptedHint = "Ключ зашифрован — введите пароль выше.",
     provisioningTitle = "Развёртывание",
     stepOf = "Шаг %1\$d из %2\$d",
     serverReady = "Сервер готов",

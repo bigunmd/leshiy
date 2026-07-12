@@ -55,6 +55,13 @@ fn status_str(s: Status) -> String {
     format!("{s:?}")
 }
 
+/// True when the private key in `pem` needs a passphrase to decode (it's encrypted, or
+/// unreadable as-is). Lets the Deploy UI prompt for the key passphrase only when required.
+#[uniffi::export]
+pub fn key_needs_passphrase(pem: String) -> bool {
+    leshiy_provision::ssh::key_needs_passphrase(&pem)
+}
+
 /// Pick SSH auth: a private key (with optional passphrase) if present, else a password.
 fn ssh_secret(cfg: &ProvisionConfig) -> SshSecret {
     match cfg
