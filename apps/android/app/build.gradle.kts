@@ -31,9 +31,27 @@ android {
         versionName = leshiyVersion
     }
 
+    // Release signing is driven by environment variables so CI can inject the keystore from
+    // secrets (see .github/workflows/android-release.yml). Absent (local/dev/forks) → unsigned.
+    signingConfigs {
+        create("release") {
+            System.getenv("ANDROID_KEYSTORE_PATH")?.let { path ->
+                storeFile = file(path)
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            // Sign only when a keystore is provided (CI release); otherwise leave it unsigned
+            // (still installable for testing, just not updatable).
+            if (System.getenv("ANDROID_KEYSTORE_PATH") != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
