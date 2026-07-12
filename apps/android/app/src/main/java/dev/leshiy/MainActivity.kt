@@ -31,6 +31,7 @@ import dev.leshiy.ui.components.Atmosphere
 import dev.leshiy.ui.i18n.LangState
 import dev.leshiy.ui.i18n.LocalStrings
 import dev.leshiy.ui.i18n.stringsFor
+import dev.leshiy.ui.screens.CascadeBuilderScreen
 import dev.leshiy.ui.screens.ConnectScreen
 import dev.leshiy.ui.screens.CredentialScreen
 import dev.leshiy.ui.screens.DeployScreen
@@ -100,6 +101,7 @@ private object Route {
     const val SERVER_DETAIL = "manage/server"
     const val SERVER_USERS = "manage/server/users"
     const val CREDENTIAL = "manage/credential"
+    const val CASCADE = "cascade"
 }
 
 @Composable
@@ -111,6 +113,9 @@ private fun AppNav(onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
     val splitVm: SplitViewModel = viewModel()
     val provisionVm: ProvisionViewModel = viewModel()
     val manageVm: ManageViewModel = viewModel()
+    val cascadeVm: dev.leshiy.ui.CascadeViewModel = viewModel()
+    // True while DeployScreen/ProvisioningScreen are serving a cascade hop (vs a standalone deploy).
+    var cascadeMode by remember { mutableStateOf(false) }
 
     // Holds a URI captured by the QR scanner until the Servers form consumes it.
     var scannedUri by remember { mutableStateOf("") }
@@ -141,6 +146,7 @@ private fun AppNav(onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
                 onSplit = { nav.navigate(Route.SPLIT) },
                 onDeploy = { nav.navigate(Route.DEPLOY) },
                 onManage = { nav.navigate(Route.MANAGE) },
+                onCascade = { cascadeVm.reset(); nav.navigate(Route.CASCADE) },
             )
         }
         composable(Route.SERVERS) {
@@ -159,18 +165,55 @@ private fun AppNav(onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
             DeployScreen(
                 vm = provisionVm,
                 onStarted = { nav.navigate(Route.PROVISIONING) },
-                onBack = { nav.popBackStack() },
+                onBack = {
+                    if (cascadeMode) { cascadeMode = false; cascadeVm.currentSlot.value = null }
+                    nav.popBackStack()
+                },
+                preset = if (cascadeMode) cascadeVm.presetForCurrent(manageVm.servers.value) else null,
             )
         }
         composable(Route.PROVISIONING) {
             ProvisioningScreen(
                 vm = provisionVm,
                 onDone = { uri, label ->
-                    profilesVm.add(uri, label)
-                    provisionVm.reset()
-                    nav.popBackStack(Route.CONNECT, inclusive = false)
+                    if (cascadeMode) {
+                        val slot = cascadeVm.currentSlot.value
+                        val id = provisionVm.state.value.serverId
+                        if (slot != null && id.isNotBlank()) cascadeVm.recordDeployed(slot, id)
+                        provisionVm.reset()
+                        manageVm.refreshServers()
+                        val next = cascadeVm.beginNext()
+                        if (next != null) {
+                            // Deploy the next hop toward the entry.
+                            nav.navigate(Route.DEPLOY) { popUpTo(Route.PROVISIONING) { inclusive = true } }
+                        } else {
+                            // Chain complete: the last deploy was the entry; its URI is the connect point.
+                            cascadeMode = false
+                            manageVm.presentCredential(label, uri)
+                            nav.navigate(Route.CREDENTIAL) { popUpTo(Route.CASCADE) { inclusive = true } }
+                        }
+                    } else {
+                        profilesVm.add(uri, label)
+                        provisionVm.reset()
+                        nav.popBackStack(Route.CONNECT, inclusive = false)
+                    }
                 },
-                onBack = { provisionVm.reset(); nav.popBackStack() },
+                onBack = {
+                    provisionVm.reset()
+                    if (cascadeMode) cascadeMode = false
+                    nav.popBackStack()
+                },
+            )
+        }
+        composable(Route.CASCADE) {
+            CascadeBuilderScreen(
+                vm = cascadeVm,
+                manageVm = manageVm,
+                onStartBuild = {
+                    val slot = cascadeVm.beginNext()
+                    if (slot != null) { cascadeMode = true; nav.navigate(Route.DEPLOY) }
+                },
+                onBack = { nav.popBackStack() },
             )
         }
         composable(Route.MANAGE) {

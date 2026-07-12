@@ -24,6 +24,8 @@ data class ProvisionState(
     val stepIndex: Int = -1,
     /** Server label for the resulting profile. */
     val label: String = "",
+    /** Vault id of the server being provisioned (`host-sshPort`), for cascade wiring. */
+    val serverId: String = "",
 )
 
 class ProvisionViewModel(app: Application) : AndroidViewModel(app) {
@@ -36,7 +38,8 @@ class ProvisionViewModel(app: Application) : AndroidViewModel(app) {
 
     fun provision(cfg: ProvisionConfig, label: String) {
         if (_state.value.running) return
-        _state.value = ProvisionState(running = true, label = label)
+        // Mirrors the engine's id = `format!("{host}-{ssh_port}")`.
+        _state.value = ProvisionState(running = true, label = label, serverId = "${cfg.host}-${cfg.sshPort}")
         viewModelScope.launch {
             val listener = object : ProvisionListener {
                 override fun onUpdate(update: ProvisionUpdate) {

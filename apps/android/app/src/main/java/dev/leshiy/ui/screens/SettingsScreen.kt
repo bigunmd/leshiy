@@ -46,6 +46,7 @@ fun SettingsScreen(
     onSplit: () -> Unit,
     onDeploy: () -> Unit,
     onManage: () -> Unit,
+    onCascade: () -> Unit,
 ) {
     val s = LocalStrings.current
     val context = LocalContext.current
@@ -60,6 +61,7 @@ fun SettingsScreen(
             Spacer(Modifier.size(6.dp))
             SectionLabel(s.secYourServers)
             NavRow(LeshiyIcons.Rocket, s.deploy, s.deploySub, tint = Wisp, onClick = onDeploy)
+            NavRow(LeshiyIcons.Globe, s.buildCascade, s.cascadeSubtitle, tint = Wisp, onClick = onCascade)
             NavRow(LeshiyIcons.Gear, s.manage, s.manageSub, tint = Warn, onClick = onManage)
 
             Spacer(Modifier.size(6.dp))
