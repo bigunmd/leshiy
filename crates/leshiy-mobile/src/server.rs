@@ -22,6 +22,12 @@ pub struct ServerInfo {
     /// True when this server runs privileged commands via `sudo` (non-root SSH
     /// user). Day-2 ops must supply the sudo password; it's never persisted.
     pub sudo: bool,
+    /// Chain role: `single` | `entry` | `middle` | `exit`.
+    pub role: String,
+    /// Downstream server id (next hop toward the internet), for the chain view.
+    pub downstream: Option<String>,
+    /// True when this node exposes a connector credential (exit/middle) usable as a downstream.
+    pub has_connector: bool,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -127,8 +133,20 @@ impl ServerManager {
                 host: r.host.clone(),
                 port: r.port,
                 sudo: r.sudo,
+                role: r.role.clone(),
+                downstream: r.downstream.clone(),
+                has_connector: r.connector_uri.is_some(),
             })
             .collect()
+    }
+
+    /// A saved node's connector credential (exit/middle), for wiring an upstream to it.
+    pub fn connector_uri(&self, id: String) -> Option<String> {
+        self.vault
+            .lock()
+            .unwrap()
+            .get(&id)
+            .and_then(|r| r.connector_uri.clone())
     }
 
     /// Provision a server, persist its record to the vault (so it's manageable), return the URI.
@@ -320,6 +338,38 @@ mod tests {
             .collect();
         assert!(by_id["berlin"].sudo, "sudo server must report sudo=true");
         assert!(!by_id["oslo"].sudo, "root server must report sudo=false");
+    }
+
+    #[test]
+    fn servers_expose_role_and_connector() {
+        let path = tmp();
+        let mut v = Vault::new();
+        let mut exit = rec("berlin");
+        exit.role = "exit".into();
+        exit.connector_uri = Some("leshiy://conn".into());
+        let mut entry = rec("riga");
+        entry.role = "entry".into();
+        entry.downstream = Some("berlin".into());
+        v.upsert(exit);
+        v.upsert(entry);
+        v.save(std::path::Path::new(&path), "pass").unwrap();
+
+        let sm = ServerManager::open(path, "pass".into()).unwrap();
+        let by_id: std::collections::HashMap<_, _> = sm
+            .servers()
+            .into_iter()
+            .map(|s| (s.id.clone(), s))
+            .collect();
+        assert_eq!(by_id["berlin"].role, "exit");
+        assert!(by_id["berlin"].has_connector);
+        assert_eq!(by_id["riga"].role, "entry");
+        assert_eq!(by_id["riga"].downstream.as_deref(), Some("berlin"));
+        assert!(!by_id["riga"].has_connector);
+        assert_eq!(
+            sm.connector_uri("berlin".into()).as_deref(),
+            Some("leshiy://conn")
+        );
+        assert_eq!(sm.connector_uri("riga".into()), None);
     }
 
     #[test]
