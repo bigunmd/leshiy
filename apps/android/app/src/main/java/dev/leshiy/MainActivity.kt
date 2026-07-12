@@ -32,9 +32,12 @@ import dev.leshiy.ui.i18n.LangState
 import dev.leshiy.ui.i18n.LocalStrings
 import dev.leshiy.ui.i18n.stringsFor
 import dev.leshiy.ui.screens.ConnectScreen
+import dev.leshiy.ui.screens.CredentialScreen
 import dev.leshiy.ui.screens.DeployScreen
 import dev.leshiy.ui.screens.ManageScreen
 import dev.leshiy.ui.screens.ProvisioningScreen
+import dev.leshiy.ui.screens.ServerDetailScreen
+import dev.leshiy.ui.screens.ServerUsersScreen
 import dev.leshiy.ui.screens.ServersScreen
 import dev.leshiy.ui.screens.SettingsScreen
 import dev.leshiy.ui.screens.SplitScreen
@@ -94,6 +97,9 @@ private object Route {
     const val DEPLOY = "deploy"
     const val PROVISIONING = "provisioning"
     const val MANAGE = "manage"
+    const val SERVER_DETAIL = "manage/server"
+    const val SERVER_USERS = "manage/server/users"
+    const val CREDENTIAL = "manage/credential"
 }
 
 @Composable
@@ -170,7 +176,28 @@ private fun AppNav(onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
         composable(Route.MANAGE) {
             ManageScreen(
                 vm = manageVm,
-                onUserUri = { uri, label -> profilesVm.add(uri, label) },
+                onOpenServer = { nav.navigate(Route.SERVER_DETAIL) },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable(Route.SERVER_DETAIL) {
+            ServerDetailScreen(
+                vm = manageVm,
+                onOpenUsers = { nav.navigate(Route.SERVER_USERS) },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable(Route.SERVER_USERS) {
+            ServerUsersScreen(
+                vm = manageVm,
+                onOpenCredential = { nav.navigate(Route.CREDENTIAL) },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable(Route.CREDENTIAL) {
+            CredentialScreen(
+                vm = manageVm,
+                onSaveToProfiles = { uri, label -> profilesVm.add(uri, label) },
                 onBack = { nav.popBackStack() },
             )
         }
