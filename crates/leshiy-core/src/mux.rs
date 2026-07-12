@@ -5,9 +5,9 @@ use crate::transport::{FrameRead, FrameWrite};
 use crate::version::{CAP_FLOWCONTROL, CAP_KEEPALIVE, Hello, Negotiated, negotiate};
 use bytes::Bytes;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Semaphore, mpsc, watch};
 
 /// Upper bound on concurrently-open peer-initiated streams. A peer that exceeds
@@ -54,6 +54,48 @@ impl Default for KeepaliveConfig {
             interval: Duration::from_secs(15),
             idle_timeout: Duration::from_secs(45),
         }
+    }
+}
+
+/// A cheap, lock-free read handle for a mux's last measured round-trip latency. Cloneable;
+/// hand one to a stats poller so it can read latency without locking the mux.
+#[derive(Clone, Default)]
+pub struct RttHandle(Arc<AtomicU64>);
+
+impl RttHandle {
+    /// Last measured RTT in microseconds, or `None` if no ping has round-tripped yet.
+    pub fn micros(&self) -> Option<u64> {
+        let v = self.0.load(Ordering::Relaxed);
+        (v > 0).then_some(v)
+    }
+}
+
+/// Correlates keepalive `Ping`s with their echoed `Pong`s to derive round-trip latency.
+/// `note_ping_sent` stamps the send time; `note_pong_recv` computes the elapsed RTT.
+#[derive(Default)]
+struct RttState {
+    last_ping: Mutex<Option<Instant>>,
+    micros: RttHandle,
+}
+
+impl RttState {
+    fn note_ping_sent(&self) {
+        *self.last_ping.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+    }
+    fn note_pong_recv(&self) {
+        if let Some(t) = self
+            .last_ping
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            // Clamp to >=1µs so a sub-microsecond RTT still reads as "known".
+            let us = t.elapsed().as_micros().max(1).min(u64::MAX as u128) as u64;
+            self.micros.0.store(us, Ordering::Relaxed);
+        }
+    }
+    fn handle(&self) -> RttHandle {
+        self.micros.clone()
     }
 }
 
@@ -287,6 +329,8 @@ pub struct Mux {
     /// Whether per-stream flow control was negotiated; controls whether outgoing streams get a
     /// send window.
     flowcontrol: bool,
+    /// Last keepalive round-trip latency (lock-free read handle).
+    rtt: RttHandle,
 }
 
 impl Mux {
@@ -395,9 +439,14 @@ impl Mux {
         let keepalive_on = negotiated.capabilities & CAP_KEEPALIVE != 0;
         let flowcontrol_on = negotiated.capabilities & CAP_FLOWCONTROL != 0;
 
+        // Correlates our keepalive Pings with the peer's echoed Pongs → round-trip latency.
+        let rtt = Arc::new(RttState::default());
+        let rtt_handle = rtt.handle();
+
         // --- reader task: dispatches inbound frames to per-stream senders ---
         {
             let r_streams = streams.clone();
+            let r_rtt = rtt.clone();
             let r_cmd_tx = cmd_tx.clone();
             let r_closed = closed_tx.clone();
             let idle_timeout = keepalive.idle_timeout;
@@ -433,7 +482,8 @@ impl Mux {
                             .await;
                         continue;
                     } else if bt == FrameType::Pong as u8 {
-                        // Receipt already reset the idle timer above; nothing else to do.
+                        // Receipt already reset the idle timer above; record the round-trip.
+                        r_rtt.note_pong_recv();
                         continue;
                     } else if bt == FrameType::Open as u8 {
                         // Parse the optional scheme prefix: `udp:` → datagram, `tcp:`/bare → stream.
@@ -541,25 +591,29 @@ impl Mux {
             let ka_cmd_tx = cmd_tx.clone();
             let mut ka_closed = closed_rx.clone();
             let interval = keepalive.interval;
+            let ka_rtt = rtt.clone();
             tokio::spawn(async move {
                 loop {
                     if *ka_closed.borrow() {
                         break; // connection already closed
                     }
+                    // Send a keepalive Ping (immediately on the first pass, so latency is known
+                    // shortly after connect rather than only after `interval`) and stamp the
+                    // send time; the peer echoes a Pong the reader task times.
+                    ka_rtt.note_ping_sent();
+                    if ka_cmd_tx
+                        .send(Command::Write(Frame {
+                            stream_id: 0,
+                            ftype: FrameType::Ping as u8,
+                            payload: Bytes::new(),
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        break; // writer gone
+                    }
                     tokio::select! {
-                        _ = tokio::time::sleep(interval) => {
-                            if ka_cmd_tx
-                                .send(Command::Write(Frame {
-                                    stream_id: 0,
-                                    ftype: FrameType::Ping as u8,
-                                    payload: Bytes::new(),
-                                }))
-                                .await
-                                .is_err()
-                            {
-                                break; // writer gone
-                            }
-                        }
+                        _ = tokio::time::sleep(interval) => {}
                         // The closed flag flipped (or the sender dropped) → re-check at the
                         // top of the loop and exit. `changed()` is Send (unlike `wait_for`).
                         changed = ka_closed.changed() => {
@@ -580,7 +634,18 @@ impl Mux {
             negotiated,
             closed_rx,
             flowcontrol: flowcontrol_on,
+            rtt: rtt_handle,
         })
+    }
+
+    /// A lock-free handle to this mux's last keepalive round-trip latency.
+    pub fn rtt_handle(&self) -> RttHandle {
+        self.rtt.clone()
+    }
+
+    /// Last keepalive round-trip latency in microseconds, or `None` if not yet measured.
+    pub fn rtt_micros(&self) -> Option<u64> {
+        self.rtt.micros()
     }
 
     /// Open a new outgoing stream to `target`.
@@ -645,6 +710,25 @@ mod tests {
     use crate::handshake::{PROTOCOL_MAJOR, generate_keypair};
     use crate::session::Session;
     use crate::version::Hello;
+
+    #[test]
+    fn rtt_unknown_until_a_ping_round_trips() {
+        let s = RttState::default();
+        assert!(s.handle().micros().is_none());
+        // A stray Pong with no outstanding Ping records nothing.
+        s.note_pong_recv();
+        assert!(s.handle().micros().is_none());
+    }
+
+    #[test]
+    fn rtt_recorded_after_ping_then_pong() {
+        let s = RttState::default();
+        s.note_ping_sent();
+        std::thread::sleep(Duration::from_millis(2)); // guarantee a non-zero elapsed
+        s.note_pong_recv();
+        let us = s.handle().micros().expect("rtt should be known");
+        assert!(us >= 1000, "expected >=1ms, got {us}µs");
+    }
 
     fn hello() -> Hello {
         Hello {
