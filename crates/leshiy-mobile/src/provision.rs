@@ -33,6 +33,13 @@ pub struct ProvisionConfig {
     pub user_label: Option<String>,
     /// Force the container's DNS resolver (`--dns`). None = host detection + public fallback.
     pub dns_override: Option<String>,
+    /// Chain role: `single` (default) | `entry` | `middle` | `exit`.
+    pub role: String,
+    /// Downstream server id (local vault ref), stored on the record for the chain view.
+    /// None for single/exit or an external (pasted) downstream.
+    pub downstream: Option<String>,
+    /// The downstream's connector `leshiy://` URI to wire in (entry/middle only).
+    pub connector: Option<String>,
 }
 
 /// A single progress line pushed to the UI as provisioning advances.
@@ -81,9 +88,31 @@ fn ssh_secret(cfg: &ProvisionConfig) -> SshSecret {
     }
 }
 
-/// Map the flat config to engine params (single-role, CLI-matching defaults). Pure + testable.
+/// Parse a role string into `ProvisionRole` (mirrors the CLI). `single` is explicit;
+/// anything unknown is an error.
+pub fn parse_role(s: &str) -> Result<ProvisionRole, BridgeError> {
+    match s {
+        "single" => Ok(ProvisionRole::Single),
+        "entry" => Ok(ProvisionRole::Entry),
+        "middle" => Ok(ProvisionRole::Middle),
+        "exit" => Ok(ProvisionRole::Exit),
+        other => Err(BridgeError::Provision {
+            reason: format!("unknown role {other:?} (expected single|entry|middle|exit)"),
+        }),
+    }
+}
+
+/// Map the flat config to engine params (CLI-matching defaults). Pure + testable.
 pub fn build_params(cfg: &ProvisionConfig, now: u64) -> ProvisionParams {
     let label = cfg.label.clone().unwrap_or_else(|| cfg.host.clone());
+    // Unknown roles fall back to Single; the app only ever sends validated roles.
+    let role = parse_role(cfg.role.trim()).unwrap_or(ProvisionRole::Single);
+    // Exit/middle nodes must expose a QUIC connector; default it to the listen port.
+    let quic_port = if matches!(role, ProvisionRole::Exit | ProvisionRole::Middle) {
+        cfg.quic_port.or(Some(cfg.listen_port))
+    } else {
+        cfg.quic_port
+    };
     ProvisionParams {
         id: format!("{}-{}", cfg.host, cfg.ssh_port),
         label,
@@ -103,7 +132,7 @@ pub fn build_params(cfg: &ProvisionConfig, now: u64) -> ProvisionParams {
                 concat!("ghcr.io/bigunmd/leshiy:v", env!("CARGO_PKG_VERSION")).to_string()
             }),
         container: "leshiy".into(),
-        quic_port: cfg.quic_port,
+        quic_port,
         listen_port: cfg.listen_port,
         user_label: cfg
             .user_label
@@ -111,9 +140,9 @@ pub fn build_params(cfg: &ProvisionConfig, now: u64) -> ProvisionParams {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "self".into()),
         now,
-        role: ProvisionRole::Single,
-        connector: None,
-        downstream: None,
+        role,
+        connector: cfg.connector.clone(),
+        downstream: cfg.downstream.clone(),
         sudo: cfg.sudo_password.is_some(),
         dns_override: cfg.dns_override.clone().filter(|s| !s.trim().is_empty()),
     }
@@ -206,7 +235,50 @@ mod tests {
             image_ref: None,
             user_label: None,
             dns_override: None,
+            role: "single".into(),
+            downstream: None,
+            connector: None,
         }
+    }
+
+    #[test]
+    fn parse_role_maps_and_rejects() {
+        assert_eq!(parse_role("single").unwrap(), ProvisionRole::Single);
+        assert_eq!(parse_role("entry").unwrap(), ProvisionRole::Entry);
+        assert_eq!(parse_role("middle").unwrap(), ProvisionRole::Middle);
+        assert_eq!(parse_role("exit").unwrap(), ProvisionRole::Exit);
+        assert!(parse_role("bogus").is_err());
+    }
+
+    #[test]
+    fn exit_middle_auto_enable_quic() {
+        let mut c = cfg();
+        c.role = "exit".into();
+        assert_eq!(build_params(&c, 1).quic_port, Some(c.listen_port));
+        let mut m = cfg();
+        m.role = "middle".into();
+        m.quic_port = Some(9000);
+        assert_eq!(build_params(&m, 1).quic_port, Some(9000));
+    }
+
+    #[test]
+    fn entry_carries_connector_and_downstream() {
+        let mut c = cfg();
+        c.role = "entry".into();
+        c.connector = Some("leshiy://conn".into());
+        c.downstream = Some("berlin".into());
+        let p = build_params(&c, 1);
+        assert_eq!(p.role, ProvisionRole::Entry);
+        assert_eq!(p.connector.as_deref(), Some("leshiy://conn"));
+        assert_eq!(p.downstream.as_deref(), Some("berlin"));
+        assert_eq!(p.quic_port, None);
+    }
+
+    #[test]
+    fn single_stays_unchained() {
+        let p = build_params(&cfg(), 1);
+        assert_eq!(p.role, ProvisionRole::Single);
+        assert!(p.connector.is_none() && p.downstream.is_none());
     }
 
     #[test]
