@@ -118,6 +118,28 @@ fun StatusPill(label: String, dot: Color, loading: Boolean, modifier: Modifier =
     }
 }
 
+/** A small role chip (entry/middle/exit/single), tinted by role. */
+@Composable
+fun RoleBadge(role: String, modifier: Modifier = Modifier) {
+    val s = dev.leshiy.ui.i18n.LocalStrings.current
+    val tint = when (role) {
+        "exit" -> Wisp
+        "middle" -> dev.leshiy.ui.theme.WispBright
+        "entry" -> dev.leshiy.ui.theme.Moss
+        else -> Dim
+    }
+    val shape = RoundedCornerShape(50)
+    Text(
+        text = s.roleName(role).uppercase(),
+        style = MaterialTheme.typography.labelSmall,
+        color = tint,
+        modifier = modifier
+            .clip(shape)
+            .border(1.dp, tint.copy(alpha = 0.5f), shape)
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+    )
+}
+
 /** A QR code on a light card — dark modules need a light quiet zone to scan reliably. */
 @Composable
 fun QrCard(bitmap: ImageBitmap, modifier: Modifier = Modifier) {
