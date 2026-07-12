@@ -15,6 +15,8 @@ data class ConnectUiState(
     val state: ConnState = ConnState.DISCONNECTED,
     val upBytes: ULong = 0u,
     val downBytes: ULong = 0u,
+    /** Live keepalive round-trip latency to the server in ms; 0 = unknown. */
+    val rttMs: UInt = 0u,
 )
 
 /** Observes live tunnel status. The URI to connect comes from the active profile. */
@@ -26,6 +28,7 @@ class ConnectViewModel(app: Application) : AndroidViewModel(app) {
                 state = status?.state ?: ConnState.DISCONNECTED,
                 upBytes = status?.upBytes ?: 0u,
                 downBytes = status?.downBytes ?: 0u,
+                rttMs = status?.rttMs ?: 0u,
             )
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ConnectUiState())
 }

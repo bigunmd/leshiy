@@ -92,7 +92,7 @@ fun ConnectScreen(
             )
 
             Spacer(Modifier.size(28.dp))
-            StatusReadout(ui.state, ui.upBytes, ui.downBytes)
+            StatusReadout(ui.state, ui.upBytes, ui.downBytes, ui.rttMs)
 
             Spacer(Modifier.size(10.dp))
             if (active == null) {
@@ -112,7 +112,7 @@ fun ConnectScreen(
 }
 
 @Composable
-private fun StatusReadout(state: ConnState, up: ULong, down: ULong) {
+private fun StatusReadout(state: ConnState, up: ULong, down: ULong, rttMs: UInt) {
     val s = LocalStrings.current
     val label = when (state) {
         ConnState.CONNECTED -> s.stProtected
@@ -135,6 +135,7 @@ private fun StatusReadout(state: ConnState, up: ULong, down: ULong) {
             Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
                 Meter(LeshiyIcons.ArrowDown, formatBytes(down))
                 Meter(LeshiyIcons.ArrowUp, formatBytes(up))
+                if (rttMs > 0u) Meter(LeshiyIcons.Bolt, "$rttMs ms")
             }
         }
     }
