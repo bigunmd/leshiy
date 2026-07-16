@@ -9,6 +9,8 @@ import android.content.Context
 import android.net.InetAddresses
 import android.net.IpPrefix
 import android.os.Build
+import android.os.ParcelFileDescriptor
+import android.util.Log
 import dev.leshiy.data.AppPrefs
 import dev.leshiy.data.PerAppMode
 import dev.leshiy.data.PerAppStore
@@ -16,11 +18,14 @@ import dev.leshiy.data.SplitKind
 import dev.leshiy.data.SplitStore
 import dev.leshiy.data.TunnelRepository
 import dev.leshiy.data.cidrParts
+import dev.leshiy.data.mergeDomainRoutes
 import dev.leshiy.data.perAppPlan
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.leshiy_mobile.LeshiyBridge
@@ -56,17 +61,17 @@ class LeshiyVpnService : VpnService() {
         return START_STICKY
     }
 
+    /**
+     * Resolved domain-rule routes currently baked into the interface. Only ever grows — see
+     * [refreshDomainRoutes]. Confined to [scope]'s main dispatcher, so no synchronisation.
+     */
+    private var domainRoutes: Set<Pair<String, Int>> = emptySet()
+    private var refreshJob: Job? = null
+
     private suspend fun buildAndStart(uri: String) {
         // Network-mode domain rules → resolved IPs (off the main thread; bounded).
-        val domainRoutes = withContext(Dispatchers.IO) { resolveDomainRoutes(applicationContext) }
-
-        val builder = Builder()
-            .setSession("leshiy")
-            .addAddress("10.71.0.2", 32)
-            .addDnsServer("1.1.1.1")
-            .setMtu(1400)
-        configureSplit(builder, applicationContext, domainRoutes)
-        val tun = builder.establish() ?: run { stopTunnel(); return }
+        domainRoutes = withContext(Dispatchers.IO) { resolveDomainRoutes(applicationContext) }
+        val tun = establish(domainRoutes) ?: run { stopTunnel(); return }
 
         // detachFd() transfers ownership of the fd to native code, which closes it on stop.
         bridge.start(tun.detachFd(), uri, object : StatusListener {
@@ -75,16 +80,82 @@ class LeshiyVpnService : VpnService() {
             }
         })
         TunnelRepository.setRunning(true)
+        startDomainRefresh()
+    }
+
+    /** Build + establish the interface with `routes` as the resolved domain-rule routes. */
+    private fun establish(routes: Set<Pair<String, Int>>): ParcelFileDescriptor? {
+        val builder = Builder()
+            .setSession("leshiy")
+            .addAddress("10.71.0.2", 32)
+            .addDnsServer("1.1.1.1")
+            .setMtu(1400)
+        configureSplit(builder, applicationContext, routes)
+        return builder.establish()
+    }
+
+    /**
+     * Re-resolve domain rules periodically and re-establish when new IPs appear.
+     *
+     * Android's VPN routes are immutable once established, so a domain rule can only be honoured
+     * by baking its resolved IPs into the interface — and the resolution [buildAndStart] did is
+     * stale the moment a DNS TTL expires. Without this, traffic to a domain's newer IPs silently
+     * leaves the tunnel for the rest of the session, which on a censored path means the site
+     * simply stops loading.
+     *
+     * **Accumulate, never replace.** The desktop resolver diffs and removes stale IPs, because
+     * mutating a route there is cheap. Here every change costs an interface re-establish, which
+     * drops the netstack's per-flow state and breaks in-flight connections — so a CDN rotating
+     * through its pool would otherwise churn the tunnel every refresh, forever. Taking the union
+     * converges instead: re-establishes get rarer as the pool is discovered, and the cost of
+     * keeping an IP a domain no longer uses is over-inclusion (something unrelated gets tunneled)
+     * rather than under-inclusion (the site is blocked). For a circumvention tool that is the
+     * safe direction to err in.
+     */
+    private fun startDomainRefresh() {
+        refreshJob?.cancel()
+        if (!hasDomainRules(applicationContext)) return
+        refreshJob = scope.launch {
+            while (true) {
+                delay(DOMAIN_REFRESH_MS)
+                refreshDomainRoutes()
+            }
+        }
+    }
+
+    /** One refresh pass. Visible for the service's own loop; no-ops unless the union grew. */
+    private suspend fun refreshDomainRoutes() {
+        val fresh = withContext(Dispatchers.IO) { resolveDomainRoutes(applicationContext) }
+        val union = mergeDomainRoutes(domainRoutes, fresh)
+        if (union == domainRoutes) return // nothing new — never churn the interface for free
+        // establish() supersedes the live interface, keeping the old fd valid until we drop it;
+        // if it fails, the platform leaves the existing interface untouched, so we keep running
+        // on the routes we have and simply try again next pass.
+        val tun = establish(union) ?: run {
+            Log.w(TAG, "re-establish for refreshed domain routes failed; keeping current routes")
+            return
+        }
+        // Past this point the old interface is superseded and packets are already being routed to
+        // `tun`, so the fd MUST reach the engine. If handing it over fails there is nothing left
+        // reading the live interface — every packet would blackhole — so reclaim the fd (detachFd
+        // took it out of ParcelFileDescriptor's ownership) and tear down rather than wedge.
+        val fd = tun.detachFd()
+        runCatching { bridge.reattachTun(fd) }
+            .onSuccess { domainRoutes = union }
+            .onFailure { e ->
+                Log.w(TAG, "reattach after domain refresh failed; stopping: $e")
+                runCatching { ParcelFileDescriptor.adoptFd(fd).close() }
+                stopTunnel()
+            }
     }
 
     /** Resolve network-mode domain rules to `(ip, prefix)` routes. Best-effort, bounded. */
-    private fun resolveDomainRoutes(ctx: Context): List<Pair<String, Int>> {
-        val split = SplitStore(ctx)
-        if (split.kind() != SplitKind.NETWORK || split.netMode() == PerAppMode.OFF) return emptyList()
-        return split.domains().flatMap { domain ->
+    private fun resolveDomainRoutes(ctx: Context): Set<Pair<String, Int>> {
+        if (!hasDomainRules(ctx)) return emptySet()
+        return SplitStore(ctx).domains().flatMapTo(mutableSetOf()) { domain ->
             val host = domain.removePrefix("*.")
             runCatching {
-                java.net.InetAddress.getAllByName(host).take(8).map { addr ->
+                java.net.InetAddress.getAllByName(host).take(MAX_IPS_PER_DOMAIN).map { addr ->
                     val prefix = if (addr is java.net.Inet6Address) 128 else 32
                     addr.hostAddress!! to prefix
                 }
@@ -92,7 +163,17 @@ class LeshiyVpnService : VpnService() {
         }
     }
 
+    /** True when network-mode domain rules are active and worth resolving. */
+    private fun hasDomainRules(ctx: Context): Boolean {
+        val split = SplitStore(ctx)
+        return split.kind() == SplitKind.NETWORK &&
+            split.netMode() != PerAppMode.OFF &&
+            split.domains().isNotEmpty()
+    }
+
     private fun stopTunnel() {
+        refreshJob?.cancel()
+        refreshJob = null
         bridge.stop()
         TunnelRepository.setRunning(false)
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -109,7 +190,7 @@ class LeshiyVpnService : VpnService() {
      * YouTube). Users who want strict no-leak can enable [AppPrefs.blockIpv6], which routes ::/0
      * into the tunnel in full-tunnel modes. Explicit v6 ranges in network-include are always routed.
      */
-    private fun configureSplit(b: Builder, ctx: Context, domainRoutes: List<Pair<String, Int>>) {
+    private fun configureSplit(b: Builder, ctx: Context, domainRoutes: Set<Pair<String, Int>>) {
         val blockV6 = AppPrefs.blockIpv6(ctx)
         when (SplitStore(ctx).kind()) {
             SplitKind.NETWORK -> {
@@ -196,5 +277,18 @@ class LeshiyVpnService : VpnService() {
         const val ACTION_STOP = "dev.leshiy.STOP"
         private const val CHANNEL_ID = "leshiy_vpn"
         private const val NOTIFICATION_ID = 1
+        private const val TAG = "LeshiyVpnService"
+
+        /**
+         * How often domain rules are re-resolved. Well above a typical DNS TTL (60–300s) on
+         * purpose: chasing every rotation would re-establish the interface constantly, and each
+         * re-establish breaks in-flight connections. Since the resolved set accumulates rather
+         * than churns, a slow cadence still converges — it just takes longer to discover a large
+         * CDN pool. Matches the desktop resolver's REFRESH.
+         */
+        private const val DOMAIN_REFRESH_MS = 30 * 60 * 1000L
+
+        /** Addresses taken per domain per resolution — a guard against a huge RRset. */
+        private const val MAX_IPS_PER_DOMAIN = 8
     }
 }
