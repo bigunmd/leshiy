@@ -108,11 +108,32 @@ pub enum Role {
 }
 
 /// Whether a stream carries a reliable byte stream (TCP, `Data` frames) or
-/// discrete datagrams (UDP, `Datagram` frames).
+/// discrete datagrams (UDP/ICMP, `Datagram` frames).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StreamKind {
     Tcp,
     Udp,
+    /// ICMP **echo** relayed on the peer's behalf (ADR-0030). Datagram-shaped like [`Udp`], but
+    /// the target is a bare IP with no port, and each payload is one ICMP message (8-byte header
+    /// + data) with no IP header.
+    ///
+    /// [`Udp`]: StreamKind::Udp
+    Icmp,
+}
+
+/// Split an `Open` payload into its association kind and target. The scheme prefix is optional
+/// and bare targets are TCP, which is what pre-scheme peers emit.
+fn parse_open_target(raw: String) -> (StreamKind, String) {
+    for (prefix, kind) in [
+        ("udp:", StreamKind::Udp),
+        ("icmp:", StreamKind::Icmp),
+        ("tcp:", StreamKind::Tcp),
+    ] {
+        if let Some(rest) = raw.strip_prefix(prefix) {
+            return (kind, rest.to_string());
+        }
+    }
+    (StreamKind::Tcp, raw)
 }
 
 /// Internal commands sent from Stream/Mux to the writer task.
@@ -234,7 +255,8 @@ impl Stream {
                 }
                 Ok(())
             }
-            StreamKind::Udp => {
+            // ICMP echo is datagram-shaped: one message per frame, never chunked (ADR-0030).
+            StreamKind::Udp | StreamKind::Icmp => {
                 // A datagram is one indivisible frame, so it must itself fit one record.
                 if data.len() > MAX_FRAME_PAYLOAD {
                     return Err(Error::Protocol("datagram exceeds max frame payload".into()));
@@ -568,17 +590,8 @@ impl Mux {
                         r_rtt.note_pong_recv();
                         continue;
                     } else if bt == FrameType::Open as u8 {
-                        // Parse the optional scheme prefix: `udp:` → datagram, `tcp:`/bare → stream.
                         let raw = String::from_utf8_lossy(&f.payload).into_owned();
-                        let (kind, target) = match raw.strip_prefix("udp:") {
-                            Some(rest) => (StreamKind::Udp, rest.to_string()),
-                            None => (
-                                StreamKind::Tcp,
-                                raw.strip_prefix("tcp:")
-                                    .map(|s| s.to_string())
-                                    .unwrap_or(raw),
-                            ),
-                        };
+                        let (kind, target) = parse_open_target(raw);
                         let (stream, sink) =
                             new_stream(f.stream_id, target, kind, r_cmd_tx.clone(), flowcontrol_on);
                         {
@@ -782,6 +795,29 @@ impl Mux {
         );
         self.cmd_tx
             .send(Command::Open(id, format!("udp:{target}"), sink))
+            .await
+            .map_err(|_| Error::Closed)?;
+        Ok(stream)
+    }
+
+    /// Open a new outgoing ICMP **echo** association to `target` — a bare IP, no port (ADR-0030).
+    /// Requires the peer to have advertised `CAP_ICMP`. The OPEN frame carries the target with an
+    /// `icmp:` scheme prefix; each subsequent datagram is one ICMP message with no IP header.
+    pub async fn open_icmp(&mut self, target: &str) -> Result<Stream> {
+        if self.negotiated.capabilities & crate::version::CAP_ICMP == 0 {
+            return Err(Error::Protocol("peer does not support CAP_ICMP".into()));
+        }
+        let id = self.next_id;
+        self.next_id += 2;
+        let (stream, sink) = new_stream(
+            id,
+            target.to_string(),
+            StreamKind::Icmp,
+            self.cmd_tx.clone(),
+            self.flowcontrol,
+        );
+        self.cmd_tx
+            .send(Command::Open(id, format!("icmp:{target}"), sink))
             .await
             .map_err(|_| Error::Closed)?;
         Ok(stream)
@@ -1014,6 +1050,91 @@ mod tests {
             stream_id: 0,
             ftype: FrameType::Hello as u8,
             payload: Bytes::from(h.encode()),
+        }
+    }
+
+    // --- `Open` scheme prefixes (ADR-0030) --------------------------------------------
+
+    #[test]
+    fn open_target_scheme_selects_the_association_kind() {
+        assert_eq!(
+            parse_open_target("udp:1.1.1.1:53".into()),
+            (StreamKind::Udp, "1.1.1.1:53".to_string())
+        );
+        assert_eq!(
+            parse_open_target("icmp:1.1.1.1".into()),
+            (StreamKind::Icmp, "1.1.1.1".to_string())
+        );
+        assert_eq!(
+            parse_open_target("tcp:example.com:443".into()),
+            (StreamKind::Tcp, "example.com:443".to_string())
+        );
+    }
+
+    /// A bare target is TCP — what a peer predating the scheme prefixes emits.
+    #[test]
+    fn bare_open_target_is_tcp() {
+        assert_eq!(
+            parse_open_target("example.com:443".into()),
+            (StreamKind::Tcp, "example.com:443".to_string())
+        );
+    }
+
+    /// A v6 literal is full of colons and an `icmp:` target has no port, so neither may be
+    /// mistaken for a scheme. Only a leading, exactly-matching prefix counts.
+    #[test]
+    fn open_target_only_strips_a_leading_scheme() {
+        assert_eq!(
+            parse_open_target("icmp:2001:db8::1".into()),
+            (StreamKind::Icmp, "2001:db8::1".to_string())
+        );
+        assert_eq!(
+            parse_open_target("[2001:db8::1]:443".into()),
+            (StreamKind::Tcp, "[2001:db8::1]:443".to_string())
+        );
+        // A host that merely *contains* a scheme name is not that scheme.
+        assert_eq!(
+            parse_open_target("not-udp:80".into()),
+            (StreamKind::Tcp, "not-udp:80".to_string())
+        );
+    }
+
+    /// An un-upgraded server leaves CAP_ICMP clear, and the client must refuse to emit an `icmp:`
+    /// open rather than send a scheme the peer would parse as a bare TCP hostname.
+    #[tokio::test]
+    async fn open_icmp_fails_without_cap() {
+        let server = generate_keypair().unwrap();
+        let server_pub = server.public.clone();
+        let server_priv = server.private.clone();
+        let (c_io, s_io) = tokio::io::duplex(16384);
+        let srv = tokio::spawn(async move {
+            let sess = Session::accept(s_io, &server_priv, PROTOCOL_MAJOR)
+                .await
+                .unwrap();
+            let (r, w) = sess.into_halves();
+            // server advertises NO capability
+            let _mux = Mux::start(r, w, hello(), Role::Server).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+        let client = generate_keypair().unwrap();
+        let sess = Session::connect(c_io, &server_pub, &client.private, PROTOCOL_MAJOR)
+            .await
+            .unwrap();
+        let (r, w) = sess.into_halves();
+        let mut mux = Mux::start(r, w, hello_icmp(), Role::Client).await.unwrap();
+        // negotiated cap = client(CAP_ICMP) & server(0) = 0 → open_icmp refused
+        assert!(matches!(
+            mux.open_icmp("1.1.1.1").await,
+            Err(Error::Protocol(_))
+        ));
+        srv.abort();
+    }
+
+    fn hello_icmp() -> Hello {
+        Hello {
+            version: 1,
+            min_supported: 1,
+            capabilities: crate::version::CAP_ICMP,
         }
     }
 
