@@ -66,6 +66,14 @@ impl Tunnel for RealityTunnel {
             .map_err(|_| ClientError::ConnectFailed)?;
         Ok(Box::new(MuxDatagramFlow(stream)))
     }
+    async fn open_icmp(&self, target: &str) -> Result<Box<dyn DatagramFlow>> {
+        let stream = self
+            .conn
+            .open_icmp(target)
+            .await
+            .map_err(|_| ClientError::ConnectFailed)?;
+        Ok(Box::new(MuxDatagramFlow(stream)))
+    }
     async fn closed(&self) {
         self.conn.closed().await;
     }

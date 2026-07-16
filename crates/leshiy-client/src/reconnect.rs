@@ -184,6 +184,27 @@ impl Tunnel for ReconnectingTunnel {
         }
     }
 
+    async fn open_icmp(&self, target: &str) -> Result<Box<dyn DatagramFlow>> {
+        let deadline = Instant::now() + self.hold;
+        let mut rx = self.current.clone();
+        loop {
+            let cur = rx.borrow_and_update().clone();
+            if let Some(tunnel) = cur
+                && let Ok(flow) = tunnel.open_icmp(target).await
+            {
+                return Ok(flow);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ClientError::ConnectFailed);
+            }
+            match timeout(remaining, rx.changed()).await {
+                Ok(Ok(())) => continue,
+                _ => return Err(ClientError::ConnectFailed),
+            }
+        }
+    }
+
     async fn closed(&self) {
         // The wrapper self-heals, so from the engine's perspective it never closes.
         std::future::pending::<()>().await;

@@ -127,6 +127,22 @@ install_leshiyctl() {  # day-2 dispatcher, published alongside install.sh in eac
   fi
 }
 
+# Let the server open unprivileged ICMP echo sockets, so `ping` works through the tunnel
+# (ADR-0030). The kernel default for ping_group_range is `1 0` — an empty range that excludes
+# even root. Set on the host rather than per-container because both the docker path here and the
+# systemd path share the host's network namespace (--network host), and docker refuses
+# `--sysctl net.*` in host-network mode. Widening this is what lets the server use
+# SOCK_DGRAM/IPPROTO_ICMP instead of a raw socket: the kernel then confines it to echo, so it
+# cannot be made to emit arbitrary ICMP. Best-effort — without it everything else still works and
+# only `ping` through the tunnel stays silent.
+enable_ping_sockets() {
+  sysctl -w 'net.ipv4.ping_group_range=0 2147483647' >/dev/null 2>&1 \
+    || echo "could not widen net.ipv4.ping_group_range — ping through the tunnel will not work"
+  mkdir -p /etc/sysctl.d 2>/dev/null || true
+  printf 'net.ipv4.ping_group_range = 0 2147483647\n' \
+    > /etc/sysctl.d/99-leshiy-ping.conf 2>/dev/null || true
+}
+
 open_firewall() {
   if have ufw; then
     ufw allow "$PORT/tcp"
@@ -243,6 +259,8 @@ main() {
     fi
     printf '{"mode":"docker","image":"%s"}\n' "$IMG" > "$CFGDIR/install.json"
     open_firewall
+    # Before the container starts: it shares the host netns, so it inherits this at socket time.
+    enable_ping_sockets
     run_server_container "$IMG"
     install_leshiyctl
     echo "leshiy running in docker (container: leshiy). Logs: docker logs -f leshiy"
@@ -266,6 +284,7 @@ main() {
     printf '%s\n{"mode":"native"}\n' "$summary" > "$CFGDIR/install.json"
   fi
   open_firewall
+  enable_ping_sockets
   write_unit_and_start
   if systemctl is-active --quiet leshiy; then
     echo "leshiy is running."
