@@ -14,6 +14,9 @@ pub trait StatusListener: Send + Sync {
 
 struct Running {
     cancel: Arc<Notify>,
+    /// Signalled by [`LeshiyBridge::reattach_tun`] when the host establishes a new TUN to change
+    /// routes; the engine picks the injected fd up without re-dialing.
+    reattach: Arc<Notify>,
     // Keeping the runtime alive keeps the engine + poller tasks running; dropping it stops them.
     _rt: Runtime,
     // Held so the state channel outlives the session (the poller clones its own receiver).
@@ -63,6 +66,7 @@ impl LeshiyBridge {
             })?;
         let counters = Arc::new(ByteCounters::new());
         let cancel = Arc::new(Notify::new());
+        let reattach = Arc::new(Notify::new());
         // Shared cell holding the latest keepalive RTT (ms); the engine updates it, poller reads it.
         let rtt_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (state_tx, state_rx) = tokio::sync::watch::channel(ConnState::Disconnected);
@@ -71,12 +75,14 @@ impl LeshiyBridge {
         let engine_uri = uri.clone();
         let engine_counters = counters.clone();
         let engine_cancel = cancel.clone();
+        let engine_reattach = reattach.clone();
         let engine_rtt = rtt_ms.clone();
         rt.spawn(async move {
             if let Err(e) = crate::runtime::run_engine(
                 engine_uri,
                 engine_counters,
                 engine_cancel,
+                engine_reattach,
                 state_tx,
                 engine_rtt,
             )
@@ -111,9 +117,35 @@ impl LeshiyBridge {
 
         *guard = Some(Running {
             cancel,
+            reattach,
             _rt: rt,
             _state_rx: state_rx,
         });
+        Ok(())
+    }
+
+    /// Hand the engine a TUN fd from a fresh `VpnService.Builder.establish()`, so a route change
+    /// takes effect **without re-dialing the tunnel**.
+    ///
+    /// Android's VPN routes are immutable once established, so changing them means establishing a
+    /// new interface; the platform keeps the old fd valid until it is dropped and routes outgoing
+    /// packets to the new one. Re-dialing instead would burn a REALITY handshake on every route
+    /// change — the last thing worth repeating on a censored path.
+    ///
+    /// The netstack's per-flow state does not survive, so in-flight connections break: call this
+    /// only when the route set actually changed, never on an unchanged refresh.
+    pub fn reattach_tun(&self, tun_fd: i32) -> Result<(), BridgeError> {
+        let guard = self.inner.lock().unwrap();
+        let running = guard.as_ref().ok_or(BridgeError::NotRunning)?;
+
+        #[cfg(target_os = "android")]
+        leshiy_tun::sys::set_tun_fd(tun_fd);
+        #[cfg(not(target_os = "android"))]
+        let _ = tun_fd; // fd injection is android-only; host builds validate the plumbing.
+
+        // `notify_one` latches a permit, so this is not lost if the engine happens to be between
+        // `select!`s — which would otherwise strand the new fd and leave the old routes live.
+        running.reattach.notify_one();
         Ok(())
     }
 

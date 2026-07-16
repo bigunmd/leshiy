@@ -42,22 +42,34 @@ impl PrivilegedOps for AndroidOps {
         _force_dns: bool,
         _ipv6_killswitch: bool,
     ) -> std::io::Result<TunSession> {
-        let fd = take_tun_fd().ok_or_else(|| {
-            std::io::Error::other("no VpnService TUN fd was injected before start (set_tun_fd)")
-        })?;
-
-        // Wrap the existing fd; the `tun` crate's Android device uses it directly (no ioctl/up).
-        // We own it now (Kotlin detached it), so close it on drop to unblock the reader on stop.
-        let mut cfg = tun::Configuration::default();
-        cfg.raw_fd(fd).close_fd_on_drop(true);
-        let device = tun::create_as_async(&cfg).map_err(to_io)?;
-
         Ok(TunSession {
-            device,
+            device: device_from_injected_fd("start")?,
             guard: Box::new(()), // VpnService owns routes/DNS; nothing to restore here.
             controller: Arc::new(NullController),
         })
     }
+
+    /// Pick up the fd from a fresh `VpnService.Builder.establish()` — the only way to change an
+    /// Android VPN's routes, since they are immutable once established. The old device is already
+    /// dropped by the caller (closing its fd, as the platform requires); routes and DNS belong to
+    /// the OS here, so there is no session state to rebuild.
+    async fn reattach_device(&self) -> std::io::Result<tun::AsyncDevice> {
+        device_from_injected_fd("reattach")
+    }
+}
+
+/// Wrap the injected `VpnService` fd as an async TUN device. The `tun` crate's Android path uses
+/// the fd directly (no ioctl/up). We own it (Kotlin detached it), so close it on drop — that is
+/// both what the platform requires of a superseded interface and what unblocks the reader on stop.
+fn device_from_injected_fd(what: &str) -> std::io::Result<tun::AsyncDevice> {
+    let fd = take_tun_fd().ok_or_else(|| {
+        std::io::Error::other(format!(
+            "no VpnService TUN fd was injected before {what} (set_tun_fd)"
+        ))
+    })?;
+    let mut cfg = tun::Configuration::default();
+    cfg.raw_fd(fd).close_fd_on_drop(true);
+    tun::create_as_async(&cfg).map_err(to_io)
 }
 
 fn to_io<E: std::fmt::Display>(e: E) -> std::io::Error {

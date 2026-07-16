@@ -130,11 +130,29 @@ impl TunEngine {
     /// `counters` accumulate tunneled bytes (up = device→tunnel, down = tunnel→device); the
     /// helper samples them for the GUI's live throughput. Callers that don't display stats
     /// (e.g. the `leshiy tun` CLI) can pass a throwaway `Arc::new(ByteCounters::new())`.
+    /// Run until cancelled. Equivalent to [`run_with_reattach`](Self::run_with_reattach) with a
+    /// reattach signal that never fires — which is every platform but Android.
     pub async fn run(
         tunnel: Arc<dyn Tunnel>,
         cfg: TunConfig,
         counters: Arc<ByteCounters>,
         cancel: Arc<Notify>,
+    ) -> std::io::Result<()> {
+        Self::run_with_reattach(tunnel, cfg, counters, cancel, Arc::new(Notify::new())).await
+    }
+
+    /// As [`run`](Self::run), but re-attaches to a newly-established TUN device each time
+    /// `reattach` fires, keeping the dialed tunnel.
+    ///
+    /// Android's route updates work this way: a `VpnService` interface's routes are immutable, so
+    /// changing them means `establish()`ing a new one and picking up its fd. See
+    /// [`PrivilegedOps::reattach_device`](crate::sys::PrivilegedOps::reattach_device).
+    pub async fn run_with_reattach(
+        tunnel: Arc<dyn Tunnel>,
+        cfg: TunConfig,
+        counters: Arc<ByteCounters>,
+        cancel: Arc<Notify>,
+        reattach: Arc<Notify>,
     ) -> std::io::Result<()> {
         // Platforms whose backend doesn't carry IPv6 (Android/stub) must not leave a v6 TUN
         // address set — otherwise the kill-switch would be skipped and v6 would leak around a
@@ -185,7 +203,6 @@ impl TunEngine {
                 cfg.ipv6_killswitch(),
             )
             .await?;
-        let mut ip_stack = netstack::build(device, cfg.mtu)?;
         tracing::info!(tun = %cfg.tun_name, mtu = cfg.mtu, server_ip = %cfg.server_ip, "tun engine running; reading packets from the device");
 
         // Keep a handle to the controller for the fast in-process bypass teardown below (the
@@ -211,25 +228,66 @@ impl TunEngine {
         // never releases and the next session fails with "rings already registered" (0x4DF). So the
         // caller signals `cancel`; we return normally and tear down in a controlled order, which
         // guarantees the route/DNS restore (`guard`) runs to completion before we return.
-        let result = tokio::select! {
-            biased;
-            () = cancel.notified() => {
-                tracing::info!("tun engine cancel requested; tearing down");
-                Ok(())
-            }
-            r = accept_loop(&mut ip_stack, tunnel, counters) => {
-                tracing::info!(?r, "tun engine accept loop exited");
-                r
-            }
-        };
+        let result = pump(device, cfg.mtu, tunnel, counters, cancel, reattach).await;
         drop(_resolver); // stop the resolver BEFORE teardown removes its routes
         // Remove bypass routes in-process (fast) BEFORE dropping the guard, so a large rule set
         // doesn't hit the guard's slow per-route subprocess fallback (which makes disconnect take
         // minutes and wedges reconnect). No-op on Linux (its guard batches) / when there are none.
         teardown_controller.teardown_bypass().await;
-        drop(ip_stack); // release the netstack/TUN device (override routes auto-clear)
+        // `pump` already dropped the netstack + device (override routes auto-clear).
         drop(guard); // restore DNS + IPv6 (bypass list now empty) — runs to completion here
         result
+    }
+}
+
+/// What ended a pump iteration.
+enum Pumped {
+    Stop(std::io::Result<()>),
+    Reattach,
+}
+
+/// Read packets until cancelled, rebuilding the netstack whenever `reattach` fires.
+///
+/// The netstack owns the device, so re-attaching means constructing a new one — and its per-flow
+/// session state does not survive, because there is nothing to migrate it into. In-flight
+/// connections therefore break, which is why callers must only reattach when the route set
+/// genuinely changed. What *does* survive is the dialed tunnel, so a route change costs no
+/// REALITY handshake.
+///
+/// This returns before the caller's teardown so the netstack and device are released in the
+/// controlled order the Wintun path needs (see `run_with_reattach`).
+async fn pump(
+    mut device: tun::AsyncDevice,
+    mtu: u16,
+    tunnel: Arc<dyn Tunnel>,
+    counters: Arc<ByteCounters>,
+    cancel: Arc<Notify>,
+    reattach: Arc<Notify>,
+) -> std::io::Result<()> {
+    loop {
+        let mut ip_stack = netstack::build(device, mtu)?;
+        let pumped = tokio::select! {
+            biased;
+            () = cancel.notified() => {
+                tracing::info!("tun engine cancel requested; tearing down");
+                Pumped::Stop(Ok(()))
+            }
+            () = reattach.notified() => Pumped::Reattach,
+            r = accept_loop(&mut ip_stack, tunnel.clone(), counters.clone()) => {
+                tracing::info!(?r, "tun engine accept loop exited");
+                Pumped::Stop(r)
+            }
+        };
+        // Release the old netstack and its fd before taking the new one. The platform requires a
+        // superseded interface's fd to be closed; dropping the device does that.
+        drop(ip_stack);
+        match pumped {
+            Pumped::Stop(r) => return r,
+            Pumped::Reattach => {
+                device = PlatformOps.reattach_device().await?;
+                tracing::info!("tun device reattached; routes updated, tunnel kept");
+            }
+        }
     }
 }
 

@@ -45,6 +45,36 @@ fun cidrParts(input: String): Pair<String, Int>? {
 }
 
 /**
+ * Cap on accumulated domain-rule routes. Each is a route on the VPN interface and the accumulated
+ * set only grows, so a pathological subscription list — or a CDN with a large address pool — must
+ * not bloat the interface without bound. Excess is dropped with a warning, never silently.
+ */
+const val MAX_DOMAIN_ROUTES = 512
+
+/**
+ * Union `current` with `fresh`, capped at [MAX_DOMAIN_ROUTES]. Returns `current` unchanged when
+ * nothing new fits, which is the caller's signal not to re-establish.
+ *
+ * Union rather than replace: on Android every route change costs an interface re-establish (routes
+ * are immutable once established), so diffing against a CDN rotating through its pool would churn
+ * the tunnel on every refresh, forever. Accumulating converges instead. At the cap, entries
+ * already present win over new ones — they are already routed, and evicting one would un-route
+ * traffic that is currently working. Pure — unit-tested.
+ */
+fun mergeDomainRoutes(
+    current: Set<Pair<String, Int>>,
+    fresh: Set<Pair<String, Int>>,
+): Set<Pair<String, Int>> {
+    if (current.size >= MAX_DOMAIN_ROUTES) return current
+    val out = LinkedHashSet(current)
+    for (route in fresh) {
+        if (out.size >= MAX_DOMAIN_ROUTES) break
+        out.add(route)
+    }
+    return out
+}
+
+/**
  * Split-tunnel config: which scheme (app vs network) plus the network rules. App rules stay in
  * [PerAppStore]. SharedPreferences — synchronous, so [dev.leshiy.LeshiyVpnService] reads it at
  * establish() time (including always-on start).

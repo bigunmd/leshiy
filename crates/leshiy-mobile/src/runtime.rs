@@ -27,6 +27,7 @@ pub async fn run_engine(
     uri: String,
     counters: Arc<ByteCounters>,
     cancel: Arc<Notify>,
+    reattach: Arc<Notify>,
     state_tx: watch::Sender<ConnState>,
     rtt_ms: Arc<AtomicU64>,
 ) -> std::io::Result<()> {
@@ -83,7 +84,10 @@ pub async fn run_engine(
         server_ip,
         ..TunConfig::default()
     };
-    let result = TunEngine::run(tunnel, cfg, counters, cancel).await;
+    // `run_with_reattach`, not `run`: on Android a split-tunnel route change means the service
+    // establishes a fresh interface and hands us its fd, and the engine must pick it up without
+    // re-dialing (see `LeshiyBridge::reattach_tun`).
+    let result = TunEngine::run_with_reattach(tunnel, cfg, counters, cancel, reattach).await;
     // The engine ended (device closed / fatal). A clean stop() teardown is reflected by the
     // Kotlin side; publishing Failed here covers unexpected exits so the UI never sticks on
     // Connected after the tunnel is gone.

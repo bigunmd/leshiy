@@ -96,6 +96,23 @@ pub trait PrivilegedOps: Send + Sync {
         force_dns: bool,
         ipv6_killswitch: bool,
     ) -> std::io::Result<TunSession>;
+
+    /// Re-attach to a TUN device the host has freshly established, keeping the session's routes,
+    /// DNS and guard untouched.
+    ///
+    /// Android only. A `VpnService` interface's routes are immutable once established, so a
+    /// changed route set means calling `establish()` again — which hands back a **new** fd (the
+    /// old one stays valid until drained, then must be closed). This lets the engine pick that fd
+    /// up *without re-dialing*, so a route change costs no REALITY handshake — the part most
+    /// worth not repeating on a censored path, where every handshake is a fresh chance for the
+    /// DPI to notice. Every other backend mutates routes in place via [`RouteController`] and
+    /// never calls this.
+    async fn reattach_device(&self) -> std::io::Result<tun::AsyncDevice> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "TUN device reattach is unsupported on this platform (routes mutate in place)",
+        ))
+    }
 }
 
 /// Runtime route mutation for split-tunnel **domain** rules (resolved IPs added/removed while
