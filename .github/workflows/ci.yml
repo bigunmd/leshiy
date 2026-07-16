@@ -12,6 +12,12 @@ jobs:
         with: { components: rustfmt, clippy }
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
+      # The ICMP echo tests (ADR-0030) need unprivileged ping sockets. The kernel default for
+      # ping_group_range is `1 0` — an empty range — so without this they skip silently, and a
+      # test that always skips reads as coverage while providing none. This is the same setting
+      # the server container gets; it affects only the runner.
+      - name: Allow unprivileged ICMP sockets (for the ADR-0030 echo tests)
+        run: sudo sysctl -w 'net.ipv4.ping_group_range=0 2147483647'
       - run: cargo test --all
 
   # Shell unit tests (no network): the release-pointer invariant lives in pure sh logic,
