@@ -96,6 +96,39 @@ pub(crate) fn win_route_add_via_gateway_args(
     ]
 }
 
+/// Split `line` into its first `n` whitespace-delimited columns plus the untouched remainder.
+/// `netsh`'s last column (Name) may contain spaces (`vEthernet (WSL)`, `Ethernet 2`), so it must
+/// be taken as the rest of the line, never as a single token.
+#[cfg(any(target_os = "windows", test))]
+fn split_columns(line: &str, n: usize) -> Option<(Vec<&str>, &str)> {
+    let mut rest = line.trim_start();
+    let mut cols = Vec::with_capacity(n);
+    for _ in 0..n {
+        let end = rest.find(char::is_whitespace)?;
+        cols.push(&rest[..end]);
+        rest = rest[end..].trim_start();
+    }
+    Some((cols, rest.trim_end()))
+}
+
+/// The interface name for `want_idx` in `netsh interface ipv4 show interfaces` output.
+///
+/// Keyed on the **interface index**, which the caller takes from the live default route, because
+/// that is the only authoritative statement of which interface is the egress. Selecting by
+/// "lowest metric" or "first connected" instead is wrong on real hosts: a WSL2 box's
+/// `vEthernet (WSL)` is connected and typically out-metrics the physical NIC despite having no
+/// default route, and the Wintun adapter — created before this runs — out-metrics both.
+///
+/// Rows whose first column isn't a number (the header and `---` separator) can never match.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn parse_win_iface_name(table: &str, want_idx: u32) -> Option<String> {
+    table.lines().find_map(|line| {
+        // Columns: Idx  Met  MTU  State  Name — Name is the remainder, spaces and all.
+        let (cols, name) = split_columns(line, 4)?;
+        (cols[0].parse::<u32>().ok()? == want_idx && !name.is_empty()).then(|| name.to_string())
+    })
+}
+
 /// `netsh interface ipv6 add address <iface> <v6>` — add an IPv6 address to the tun adapter so
 /// IPv6 can ride the tunnel (the `tun` crate assigns only the v4 address at creation).
 #[cfg(any(target_os = "windows", test))]
@@ -309,6 +342,86 @@ mod tests {
     fn mac_route_del_args_builds() {
         let args = mac_route_del_args("198.51.100.0", 24);
         assert_eq!(args, vec!["-n", "delete", "-net", "198.51.100.0/24"]);
+    }
+
+    /// Verbatim `netsh interface ipv4 show interfaces` output from a WSL2 host with the Wintun
+    /// adapter already up — the layout every case below is drawn from. Note the metric order:
+    /// leshiy0 (5) < vEthernet (WSL) (15) < Wi-Fi (25). The physical egress is Wi-Fi, idx 12.
+    const WSL2_HOST_IFACES: &str = "\
+Idx     Met         MTU          State                Name
+---  ----------  ----------  ------------  ---------------------------
+  1          75  4294967295  connected     Loopback Pseudo-Interface 1
+ 33           5        1500  connected     leshiy0
+ 25          15        1500  connected     vEthernet (WSL)
+ 12          25        1500  connected     Wi-Fi
+  8          25        1500  disconnected  Ethernet 2
+";
+
+    #[test]
+    fn parses_the_egress_name_by_ifindex() {
+        assert_eq!(
+            parse_win_iface_name(WSL2_HOST_IFACES, 12),
+            Some("Wi-Fi".to_string())
+        );
+    }
+
+    /// The Name column is the rest of the line. Truncating at the first space (the old
+    /// `split_whitespace().nth(4)`) yielded "vEthernet", which names no real adapter, so every
+    /// netsh command built from it silently failed.
+    #[test]
+    fn keeps_multi_word_interface_names_intact() {
+        assert_eq!(
+            parse_win_iface_name(WSL2_HOST_IFACES, 25),
+            Some("vEthernet (WSL)".to_string())
+        );
+        assert_eq!(
+            parse_win_iface_name(WSL2_HOST_IFACES, 8),
+            Some("Ethernet 2".to_string())
+        );
+        assert_eq!(
+            parse_win_iface_name(WSL2_HOST_IFACES, 1),
+            Some("Loopback Pseudo-Interface 1".to_string())
+        );
+    }
+
+    /// Keying on the default route's ifindex is what keeps the tunnel from being selected as its
+    /// own bypass interface: leshiy0 is connected and lowest-metric, but never holds the default
+    /// route, so it is simply never asked for.
+    #[test]
+    fn ifindex_lookup_is_exact_not_positional() {
+        // 25 is vEthernet's *Idx* and also Wi-Fi's and Ethernet 2's *Met* — must not cross-match.
+        assert_eq!(
+            parse_win_iface_name(WSL2_HOST_IFACES, 25),
+            Some("vEthernet (WSL)".to_string())
+        );
+        // 1500 appears in every MTU cell; 75 is loopback's Met. Neither is an Idx here.
+        assert_eq!(parse_win_iface_name(WSL2_HOST_IFACES, 1500), None);
+        assert_eq!(parse_win_iface_name(WSL2_HOST_IFACES, 75), None);
+    }
+
+    #[test]
+    fn header_separator_and_unknown_ifindex_yield_none() {
+        assert_eq!(parse_win_iface_name(WSL2_HOST_IFACES, 999), None);
+        assert_eq!(parse_win_iface_name("", 12), None);
+        // The header row's "Idx" and the separator's "---" must not parse as an index.
+        assert_eq!(
+            parse_win_iface_name(
+                "Idx     Met         MTU          State                Name",
+                12
+            ),
+            None
+        );
+        assert_eq!(parse_win_iface_name("---  ---  ---  ---  ---", 12), None);
+    }
+
+    /// A row with no Name column must not yield `Some("")` — an empty interface name would be
+    /// passed straight into netsh.
+    #[test]
+    fn row_without_a_name_column_yields_none() {
+        assert_eq!(
+            parse_win_iface_name(" 12          25        1500  connected", 12),
+            None
+        );
     }
 
     #[test]
