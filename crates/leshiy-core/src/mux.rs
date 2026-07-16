@@ -7,7 +7,7 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Semaphore, mpsc, watch};
 
 /// Upper bound on concurrently-open peer-initiated streams. A peer that exceeds
@@ -304,6 +304,80 @@ impl Stream {
 /// Shared map of active streams: stream_id → receiver-side handle.
 type Streams = Arc<Mutex<HashMap<u32, StreamSink>>>;
 
+/// How often [`suspend_watchdog`] compares the wall clock against the last inbound frame. Bounds
+/// how quickly a link that died while the device slept is noticed once the CPU wakes.
+const WATCHDOG_POLL: Duration = Duration::from_secs(2);
+
+/// Wall-clock milliseconds since the Unix epoch.
+///
+/// `SystemTime` is the only suspend-inclusive clock available here: `Instant` — and therefore
+/// every `tokio::time` timer — is `CLOCK_MONOTONIC`, which stops while the device is suspended.
+/// `CLOCK_BOOTTIME` would be the precise tool but needs `libc::clock_gettime`, and this crate is
+/// `#![forbid(unsafe_code)]`.
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Has more than `idle_timeout` of *wall-clock* time passed since the last inbound frame?
+///
+/// `saturating_sub` makes a backwards clock step (NTP correction, user setting the clock) report
+/// zero elapsed rather than underflowing into a spurious "dead". A large *forward* step can
+/// false-positive, which costs one reconnect — the safe direction to err in.
+fn wall_clock_stale(last_millis: u64, now_millis: u64, idle_timeout: Duration) -> bool {
+    Duration::from_millis(now_millis.saturating_sub(last_millis)) > idle_timeout
+}
+
+/// Force `closed()` once the wall clock shows the link has been silent past `idle_timeout`.
+///
+/// The reader's own `tokio::time::timeout` cannot cover this case, because it runs on
+/// `CLOCK_MONOTONIC` and so does not advance while the device is suspended. A phone that sleeps
+/// longer than the peer's idle timeout wakes to a session the peer tore down minutes or hours
+/// ago, while its own timer's monotonic budget is nearly untouched — so the mux still reports
+/// alive, `open()` cheerfully hands out streams on a dead socket, and apps see flows that hang
+/// instead of failing. Comparing the wall clock closes that window: this task's `sleep` is
+/// frozen by suspend too, which is exactly right — it fires on the first tick after wake.
+///
+/// Only meaningful with [`CAP_KEEPALIVE`] negotiated; without it a live-but-idle link legitimately
+/// produces no frames and this would false-positive continuously.
+///
+/// The reader is left to notice the death on its own schedule and exit, so the socket and tasks
+/// are still torn down exactly as before — this only makes `closed()`, and therefore the
+/// supervisor's re-dial, prompt.
+async fn suspend_watchdog(
+    last_seen: Arc<AtomicU64>,
+    streams: Streams,
+    closed_tx: watch::Sender<bool>,
+    idle_timeout: Duration,
+    poll: Duration,
+    now: impl Fn() -> u64 + Send + 'static,
+) {
+    let mut closed_rx = closed_tx.subscribe();
+    loop {
+        // Checked before the wait, not only via `changed()`: `subscribe()` marks the value
+        // current at that moment as seen, so a session closed before this task was first polled
+        // would never produce a `changed()` and this would spin forever.
+        if *closed_rx.borrow_and_update() {
+            return;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(poll) => {}
+            // Someone else (reader I/O error, writer death) tore the session down first.
+            _ = closed_rx.changed() => return,
+        }
+        if wall_clock_stale(last_seen.load(Ordering::Relaxed), now(), idle_timeout) {
+            tracing::warn!(
+                "tunnel silent past the idle timeout in wall-clock terms (suspend?); declaring it dead"
+            );
+            close_all_streams(&streams);
+            let _ = closed_tx.send(true);
+            return;
+        }
+    }
+}
+
 /// Drain the stream map, closing every send window — wakes any sender blocked on credit (it
 /// errors) and drops each `data_tx` so consumers see EOF. Called when a task tears the session
 /// down, so no stream is left hanging.
@@ -443,12 +517,17 @@ impl Mux {
         let rtt = Arc::new(RttState::default());
         let rtt_handle = rtt.handle();
 
+        // Wall-clock stamp of the last inbound frame, for `suspend_watchdog`. Seeded at the
+        // handshake, which is the last moment we know the link was alive.
+        let last_seen = Arc::new(AtomicU64::new(now_millis()));
+
         // --- reader task: dispatches inbound frames to per-stream senders ---
         {
             let r_streams = streams.clone();
             let r_rtt = rtt.clone();
             let r_cmd_tx = cmd_tx.clone();
             let r_closed = closed_tx.clone();
+            let r_last_seen = last_seen.clone();
             let idle_timeout = keepalive.idle_timeout;
             tokio::spawn(async move {
                 loop {
@@ -469,6 +548,9 @@ impl Mux {
                             Err(_) => break,
                         }
                     };
+                    // Any frame proves the link was alive just now. Stamped in wall-clock terms
+                    // so `suspend_watchdog` can tell real silence from a frozen monotonic timer.
+                    r_last_seen.store(now_millis(), Ordering::Relaxed);
                     let bt = base_type(f.ftype);
                     if bt == FrameType::Ping as u8 {
                         // Echo a Pong so the peer can confirm our liveness. Best-effort:
@@ -624,6 +706,21 @@ impl Mux {
                     }
                 }
             });
+        }
+
+        // --- suspend watchdog: the reader's idle timeout above runs on CLOCK_MONOTONIC, which
+        //     stops while the device is suspended, so it cannot notice a link the peer timed out
+        //     while we slept. Gated on the same cap as the reader's timeout, for the same reason:
+        //     only with keepalive negotiated does a live link guarantee periodic frames. ---
+        if keepalive_on {
+            tokio::spawn(suspend_watchdog(
+                last_seen,
+                streams.clone(),
+                closed_tx.clone(),
+                keepalive.idle_timeout,
+                WATCHDOG_POLL,
+                now_millis,
+            ));
         }
 
         let next_id = if role == Role::Client { 1 } else { 2 };
@@ -917,6 +1014,126 @@ mod tests {
             stream_id: 0,
             ftype: FrameType::Hello as u8,
             payload: Bytes::from(h.encode()),
+        }
+    }
+
+    // --- suspend watchdog -------------------------------------------------------------
+    // `tokio::time::pause()` controls the *monotonic* clock only, so a suspend is modelled the
+    // one way it actually presents: wall clock leaps forward while `last_seen` — which only a
+    // real inbound frame advances — stays put. Hence the injected `now`.
+
+    const IDLE: Duration = Duration::from_secs(45);
+    const POLL: Duration = Duration::from_millis(10);
+
+    /// Spawn a watchdog over a fake wall clock. Returns the knobs plus a receiver to observe
+    /// `closed`, and the handle so the test can abort the task.
+    fn spawn_watchdog(
+        last_seen_millis: u64,
+        now_millis: u64,
+    ) -> (
+        Arc<AtomicU64>,
+        Arc<AtomicU64>,
+        watch::Receiver<bool>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let last_seen = Arc::new(AtomicU64::new(last_seen_millis));
+        let now = Arc::new(AtomicU64::new(now_millis));
+        let (closed_tx, closed_rx) = watch::channel(false);
+        let streams: Streams = Arc::new(Mutex::new(HashMap::new()));
+        let n = now.clone();
+        let handle = tokio::spawn(suspend_watchdog(
+            last_seen.clone(),
+            streams,
+            closed_tx,
+            IDLE,
+            POLL,
+            move || n.load(Ordering::Relaxed),
+        ));
+        (last_seen, now, closed_rx, handle)
+    }
+
+    #[test]
+    fn wall_clock_stale_needs_more_than_the_timeout() {
+        // Exactly at the boundary is not yet stale (`>`), one milli past it is.
+        assert!(!wall_clock_stale(1_000, 1_000 + 45_000, IDLE));
+        assert!(wall_clock_stale(1_000, 1_000 + 45_001, IDLE));
+        assert!(!wall_clock_stale(1_000, 1_000, IDLE));
+    }
+
+    /// An NTP correction stepping the clock backwards must not be read as a dead link.
+    #[test]
+    fn wall_clock_stale_ignores_a_backwards_clock_step() {
+        assert!(!wall_clock_stale(5_000_000, 1_000, IDLE));
+        assert!(!wall_clock_stale(u64::MAX, 0, IDLE));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watchdog_leaves_a_link_that_keeps_receiving_frames_alone() {
+        let (last_seen, now, closed_rx, handle) = spawn_watchdog(1_000, 1_000);
+        // Hours of wall clock pass, but frames keep arriving, so `last_seen` tracks it.
+        for _ in 0..10 {
+            tokio::time::sleep(POLL * 3).await;
+            let t = now.fetch_add(600_000, Ordering::Relaxed) + 600_000;
+            last_seen.store(t, Ordering::Relaxed);
+        }
+        assert!(
+            !*closed_rx.borrow(),
+            "a link still receiving frames must never be declared dead"
+        );
+        // Without this the test would also pass against a watchdog that panicked or returned on
+        // its first tick — "never closed" is only meaningful while it is still watching.
+        assert!(
+            !handle.is_finished(),
+            "watchdog must still be running, not dead"
+        );
+        handle.abort();
+    }
+
+    /// The bug this exists for: the phone slept past the peer's idle timeout, so the peer tore
+    /// the session down. Monotonic timers learned nothing (they were frozen too) — only the wall
+    /// clock shows the gap.
+    #[tokio::test(start_paused = true)]
+    async fn watchdog_closes_a_link_that_died_while_suspended() {
+        let (_last_seen, now, mut closed_rx, _handle) = spawn_watchdog(1_000, 1_000);
+        // One hour of suspend: wall clock leaps, `last_seen` cannot move — no frame arrived.
+        now.store(1_000 + 3_600_000, Ordering::Relaxed);
+        tokio::time::timeout(Duration::from_secs(5), closed_rx.wait_for(|v| *v))
+            .await
+            .expect("watchdog must declare the link dead on the first tick after wake")
+            .unwrap();
+    }
+
+    /// Whoever notices the death first wins; the watchdog must not outlive a session the reader
+    /// already tore down. Covers both orderings, including a close that lands before the
+    /// watchdog is ever polled — where there is no `changed()` edge left to observe.
+    #[tokio::test(start_paused = true)]
+    async fn watchdog_exits_when_another_task_closes_the_session() {
+        for close_before_first_poll in [false, true] {
+            let last_seen = Arc::new(AtomicU64::new(1_000));
+            let (closed_tx, _closed_rx) = watch::channel(false);
+            let streams: Streams = Arc::new(Mutex::new(HashMap::new()));
+            let observer = closed_tx.clone();
+            if close_before_first_poll {
+                observer.send(true).unwrap();
+            }
+            let handle = tokio::spawn(suspend_watchdog(
+                last_seen,
+                streams,
+                closed_tx,
+                IDLE,
+                POLL,
+                || 1_000, // clock frozen: only the close can end this task
+            ));
+            if !close_before_first_poll {
+                tokio::task::yield_now().await;
+                observer.send(true).unwrap(); // the reader hit an I/O error
+            }
+            tokio::time::timeout(Duration::from_secs(5), handle)
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("watchdog must exit once the session is closed (close_before_first_poll={close_before_first_poll})")
+                })
+                .unwrap();
         }
     }
 
