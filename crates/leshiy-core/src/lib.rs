@@ -4,6 +4,7 @@
 pub mod error;
 pub mod frame;
 pub mod handshake;
+pub mod icmp;
 pub mod mux;
 // Android-only: a registry for the `VpnService.protect(fd)` callback, so the outbound tunnel
 // socket bypasses the VPN (no loop). Lives here because it's the dependency sink shared by the
