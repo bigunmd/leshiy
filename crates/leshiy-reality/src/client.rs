@@ -78,7 +78,8 @@ fn client_hello_version() -> Hello {
         min_supported: 1,
         capabilities: leshiy_core::version::CAP_DATAGRAM
             | leshiy_core::version::CAP_KEEPALIVE
-            | leshiy_core::version::CAP_FLOWCONTROL,
+            | leshiy_core::version::CAP_FLOWCONTROL
+            | leshiy_core::version::CAP_ICMP,
     }
 }
 
@@ -212,6 +213,16 @@ impl RealityConn {
             .lock()
             .await
             .open_datagram(target)
+            .await
+            .map_err(|e| crate::RealityError::Malformed(e.to_string()))
+    }
+
+    /// Open an ICMP echo association to `target` (a bare IP, no port) over the mux (ADR-0030).
+    pub async fn open_icmp(&self, target: &str) -> crate::Result<leshiy_core::mux::Stream> {
+        self.mux
+            .lock()
+            .await
+            .open_icmp(target)
             .await
             .map_err(|e| crate::RealityError::Malformed(e.to_string()))
     }

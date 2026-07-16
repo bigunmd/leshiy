@@ -65,9 +65,17 @@ pub fn run_cmd(
     // and the --restart container crash-loops (later `docker exec` then races a
     // restarting container → "No such exec instance"). Root in-container matches
     // the install.sh docker path.
+    // --sysctl ping_group_range: lets the server open unprivileged ICMP echo sockets so `ping`
+    // works through the tunnel (ADR-0030). The kernel default is `1 0` — an empty range, so
+    // nobody qualifies, root included. Widening it is what lets us use SOCK_DGRAM/IPPROTO_ICMP
+    // instead of SOCK_RAW: the kernel then confines the socket to echo, so the exit cannot be
+    // made to emit arbitrary ICMP. Namespaced per-netns, so it changes nothing on the host.
+    // Without it the socket fails EACCES, the association is declined, and the client falls back
+    // to dropping ICMP — the pre-ADR-0030 behaviour.
     let mut s = format!(
         "sudo docker run -d --name {container} --restart=unless-stopped \
-         --user 0:0 --cap-add=NET_ADMIN -v {DATA_VOLUME}:/etc/leshiy"
+         --user 0:0 --cap-add=NET_ADMIN --sysctl 'net.ipv4.ping_group_range=0 2147483647' \
+         -v {DATA_VOLUME}:/etc/leshiy"
     );
     // Publish with a BARE `-p P:P` (empty host-ip). On a host with IPv6, Docker auto-publishes it
     // on BOTH `0.0.0.0` and `[::]` (correctly making the `[::]` socket v6-only, so they don't
@@ -217,6 +225,18 @@ mod tests {
         assert!(run.contains("-e LESHIY_HOST='1.2.3.4:443'"));
         assert!(run.contains("-e LESHIY_DEST='www.microsoft.com:443'"));
         assert!(run.trim_end().ends_with("img:1 boot"));
+    }
+
+    /// Without this the ICMP echo egress fails EACCES and `ping` through the tunnel silently
+    /// keeps not working — the exact class of silent no-op that ADR-0030 exists to end. The
+    /// value contains a space, so it must reach docker as one quoted argument.
+    #[test]
+    fn run_cmd_widens_ping_group_range_for_icmp_egress() {
+        let run = run_cmd("leshiy", "img:1", 443, None, &[], &[]);
+        assert!(
+            run.contains("--sysctl 'net.ipv4.ping_group_range=0 2147483647'"),
+            "icmp echo needs the sysctl, quoted as one arg: {run}"
+        );
     }
 
     #[test]

@@ -262,16 +262,93 @@ async fn accept_loop(
                     }
                 });
             }
-            // ICMP and unparseable packets are dropped in this phase — but log so we can tell
-            // packets ARE arriving from the device (vs. nothing being read at all).
-            IpStackStream::UnknownTransport(_) => {
-                tracing::debug!("read a non-TCP/UDP packet (dropped)")
+            // ipstack surfaces every non-TCP/UDP packet here, one accept per packet with no
+            // session behind it, so an echo request is handled start-to-finish in one task.
+            // ICMP echo rides the tunnel (ADR-0030); everything else is still dropped.
+            IpStackStream::UnknownTransport(u) => {
+                let t = tunnel.clone();
+                let c = counters.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = relay_icmp_echo(t, u, c).await {
+                        tracing::debug!("icmp echo dropped: {e}");
+                    }
+                });
             }
             IpStackStream::UnknownNetwork(_) => {
                 tracing::debug!("read an unparseable packet (dropped)")
             }
         }
     }
+}
+
+/// How long to wait for an echo reply before giving up on one request. Past this the association
+/// is dropped and the packet is simply never answered — which is what an unreachable host looks
+/// like anyway, so `ping` reports the loss it should.
+const ICMP_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Relay one ICMP echo request through the tunnel and write the reply back to the device.
+///
+/// One association per request. That sounds wasteful until you notice ipstack hands us each
+/// non-TCP/UDP packet as an independent one-shot with no session behind it, so there is nothing
+/// to keep alive between packets — and `ping` emits one per second, so the four frames this costs
+/// are noise. It buys us no cache, no idle expiry, and no lifetime bugs.
+///
+/// Anything that is not an echo request is dropped here, before it reaches the tunnel: Redirect
+/// and friends only mean something relative to a routing topology the exit does not share.
+async fn relay_icmp_echo(
+    tunnel: Arc<dyn Tunnel>,
+    u: ipstack::IpStackUnknownTransport,
+    counters: Arc<ByteCounters>,
+) -> std::io::Result<()> {
+    use leshiy_core::icmp;
+
+    let (src, dst) = (u.src_addr(), u.dst_addr());
+    let v6 = dst.is_ipv6();
+    let want = if v6 {
+        icmp::IPPROTO_ICMPV6
+    } else {
+        icmp::IPPROTO_ICMPV4
+    };
+    if u.ip_protocol().0 != want {
+        return Err(std::io::Error::other("not ICMP"));
+    }
+    let req = u.payload().to_vec();
+    if icmp::parse_echo_request(&req, v6).is_none() {
+        return Err(std::io::Error::other("not an echo request"));
+    }
+
+    // The association target is a bare IP — ICMP has no ports.
+    let mut flow = tunnel
+        .open_icmp(&dst.to_string())
+        .await
+        .map_err(|e| std::io::Error::other(format!("open: {e}")))?;
+    counters.add_up(req.len() as u64);
+    flow.send(req.into())
+        .await
+        .map_err(|e| std::io::Error::other(format!("send: {e}")))?;
+
+    let reply = tokio::time::timeout(ICMP_REPLY_TIMEOUT, flow.recv())
+        .await
+        .map_err(|_| std::io::Error::other("echo reply timed out"))?
+        .map_err(|e| std::io::Error::other(format!("recv: {e}")))?;
+    counters.add_down(reply.len() as u64);
+    let _ = flow.close().await;
+
+    let mut reply = reply.to_vec();
+    if !icmp::is_echo_reply(&reply, v6) {
+        return Err(std::io::Error::other("peer returned a non-echo-reply"));
+    }
+    // The server restored the identifier but could only finish a v4 checksum: a v6 one covers a
+    // pseudo-header of both addresses, and the server has no business knowing our TUN address.
+    // We do, so we complete it here. ipstack writes the payload verbatim with no transport
+    // checksum of its own, so an unfinished one would just be dropped by the local stack.
+    if v6 && let (IpAddr::V6(s), IpAddr::V6(d)) = (dst, src) {
+        // Reply direction: it comes *from* the pinged host *to* us.
+        if !icmp::set_v6_checksum(&mut reply, &s.octets(), &d.octets()) {
+            return Err(std::io::Error::other("reply too short to checksum"));
+        }
+    }
+    u.send(reply)
 }
 
 async fn pump_tcp(

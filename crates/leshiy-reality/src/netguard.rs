@@ -66,6 +66,15 @@ fn check_ip(addr: IpAddr, allow_private: bool) -> Result<()> {
     Ok(())
 }
 
+/// Apply the egress policy (see [`check_ip`]) to an already-resolved bare IP.
+///
+/// For callers whose target carries no port and needs no resolution — the ICMP egress, whose
+/// destination is lifted straight off the packet being relayed (ADR-0030). Same policy as
+/// [`resolve_all_checked`], minus the DNS step it has nothing to look up.
+pub fn check_ip_allowed(addr: IpAddr, allow_private: bool) -> Result<()> {
+    check_ip(addr, allow_private)
+}
+
 /// Resolve `target` (e.g. `"example.com:443"`, `"[2001:db8::1]:443"`, or
 /// `"127.0.0.1:80"`) and return **all** resolved `SocketAddr`s that pass the
 /// egress policy (see [`check_ip`]), in resolver order.

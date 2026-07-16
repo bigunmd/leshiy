@@ -17,6 +17,12 @@ pub trait Tunnel: Send + Sync {
     async fn open_datagram(&self, _target: &str) -> Result<Box<dyn DatagramFlow>> {
         Err(crate::error::ClientError::ConnectFailed)
     }
+    /// Open an ICMP **echo** association to `target` — a bare IP, no port (ADR-0030). Only
+    /// REALITY implements this; QUIC's CONNECT-UDP cannot carry ICMP, so it inherits this
+    /// default and declines, and the engine falls back to dropping echo as it always has.
+    async fn open_icmp(&self, _target: &str) -> Result<Box<dyn DatagramFlow>> {
+        Err(crate::error::ClientError::ConnectFailed)
+    }
     /// Resolves when the tunnel has dropped (the connection died). The supervisor
     /// `select!`s on this to trigger reconnect. Implementations without a usable
     /// close signal may never resolve.

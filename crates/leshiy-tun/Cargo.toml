@@ -6,6 +6,9 @@ license.workspace = true
 
 [dependencies]
 leshiy-client = { path = "../leshiy-client" }
+# For the ICMP echo codec (ADR-0030). Direct rather than via leshiy-client, which re-exports its
+# own surface and has no reason to re-export a packet codec.
+leshiy-core = { path = "../leshiy-core" }
 # `process` (beyond the workspace defaults): bulk route install via a single `ip -batch`.
 tokio = { workspace = true, features = ["process"] }
 tracing = { workspace = true }

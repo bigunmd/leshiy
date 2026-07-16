@@ -102,7 +102,8 @@ pub(crate) fn server_hello() -> Hello {
         min_supported: 1,
         capabilities: leshiy_core::version::CAP_DATAGRAM
             | leshiy_core::version::CAP_KEEPALIVE
-            | leshiy_core::version::CAP_FLOWCONTROL,
+            | leshiy_core::version::CAP_FLOWCONTROL
+            | leshiy_core::version::CAP_ICMP,
     }
 }
 
@@ -225,10 +226,8 @@ where
                         leshiy_core::mux::StreamKind::Tcp => {
                             let _ = relay_stream(&mut stream, sid, lim, st, eg).await;
                         }
-                        // ADR-0030. `server_hello()` does not advertise CAP_ICMP yet, so no
-                        // compliant peer opens one; refuse rather than assume good faith.
                         leshiy_core::mux::StreamKind::Icmp => {
-                            tracing::debug!("icmp association refused: egress not implemented");
+                            let _ = relay_icmp(&mut stream, sid, lim, st, eg).await;
                         }
                     }
                     let _ = stream.close().await;
@@ -389,6 +388,85 @@ async fn relay_datagram(
                     if let Some(tb) = &limits.down { tb.consume(n as u64).await; }
                     stream
                         .send(buf[..n].to_vec().into())
+                        .await
+                        .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
+                    store.add_usage(&short_id, 0, n as u64);
+                }
+                Err(_) => break,
+            },
+            _ = tokio::time::sleep(IDLE) => break,
+        }
+    }
+    Ok(())
+}
+
+/// Relay ICMP **echo** between a mux `icmp:` association and an unprivileged ping socket
+/// (ADR-0030). Mirrors [`relay_datagram`] — same idle expiry, same re-auth tick, same token
+/// buckets — with two ICMP-specific jobs.
+///
+/// First, only echo *requests* go out. Anything else the client managed to put on the wire is
+/// dropped here rather than trusted, so this relay can never be used to emit a Redirect or a
+/// forged Destination Unreachable.
+///
+/// Second, the identifier. A ping socket stamps its own local port over the echo id on send, so
+/// the reply comes back bearing the kernel's id, not the one the user's `ping` chose — and their
+/// `ping` would discard it as unrelated. Restore the id we last forwarded, then re-checksum: v4
+/// here, v6 by the client, which is the only side that knows the addresses its pseudo-header
+/// covers.
+async fn relay_icmp(
+    stream: &mut leshiy_core::mux::Stream,
+    short_id: [u8; 8],
+    limits: UserLimits,
+    store: Arc<dyn UserStore>,
+    egress: Arc<dyn Egress>,
+) -> crate::Result<()> {
+    let v6 = stream
+        .target
+        .parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_ipv6())
+        .unwrap_or(false);
+    let mut icmp = egress
+        .open_icmp(&stream.target)
+        .await
+        .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
+    const IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+    let mut buf = vec![0u8; 65535];
+    let mut last_id: Option<u16> = None;
+    let mut revoke_tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    revoke_tick.tick().await; // consume the immediate first tick
+    loop {
+        tokio::select! {
+            _ = revoke_tick.tick() => {
+                if !store.still_allowed(&short_id, now_secs()) { break; }
+            }
+            inbound = stream.recv() => match inbound {       // client → target = UP
+                Ok(b) => {
+                    // Echo only. Everything else is dropped, not relayed.
+                    let Some(echo) = leshiy_core::icmp::parse_echo_request(&b, v6) else {
+                        tracing::debug!("non-echo icmp from client dropped");
+                        continue;
+                    };
+                    last_id = Some(echo.id);
+                    if let Some(tb) = &limits.up { tb.consume(b.len() as u64).await; }
+                    let _ = icmp.send(&b).await;
+                    store.add_usage(&short_id, b.len() as u64, 0);
+                }
+                Err(_) => break,
+            },
+            r = icmp.recv(&mut buf) => match r {             // target → client = DOWN
+                Ok(n) => {
+                    let mut msg = buf[..n].to_vec();
+                    // Put the user's identifier back so their ping correlates the reply.
+                    if let Some(id) = last_id
+                        && leshiy_core::icmp::set_id(&mut msg, id)
+                        && !v6
+                    {
+                        // v6 is left checksum-zeroed for the client to complete.
+                        let _ = leshiy_core::icmp::set_v4_checksum(&mut msg);
+                    }
+                    if let Some(tb) = &limits.down { tb.consume(n as u64).await; }
+                    stream
+                        .send(msg.into())
                         .await
                         .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
                     store.add_usage(&short_id, 0, n as u64);

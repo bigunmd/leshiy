@@ -25,6 +25,15 @@ pub trait UdpEgress: Send {
     async fn recv(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
 }
 
+/// A connected ICMP **echo** egress: `send`/`recv` one ICMP message at a time to one target.
+/// Datagram-shaped like [`UdpEgress`], but there is no port and each message is an echo
+/// request/reply carrying no IP header (ADR-0030).
+#[async_trait::async_trait]
+pub trait IcmpEgress: Send {
+    async fn send(&mut self, buf: &[u8]) -> std::io::Result<usize>;
+    async fn recv(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
+}
+
 #[async_trait::async_trait]
 pub trait Egress: Send + Sync {
     /// Open a connection to `target` and return split read/write halves.
@@ -34,6 +43,15 @@ pub trait Egress: Send + Sync {
     async fn open_udp(&self, _target: &str) -> Result<Box<dyn UdpEgress>> {
         Err(crate::RealityError::Malformed(
             "udp egress unsupported".into(),
+        ))
+    }
+
+    /// Open an ICMP echo association to `target` — a bare IP, no port. Default: unsupported,
+    /// so an egress that can't do ICMP (e.g. a connector hop) declines and the client falls
+    /// back to dropping it, exactly as an un-upgraded server does.
+    async fn open_icmp(&self, _target: &str) -> Result<Box<dyn IcmpEgress>> {
+        Err(crate::RealityError::Malformed(
+            "icmp egress unsupported".into(),
         ))
     }
 }
@@ -141,6 +159,62 @@ impl Egress for DirectEgress {
         Err(crate::RealityError::Io(last_err.unwrap_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "no reachable address")
         })))
+    }
+
+    async fn open_icmp(&self, target: &str) -> Result<Box<dyn IcmpEgress>> {
+        // A bare IP, never a hostname: the client lifts the destination straight off the packet
+        // it is relaying, so no name resolution is involved and accepting one would only widen
+        // the surface. Rejecting non-IPs also keeps the netguard check total — there is no
+        // resolve step here that could return an address we failed to screen.
+        let ip: std::net::IpAddr = target.parse().map_err(|_| {
+            crate::RealityError::Malformed(format!("icmp target must be a bare IP, got {target}"))
+        })?;
+        crate::netguard::check_ip_allowed(ip, self.allow_private)?;
+        Ok(Box::new(IcmpEgressSock(icmp_socket(ip)?)))
+    }
+}
+
+/// An unprivileged ICMP datagram socket connected to `ip`.
+///
+/// `SOCK_DGRAM`/`IPPROTO_ICMP` rather than `SOCK_RAW`: it needs no `CAP_NET_RAW`, and the kernel
+/// constrains it to echo — it *cannot* emit arbitrary ICMP types — which is the confinement we
+/// want, not merely a convenience (ADR-0030). The kernel also owns the echo identifier, stamping
+/// the socket's local port over whatever we send, which is why the caller must restore the
+/// client's original id on the reply.
+///
+/// Requires the process GID to fall inside `net.ipv4.ping_group_range`; the container sets it.
+/// Without it this fails `EACCES`, the association is declined, and the client keeps dropping
+/// ICMP — the same degradation as talking to a server that never advertised `CAP_ICMP`.
+fn icmp_socket(ip: std::net::IpAddr) -> Result<tokio::net::UdpSocket> {
+    let (domain, protocol) = match ip {
+        std::net::IpAddr::V4(_) => (socket2::Domain::IPV4, socket2::Protocol::ICMPV4),
+        std::net::IpAddr::V6(_) => (socket2::Domain::IPV6, socket2::Protocol::ICMPV6),
+    };
+    let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(protocol))
+        .map_err(crate::RealityError::Io)?;
+    // `from_std` below requires a non-blocking socket, and connect on a datagram socket is
+    // immediate, so there is no in-progress state to handle.
+    sock.set_nonblocking(true)
+        .map_err(crate::RealityError::Io)?;
+    // ICMP has no ports; the kernel ignores this one and uses the socket's local port as the
+    // echo id instead.
+    sock.connect(&std::net::SocketAddr::new(ip, 0).into())
+        .map_err(crate::RealityError::Io)?;
+    // socket2 → std → tokio. Both conversions are safe `From`/`from_std` impls; this crate is
+    // `#![forbid(unsafe_code)]`, so `from_raw_fd` is not an option.
+    let std_sock: std::net::UdpSocket = sock.into();
+    tokio::net::UdpSocket::from_std(std_sock).map_err(crate::RealityError::Io)
+}
+
+struct IcmpEgressSock(tokio::net::UdpSocket);
+
+#[async_trait::async_trait]
+impl IcmpEgress for IcmpEgressSock {
+    async fn send(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.send(buf).await
+    }
+    async fn recv(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.recv(buf).await
     }
 }
 
@@ -255,6 +329,91 @@ mod tests {
                 .await
                 .is_err()
         ); // netguard: link-local always blocked
+    }
+
+    /// True when this host permits unprivileged ICMP sockets. `net.ipv4.ping_group_range` is
+    /// `1 0` — an empty range — on most distros by default, so the roundtrip tests below must
+    /// skip rather than false-fail. The container sets the sysctl; a dev box usually has not.
+    /// Mirrors `v6_loopback_available`.
+    async fn ping_socket_available() -> bool {
+        icmp_socket("127.0.0.1".parse().unwrap()).is_ok()
+    }
+
+    /// The SSRF guard must cover ICMP too. This one is not theoretical: an exit that will ping
+    /// arbitrary addresses on command is a network scanner, and metadata endpoints answer echo.
+    #[tokio::test]
+    async fn icmp_egress_blocks_metadata() {
+        assert!(
+            DirectEgress::allowing_private()
+                .open_icmp("169.254.169.254")
+                .await
+                .is_err(),
+            "link-local must be refused even with the private opt-in"
+        );
+    }
+
+    #[tokio::test]
+    async fn icmp_egress_blocks_private_by_default() {
+        assert!(DirectEgress::new().open_icmp("127.0.0.1").await.is_err());
+        assert!(DirectEgress::new().open_icmp("10.0.0.1").await.is_err());
+    }
+
+    /// ICMP has no ports, so a `host:port` target is a caller bug — and accepting one would mean
+    /// parsing an address we then never screened.
+    #[tokio::test]
+    async fn icmp_egress_rejects_anything_that_is_not_a_bare_ip() {
+        for bad in ["1.1.1.1:0", "example.com", "[2001:db8::1]:443", ""] {
+            assert!(
+                DirectEgress::allowing_private()
+                    .open_icmp(bad)
+                    .await
+                    .is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+    }
+
+    /// Ping ourselves through the egress and read the reply back. Proves the socket is genuinely
+    /// usable — that `SOCK_DGRAM`/`IPPROTO_ICMP` accepts an echo request we built and returns a
+    /// reply — rather than only that it opens.
+    #[tokio::test]
+    async fn icmp_egress_roundtrips_an_echo_to_loopback() {
+        use leshiy_core::icmp;
+        if !ping_socket_available().await {
+            eprintln!(
+                "skipping icmp_egress_roundtrips_an_echo_to_loopback: no unprivileged ICMP \
+                 socket (net.ipv4.ping_group_range is {:?})",
+                std::fs::read_to_string("/proc/sys/net/ipv4/ping_group_range")
+                    .unwrap_or_default()
+                    .trim()
+            );
+            return;
+        }
+        let mut eg = DirectEgress::allowing_private()
+            .open_icmp("127.0.0.1")
+            .await
+            .unwrap();
+
+        let mut req = vec![icmp::V4_ECHO_REQUEST, 0, 0, 0, 0x12, 0x34, 0x00, 0x01];
+        req.extend_from_slice(b"leshiy");
+        assert!(icmp::set_v4_checksum(&mut req));
+        eg.send(&req).await.unwrap();
+
+        let mut buf = [0u8; 1500];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), eg.recv(&mut buf))
+            .await
+            .expect("echo reply timed out")
+            .unwrap();
+        let reply = &buf[..n];
+        assert!(icmp::is_echo_reply(reply, false), "expected an echo reply");
+        // A ping socket delivers the ICMP message with no IP header — the assumption the whole
+        // relay is built on. If that were wrong, the type byte would be an IPv4 version nibble.
+        assert_eq!(reply[0], icmp::V4_ECHO_REPLY);
+        assert_eq!(
+            &reply[icmp::HEADER_LEN..n],
+            b"leshiy",
+            "payload echoed back"
+        );
     }
 
     #[test]
