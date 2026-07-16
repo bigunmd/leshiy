@@ -6,8 +6,10 @@ import android.app.NotificationManager
 import android.content.Intent
 import android.net.VpnService
 import android.content.Context
+import android.net.ConnectivityManager
 import android.net.InetAddresses
 import android.net.IpPrefix
+import android.net.Network
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
@@ -68,6 +70,12 @@ class LeshiyVpnService : VpnService() {
     private var domainRoutes: Set<Pair<String, Int>> = emptySet()
     private var refreshJob: Job? = null
 
+    /** Registered default-network watch; see [startNetworkWatch]. Main-confined. */
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    /** The default network the tunnel was last dialed on. Confined to the callback thread. */
+    private var lastNetwork: Network? = null
+
     private suspend fun buildAndStart(uri: String) {
         // Network-mode domain rules → resolved IPs (off the main thread; bounded).
         domainRoutes = withContext(Dispatchers.IO) { resolveDomainRoutes(applicationContext) }
@@ -81,6 +89,7 @@ class LeshiyVpnService : VpnService() {
         })
         TunnelRepository.setRunning(true)
         startDomainRefresh()
+        startNetworkWatch()
     }
 
     /** Build + establish the interface with `routes` as the resolved domain-rule routes. */
@@ -149,6 +158,57 @@ class LeshiyVpnService : VpnService() {
             }
     }
 
+    /**
+     * Watch the default network, so a Wi-Fi↔cellular switch re-dials at once.
+     *
+     * Two jobs, of unequal weight. [setUnderlyingNetworks] tells the platform what the VPN rides
+     * on so its capabilities (metered, validated, …) track the real upstream; the default of
+     * `null` already means "whatever the system default is", which is where our own sockets go
+     * anyway since the app is disallowed from its own tunnel — so that part is belt-and-braces.
+     *
+     * The re-dial is the real point. When the default network changes, the tunnel's socket is
+     * already dead — its source address no longer exists — but nothing on the wire says so, so
+     * the mux would spend its whole idle timeout finding out while every flow hangs. The OS knows
+     * immediately; this passes that on.
+     *
+     * Callbacks arrive serialised on a ConnectivityThread, so [lastNetwork] is confined to it.
+     */
+    private fun startNetworkWatch() {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                runCatching { setUnderlyingNetworks(arrayOf(network)) }
+                val previous = lastNetwork
+                lastNetwork = network
+                // The first callback after registering only reports where we already are — the
+                // tunnel was dialed on it. Only a *change* means the socket's source is gone, and
+                // a re-dial costs a handshake and every in-flight flow, so never spend one for
+                // a mere capability update.
+                if (previous != null && previous != network) {
+                    Log.i(TAG, "default network changed; forcing reconnect")
+                    runCatching { bridge.networkChanged() }
+                        .onFailure { Log.w(TAG, "networkChanged failed: $it") }
+                }
+            }
+
+            override fun onLost(network: Network) {
+                if (network == lastNetwork) lastNetwork = null
+            }
+        }
+        runCatching { cm.registerDefaultNetworkCallback(cb) }
+            .onSuccess { networkCallback = cb }
+            .onFailure { Log.w(TAG, "could not watch the default network: $it") }
+    }
+
+    private fun stopNetworkWatch() {
+        val cb = networkCallback ?: return
+        networkCallback = null
+        lastNetwork = null
+        runCatching {
+            getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb)
+        }
+    }
+
     /** Resolve network-mode domain rules to `(ip, prefix)` routes. Best-effort, bounded. */
     private fun resolveDomainRoutes(ctx: Context): Set<Pair<String, Int>> {
         if (!hasDomainRules(ctx)) return emptySet()
@@ -174,6 +234,7 @@ class LeshiyVpnService : VpnService() {
     private fun stopTunnel() {
         refreshJob?.cancel()
         refreshJob = null
+        stopNetworkWatch()
         bridge.stop()
         TunnelRepository.setRunning(false)
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -251,6 +312,7 @@ class LeshiyVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        stopNetworkWatch()
         bridge.stop()
         TunnelRepository.setRunning(false)
         scope.cancel()

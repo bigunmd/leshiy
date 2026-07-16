@@ -28,6 +28,7 @@ pub async fn run_engine(
     counters: Arc<ByteCounters>,
     cancel: Arc<Notify>,
     reattach: Arc<Notify>,
+    kick: Arc<Notify>,
     state_tx: watch::Sender<ConnState>,
     rtt_ms: Arc<AtomicU64>,
 ) -> std::io::Result<()> {
@@ -52,8 +53,16 @@ pub async fn run_engine(
     let _ = state_tx.send(next_on_dial_result(dial.is_ok()));
     let seed: Arc<dyn leshiy_client::Tunnel> =
         Arc::from(dial.map_err(|e| std::io::Error::other(format!("dial: {e}")))?);
-    let tunnel =
-        ReconnectingTunnel::spawn(RealTransport, &uri, pref, seed, ReconnectParams::default());
+    // `spawn_with_kick`, not `spawn`: the VpnService watches the default network and tells us the
+    // moment it changes, which the tunnel itself can only discover by timing out.
+    let tunnel = ReconnectingTunnel::spawn_with_kick(
+        RealTransport,
+        &uri,
+        pref,
+        seed,
+        ReconnectParams::default(),
+        kick,
+    );
 
     // Sample the tunnel's keepalive RTT (~1 Hz) into the shared cell the status poller reads.
     // Runs until the engine is cancelled; `tunnel` is an `Arc`, so this clone is cheap.
