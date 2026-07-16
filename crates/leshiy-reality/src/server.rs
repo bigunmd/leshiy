@@ -225,6 +225,11 @@ where
                         leshiy_core::mux::StreamKind::Tcp => {
                             let _ = relay_stream(&mut stream, sid, lim, st, eg).await;
                         }
+                        // ADR-0030. `server_hello()` does not advertise CAP_ICMP yet, so no
+                        // compliant peer opens one; refuse rather than assume good faith.
+                        leshiy_core::mux::StreamKind::Icmp => {
+                            tracing::debug!("icmp association refused: egress not implemented");
+                        }
                     }
                     let _ = stream.close().await;
                 });

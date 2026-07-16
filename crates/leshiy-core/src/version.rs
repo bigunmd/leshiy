@@ -20,6 +20,14 @@ pub const CAP_KEEPALIVE: u64 = 1 << 1;
 /// longer head-of-line-block the whole tunnel.
 pub const CAP_FLOWCONTROL: u64 = 1 << 2;
 
+/// Capability bit: the peer understands `icmp:`-scheme datagram associations, i.e. it can egress
+/// ICMP **echo** on behalf of the tunnel (see ADR-0030). Negotiated through `Hello.capabilities`;
+/// the client only forwards echo once both peers advertise it, and otherwise keeps dropping ICMP
+/// exactly as it always has, so an un-upgraded server degrades silently rather than breaking.
+/// Deliberately not a new frame type — reusing `Open`/`Datagram` keeps a leshiy connection's
+/// frame-type histogram unchanged (ADR-0008).
+pub const CAP_ICMP: u64 = 1 << 3;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hello {
     pub version: u16,
@@ -166,11 +174,44 @@ mod tests {
     }
 
     #[test]
-    fn datagram_keepalive_flowcontrol_are_distinct_bits() {
-        assert_ne!(CAP_DATAGRAM, CAP_KEEPALIVE);
-        assert_eq!(CAP_DATAGRAM & CAP_KEEPALIVE, 0);
-        assert_eq!(CAP_DATAGRAM & CAP_FLOWCONTROL, 0);
-        assert_eq!(CAP_KEEPALIVE & CAP_FLOWCONTROL, 0);
+    fn icmp_cap_negotiated_only_when_both_advertise() {
+        let with = Hello {
+            version: 1,
+            min_supported: 1,
+            capabilities: CAP_ICMP,
+        };
+        let without = Hello {
+            version: 1,
+            min_supported: 1,
+            capabilities: 0,
+        };
+        assert_eq!(
+            negotiate(&with, &with).unwrap().capabilities & CAP_ICMP,
+            CAP_ICMP
+        );
+        // An un-upgraded server must leave the bit clear, so the client keeps dropping ICMP.
+        assert_eq!(
+            negotiate(&with, &without).unwrap().capabilities & CAP_ICMP,
+            0
+        );
+    }
+
+    /// Every capability must own a distinct bit — a collision would silently activate one feature
+    /// when the peer advertised another.
+    #[test]
+    fn every_capability_owns_a_distinct_bit() {
+        let caps = [
+            ("CAP_DATAGRAM", CAP_DATAGRAM),
+            ("CAP_KEEPALIVE", CAP_KEEPALIVE),
+            ("CAP_FLOWCONTROL", CAP_FLOWCONTROL),
+            ("CAP_ICMP", CAP_ICMP),
+        ];
+        for (i, (a_name, a)) in caps.iter().enumerate() {
+            assert_eq!(a.count_ones(), 1, "{a_name} must be a single bit");
+            for (b_name, b) in &caps[i + 1..] {
+                assert_eq!(a & b, 0, "{a_name} and {b_name} share a bit");
+            }
+        }
     }
 
     #[test]
