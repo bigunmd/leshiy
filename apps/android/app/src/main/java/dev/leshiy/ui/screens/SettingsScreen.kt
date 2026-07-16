@@ -93,6 +93,28 @@ fun SettingsScreen(
             }
 
             Spacer(Modifier.size(6.dp))
+            var sleepKa by remember { mutableStateOf(AppPrefs.sleepKeepalive(context)) }
+            PanelCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(s.sleepKeepaliveTitle, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onBackground)
+                        Text(s.sleepKeepaliveSub, style = MaterialTheme.typography.labelSmall, color = Dim)
+                    }
+                    Spacer(Modifier.size(12.dp))
+                    Switch(
+                        checked = sleepKa,
+                        onCheckedChange = { sleepKa = it; AppPrefs.setSleepKeepalive(context, it) },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Bg0,
+                            checkedTrackColor = Wisp,
+                            uncheckedTrackColor = MaterialTheme.colorScheme.surface,
+                            uncheckedBorderColor = MaterialTheme.colorScheme.outline,
+                        ),
+                    )
+                }
+            }
+
+            Spacer(Modifier.size(6.dp))
             SectionLabel(s.language)
             Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
                 Row(Modifier.padding(3.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {

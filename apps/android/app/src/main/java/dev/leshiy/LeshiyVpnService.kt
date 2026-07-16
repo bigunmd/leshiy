@@ -1,8 +1,10 @@
 package dev.leshiy
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Intent
 import android.net.VpnService
 import android.content.Context
@@ -12,6 +14,7 @@ import android.net.IpPrefix
 import android.net.Network
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.util.Log
 import dev.leshiy.data.AppPrefs
 import dev.leshiy.data.PerAppMode
@@ -90,6 +93,7 @@ class LeshiyVpnService : VpnService() {
         TunnelRepository.setRunning(true)
         startDomainRefresh()
         startNetworkWatch()
+        scheduleKeepaliveAlarm(applicationContext)
     }
 
     /** Build + establish the interface with `routes` as the resolved domain-rule routes. */
@@ -158,6 +162,25 @@ class LeshiyVpnService : VpnService() {
             }
     }
 
+    /**
+     * Schedule the sleep-keepalive alarm, if the user opted in (ADR-0031).
+     *
+     * The CPU suspends seconds after screen-off and every tokio timer freezes with it, so nothing
+     * pings and the server eventually gives up on us. `setExactAndAllowWhileIdle` is the only way
+     * to wake from Doze, and it is capped at once per ~9 minutes per app — which is precisely why
+     * the server's tolerance had to be negotiated up to 10 minutes first. At 45s no alarm could
+     * ever have arrived in time.
+     *
+     * The receiver does not need to *do* anything: waking the CPU is the whole job. The mux's
+     * keepalive is driven by the wall clock, so it notices on its first poll that a ping is
+     * overdue and sends one. It just has to stay awake long enough for that poll — hence the brief
+     * hold in [KeepalivePingReceiver].
+     *
+     * Deliberately not exact-alarm-permission territory: `SCHEDULE_EXACT_ALARM` is for
+     * user-visible scheduled events (alarms, reminders) and Google rejects it for keepalives.
+     * `setAndAllowWhileIdle` is inexact, needs no permission, and a keepalive does not care about
+     * a few minutes of jitter — the tolerance has 90 seconds of headroom over the interval.
+     */
     /**
      * Watch the default network, so a Wi-Fi↔cellular switch re-dials at once.
      *
@@ -235,6 +258,7 @@ class LeshiyVpnService : VpnService() {
         refreshJob?.cancel()
         refreshJob = null
         stopNetworkWatch()
+        cancelKeepaliveAlarm(applicationContext)
         bridge.stop()
         TunnelRepository.setRunning(false)
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -313,6 +337,7 @@ class LeshiyVpnService : VpnService() {
 
     override fun onDestroy() {
         stopNetworkWatch()
+        cancelKeepaliveAlarm(applicationContext)
         bridge.stop()
         TunnelRepository.setRunning(false)
         scope.cancel()
@@ -352,5 +377,54 @@ class LeshiyVpnService : VpnService() {
 
         /** Addresses taken per domain per resolution — a guard against a huge RRset. */
         private const val MAX_IPS_PER_DOMAIN = 8
+
+        /**
+         * Gap between sleep-keepalive wakes. Doze floors allow-while-idle alarms at ~9 minutes per
+         * app, so this is the fastest that is actually achievable — which is why the server's
+         * tolerance had to be negotiated to 10 minutes (ADR-0031) before the alarm could work at
+         * all. The 90s of headroom absorbs the jitter of an inexact alarm.
+         */
+        private const val KEEPALIVE_ALARM_MS = 9 * 60 * 1000L
+
+        /**
+         * Schedule the next sleep-keepalive wake, if the user opted in (ADR-0031).
+         *
+         * The receiver sends nothing: waking the CPU is the whole job, because the mux's keepalive
+         * is driven by the wall clock and fires on its first poll after any wake.
+         *
+         * `setAndAllowWhileIdle`, not the exact variant: `SCHEDULE_EXACT_ALARM` is meant for
+         * user-visible scheduled events and Google rejects it for keepalives. Inexact needs no
+         * permission, and a keepalive does not care about a few minutes of jitter.
+         *
+         * Static so [KeepalivePingReceiver] can re-arm — allow-while-idle alarms are one-shot, and
+         * a missed re-arm would silently end the keepalive.
+         */
+        fun scheduleKeepaliveAlarm(context: Context) {
+            if (!AppPrefs.sleepKeepalive(context)) return
+            val am = context.getSystemService(AlarmManager::class.java) ?: return
+            runCatching {
+                am.setAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    SystemClock.elapsedRealtime() + KEEPALIVE_ALARM_MS,
+                    keepalivePendingIntent(context),
+                )
+            }.onFailure { Log.w(TAG, "could not schedule the keepalive alarm: $it") }
+        }
+
+        fun cancelKeepaliveAlarm(context: Context) {
+            runCatching {
+                context
+                    .getSystemService(AlarmManager::class.java)
+                    ?.cancel(keepalivePendingIntent(context))
+            }
+        }
+
+        private fun keepalivePendingIntent(context: Context): PendingIntent =
+            PendingIntent.getBroadcast(
+                context,
+                0,
+                Intent(context, KeepalivePingReceiver::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
     }
 }
