@@ -38,6 +38,21 @@ impl PrivilegedOps for WindowsOps {
             ));
         };
 
+        // 0. Capture the pre-session egress — ifindex first, then its name — BEFORE the adapter
+        //    exists. Wintun comes up "connected" and, reporting a high link speed, is assigned a
+        //    *lower* metric than the physical NIC, so anything that enumerates interfaces after
+        //    creation can select the tunnel as its own bypass interface. The default route is the
+        //    authoritative egress; take the name from its ifindex. (Same principle as
+        //    `discover.rs`: capture original state before changing anything.)
+        let handle = Handle::new()?;
+        let orig_idx = handle
+            .default_route()
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.ifindex);
+        let orig_iface = orig_idx.and_then(original_iface_name);
+
         // 1. Create the Wintun adapter. REQUIRES wintun.dll beside the binary (Task 3.9).
         //    No ensure_root_privileges (Linux-only); the process must already be elevated.
         let mut cfg = tun::Configuration::default();
@@ -78,18 +93,9 @@ impl PrivilegedOps for WindowsOps {
         // 2. Routes: server host-exception FIRST via the original gateway, then the
         //    default-override halves via the tun interface. Prefer net-route; fall back
         //    to netsh by interface name.
-        let handle = Handle::new()?;
-        // The active physical interface name (for the host-exception netsh fallback + IPv6
-        // restore) and its ifindex. On Windows, net_route needs the interface index to install
-        // a gateway (next-hop) route — a gateway alone fails — so bypass routes that lacked it
-        // were silently dropped. Take it from the current default route.
-        let orig_iface = original_iface_name();
-        let orig_idx = handle
-            .default_route()
-            .await
-            .ok()
-            .flatten()
-            .and_then(|r| r.ifindex);
+        // `orig_idx` also feeds every gateway route below: on Windows net_route needs the
+        // interface index to install a next-hop route — a gateway alone is rejected — so bypass
+        // routes that lack it are silently dropped.
         let exc = &plan.server_exception;
         // Attach the v4 egress ifindex only for a v4 exception; let the OS pick for v6.
         let exc_idx = if exc.dest.addr.is_ipv4() {
@@ -353,16 +359,13 @@ fn gateway_route(addr: IpAddr, prefix: u8, gateway: IpAddr, ifindex: Option<u32>
     }
 }
 
-/// The name of the active (lowest-metric) physical IPv4 interface, used for the
-/// host-exception fallback route and IPv6 restore. Parsed from `netsh interface ipv4
-/// show interfaces`; returns `None` if it can't be determined (callers degrade best-effort).
-fn original_iface_name() -> Option<String> {
+/// The name of the physical egress interface carrying `idx` (the live default route's ifindex),
+/// used for the host-exception netsh fallback and bypass-route teardown. Returns `None` if it
+/// can't be determined (callers degrade best-effort). The parsing lives in `cmd` so it is
+/// compiled and unit-tested on the Linux host; see `cmd::parse_win_iface_name`.
+fn original_iface_name(idx: u32) -> Option<String> {
     let out = cmd::run_capture(NETSH, &["interface", "ipv4", "show", "interfaces"]).ok()?;
-    // Columns: Idx  Met  MTU  State  Name. Pick the first "connected" non-loopback row.
-    out.lines()
-        .filter(|l| l.contains("connected"))
-        .filter_map(|l| l.split_whitespace().nth(4).map(str::to_string))
-        .find(|n| !n.eq_ignore_ascii_case("Loopback"))
+    cmd::parse_win_iface_name(&out, idx)
 }
 
 /// Read the current `DisableSmartNameResolution` policy value (as a string), or `None`
