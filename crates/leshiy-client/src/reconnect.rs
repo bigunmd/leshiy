@@ -21,7 +21,7 @@ use crate::transport::{Transport, Tunnel};
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
@@ -78,9 +78,28 @@ impl ReconnectingTunnel {
         seed: Arc<dyn Tunnel>,
         params: ReconnectParams,
     ) -> Arc<dyn Tunnel> {
+        Self::spawn_with_kick(transport, uri, pref, seed, params, Arc::new(Notify::new()))
+    }
+
+    /// As [`spawn`](Self::spawn), but `kick` forces an immediate re-dial without waiting for the
+    /// current tunnel to work out that it is dead.
+    ///
+    /// Android signals this when the default network changes. The old socket's source address is
+    /// gone the moment Wi-Fi drops to cellular, but nothing on the wire says so — the peer simply
+    /// stops being reachable — so the mux would burn its whole idle timeout discovering what the
+    /// OS already told us. Callers that cannot observe network changes pass a `Notify` that never
+    /// fires and behave exactly as before.
+    pub fn spawn_with_kick<T: Transport + 'static>(
+        transport: T,
+        uri: impl Into<String>,
+        pref: TransportPref,
+        seed: Arc<dyn Tunnel>,
+        params: ReconnectParams,
+        kick: Arc<Notify>,
+    ) -> Arc<dyn Tunnel> {
         let (tx, rx) = watch::channel(Some(seed.clone()));
         let uri = uri.into();
-        let task = tokio::spawn(supervise(transport, uri, pref, seed, params, tx));
+        let task = tokio::spawn(supervise(transport, uri, pref, seed, params, tx, kick));
         Arc::new(ReconnectingTunnel {
             current: rx,
             hold: params.hold,
@@ -99,12 +118,15 @@ async fn supervise<T: Transport>(
     seed: Arc<dyn Tunnel>,
     params: ReconnectParams,
     tx: watch::Sender<Option<Arc<dyn Tunnel>>>,
+    kick: Arc<Notify>,
 ) {
     let mut current = seed;
     loop {
-        // Wait until the live tunnel reports it has dropped.
-        current.closed().await;
-        tracing::warn!("tunnel dropped; reconnecting");
+        // Either the tunnel worked out it was dead, or the host told us the ground moved under it.
+        tokio::select! {
+            () = current.closed() => tracing::warn!("tunnel dropped; reconnecting"),
+            () = kick.notified() => tracing::info!("network changed; forcing reconnect"),
+        }
         // Publish "no tunnel" so in-flight `open()`s hold rather than hit a dead tunnel. If the
         // receiver is gone the wrapper was dropped — stop.
         if tx.send(None).is_err() {
@@ -331,6 +353,70 @@ mod tests {
             dials.load(Ordering::SeqCst) >= 1,
             "supervisor must have re-dialed at least once"
         );
+    }
+
+    /// The point of the kick: the seed here never drops — `closed()` never resolves and `open()`
+    /// keeps succeeding — exactly like a tunnel whose network vanished without a FIN. Only the
+    /// kick can force the re-dial; without it the supervisor would sit on `closed()` forever.
+    #[tokio::test]
+    async fn kick_forces_a_redial_on_a_tunnel_that_still_looks_alive() {
+        let dials = Arc::new(AtomicUsize::new(0));
+        let transport = CountingTransport {
+            dials: dials.clone(),
+            dial_ok: true,
+        };
+        let (seed, _alive, _signal) = seed(); // never dropped, never signalled
+        let kick = Arc::new(Notify::new());
+        let tunnel = ReconnectingTunnel::spawn_with_kick(
+            transport,
+            "leshiy://x",
+            TransportPref::Tcp,
+            seed,
+            fast_params(),
+            kick.clone(),
+        );
+        assert_eq!(dials.load(Ordering::SeqCst), 0, "seeded; no dial yet");
+
+        kick.notify_one();
+
+        // The supervisor must re-dial off the back of the kick alone.
+        for _ in 0..100 {
+            if dials.load(Ordering::SeqCst) >= 1 {
+                assert!(tunnel.open("example.com:443").await.is_ok());
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("kick did not force a re-dial");
+    }
+
+    /// `notify_one` latches, so a kick raised before the supervisor reaches its `select!` must
+    /// still be honoured — otherwise a network change during startup would be silently swallowed
+    /// and the tunnel left on a dead socket.
+    #[tokio::test]
+    async fn a_kick_raised_before_the_supervisor_waits_is_not_lost() {
+        let dials = Arc::new(AtomicUsize::new(0));
+        let kick = Arc::new(Notify::new());
+        kick.notify_one(); // fired before spawn — nothing is waiting yet
+        let (seed, _alive, _signal) = seed();
+        let _tunnel = ReconnectingTunnel::spawn_with_kick(
+            CountingTransport {
+                dials: dials.clone(),
+                dial_ok: true,
+            },
+            "leshiy://x",
+            TransportPref::Tcp,
+            seed,
+            fast_params(),
+            kick,
+        );
+        for _ in 0..100 {
+            if dials.load(Ordering::SeqCst) >= 1 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("a kick raised before the supervisor waited was lost");
     }
 
     #[tokio::test]

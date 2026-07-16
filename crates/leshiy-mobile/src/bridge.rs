@@ -17,6 +17,8 @@ struct Running {
     /// Signalled by [`LeshiyBridge::reattach_tun`] when the host establishes a new TUN to change
     /// routes; the engine picks the injected fd up without re-dialing.
     reattach: Arc<Notify>,
+    /// Signalled by [`LeshiyBridge::network_changed`]; forces the reconnect supervisor to re-dial.
+    kick: Arc<Notify>,
     // Keeping the runtime alive keeps the engine + poller tasks running; dropping it stops them.
     _rt: Runtime,
     // Held so the state channel outlives the session (the poller clones its own receiver).
@@ -67,6 +69,7 @@ impl LeshiyBridge {
         let counters = Arc::new(ByteCounters::new());
         let cancel = Arc::new(Notify::new());
         let reattach = Arc::new(Notify::new());
+        let kick = Arc::new(Notify::new());
         // Shared cell holding the latest keepalive RTT (ms); the engine updates it, poller reads it.
         let rtt_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (state_tx, state_rx) = tokio::sync::watch::channel(ConnState::Disconnected);
@@ -76,6 +79,7 @@ impl LeshiyBridge {
         let engine_counters = counters.clone();
         let engine_cancel = cancel.clone();
         let engine_reattach = reattach.clone();
+        let engine_kick = kick.clone();
         let engine_rtt = rtt_ms.clone();
         rt.spawn(async move {
             if let Err(e) = crate::runtime::run_engine(
@@ -83,6 +87,7 @@ impl LeshiyBridge {
                 engine_counters,
                 engine_cancel,
                 engine_reattach,
+                engine_kick,
                 state_tx,
                 engine_rtt,
             )
@@ -118,9 +123,28 @@ impl LeshiyBridge {
         *guard = Some(Running {
             cancel,
             reattach,
+            kick,
             _rt: rt,
             _state_rx: state_rx,
         });
+        Ok(())
+    }
+
+    /// Tell the tunnel the default network changed, so it re-dials now instead of waiting to
+    /// find out.
+    ///
+    /// When Wi-Fi drops to cellular the old socket's source address is gone, but nothing on the
+    /// wire says so — the peer just stops being reachable. Left alone the mux would spend its
+    /// whole idle timeout discovering what the OS already told us, stranding every flow for the
+    /// duration. The host knows first; this passes that on.
+    ///
+    /// Call only on a genuine change of network, not on every callback: a re-dial costs a REALITY
+    /// handshake and drops in-flight flows.
+    pub fn network_changed(&self) -> Result<(), BridgeError> {
+        let guard = self.inner.lock().unwrap();
+        let running = guard.as_ref().ok_or(BridgeError::NotRunning)?;
+        // `notify_one` latches, so a change racing the supervisor's `select!` is not lost.
+        running.kick.notify_one();
         Ok(())
     }
 
