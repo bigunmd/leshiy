@@ -63,11 +63,7 @@ async fn end_to_end_socks5_echo() {
         let mut mux = leshiy_core::mux::Mux::start(
             r,
             w,
-            leshiy_core::version::Hello {
-                version: 1,
-                min_supported: 1,
-                capabilities: 0,
-            },
+            leshiy_core::version::Hello::new(1, 1, 0),
             leshiy_core::mux::Role::Server,
         )
         .await
@@ -110,11 +106,7 @@ async fn end_to_end_socks5_echo() {
     let mut mux = leshiy_core::mux::Mux::start(
         r,
         w,
-        leshiy_core::version::Hello {
-            version: 1,
-            min_supported: 1,
-            capabilities: 0,
-        },
+        leshiy_core::version::Hello::new(1, 1, 0),
         leshiy_core::mux::Role::Client,
     )
     .await

@@ -535,6 +535,23 @@ impl Mux {
         let keepalive_on = negotiated.capabilities & CAP_KEEPALIVE != 0;
         let flowcontrol_on = negotiated.capabilities & CAP_FLOWCONTROL != 0;
 
+        // Idle tolerance (ADR-0031). `KeepaliveConfig::idle_timeout` is the local fallback — the
+        // symmetric behaviour used against a peer that can't negotiate — and the negotiated values
+        // refine it when both sides can. Keeping the fallback rather than hardcoding the default
+        // is what lets a caller (a test, a tuned deployment) still pick its own timing.
+        let (local_idle_timeout, peer_idle_tolerance) =
+            if negotiated.capabilities & crate::version::CAP_IDLE_TOLERANCE != 0 {
+                (
+                    // What we tolerate of *their* silence: the value they asked for.
+                    Duration::from_secs(negotiated.local_idle_tolerance as u64),
+                    // What they tolerate of *ours*: the value we asked for. Only they can answer
+                    // "have you given up on me?", which is what the suspend watchdog asks.
+                    Duration::from_secs(negotiated.peer_idle_tolerance as u64),
+                )
+            } else {
+                (keepalive.idle_timeout, keepalive.idle_timeout)
+            };
+
         // Correlates our keepalive Pings with the peer's echoed Pongs → round-trip latency.
         let rtt = Arc::new(RttState::default());
         let rtt_handle = rtt.handle();
@@ -550,7 +567,7 @@ impl Mux {
             let r_cmd_tx = cmd_tx.clone();
             let r_closed = closed_tx.clone();
             let r_last_seen = last_seen.clone();
-            let idle_timeout = keepalive.idle_timeout;
+            let idle_timeout = local_idle_timeout;
             tokio::spawn(async move {
                 loop {
                     // With keepalive negotiated, bound each read by the idle timeout: a
@@ -688,27 +705,35 @@ impl Mux {
             let interval = keepalive.interval;
             let ka_rtt = rtt.clone();
             tokio::spawn(async move {
+                // Wall clock, not `tokio::time::sleep(interval)`: a monotonic sleep is frozen
+                // mid-count by suspend, so on waking it still wants a full `interval` of *awake*
+                // time before firing. An Android alarm that holds the CPU for a couple of seconds
+                // every 9 minutes would take hours to accumulate that, which would make the whole
+                // keepalive-through-sleep story (ADR-0031) a no-op. Deciding by wall clock fires
+                // on the first poll after any wake — alarm, screen-on, or laptop resume.
+                let mut last_ping_millis = 0u64; // 0 ⇒ due immediately, so RTT is known at connect
                 loop {
                     if *ka_closed.borrow() {
                         break; // connection already closed
                     }
-                    // Send a keepalive Ping (immediately on the first pass, so latency is known
-                    // shortly after connect rather than only after `interval`) and stamp the
-                    // send time; the peer echoes a Pong the reader task times.
-                    ka_rtt.note_ping_sent();
-                    if ka_cmd_tx
-                        .send(Command::Write(Frame {
-                            stream_id: 0,
-                            ftype: FrameType::Ping as u8,
-                            payload: Bytes::new(),
-                        }))
-                        .await
-                        .is_err()
-                    {
-                        break; // writer gone
+                    if wall_clock_stale(last_ping_millis, now_millis(), interval) {
+                        // Stamp the send time; the peer echoes a Pong the reader task times.
+                        ka_rtt.note_ping_sent();
+                        if ka_cmd_tx
+                            .send(Command::Write(Frame {
+                                stream_id: 0,
+                                ftype: FrameType::Ping as u8,
+                                payload: Bytes::new(),
+                            }))
+                            .await
+                            .is_err()
+                        {
+                            break; // writer gone
+                        }
+                        last_ping_millis = now_millis();
                     }
                     tokio::select! {
-                        _ = tokio::time::sleep(interval) => {}
+                        _ = tokio::time::sleep(WATCHDOG_POLL.min(interval)) => {}
                         // The closed flag flipped (or the sender dropped) → re-check at the
                         // top of the loop and exit. `changed()` is Send (unlike `wait_for`).
                         changed = ka_closed.changed() => {
@@ -730,7 +755,9 @@ impl Mux {
                 last_seen,
                 streams.clone(),
                 closed_tx.clone(),
-                keepalive.idle_timeout,
+                // The *peer's* patience, not ours. With CAP_IDLE_TOLERANCE the phone asks for
+                // minutes, so a short sleep no longer trips this at all (ADR-0031).
+                peer_idle_tolerance,
                 WATCHDOG_POLL,
                 now_millis,
             ));
@@ -864,19 +891,11 @@ mod tests {
     }
 
     fn hello() -> Hello {
-        Hello {
-            version: 1,
-            min_supported: 1,
-            capabilities: 0,
-        }
+        Hello::new(1, 1, 0)
     }
 
     fn hello_dg() -> Hello {
-        Hello {
-            version: 1,
-            min_supported: 1,
-            capabilities: crate::version::CAP_DATAGRAM,
-        }
+        Hello::new(1, 1, crate::version::CAP_DATAGRAM)
     }
 
     #[tokio::test]
@@ -996,19 +1015,11 @@ mod tests {
     }
 
     fn hello_ka() -> Hello {
-        Hello {
-            version: 1,
-            min_supported: 1,
-            capabilities: crate::version::CAP_KEEPALIVE,
-        }
+        Hello::new(1, 1, crate::version::CAP_KEEPALIVE)
     }
 
     fn hello_fc() -> Hello {
-        Hello {
-            version: 1,
-            min_supported: 1,
-            capabilities: crate::version::CAP_FLOWCONTROL,
-        }
+        Hello::new(1, 1, crate::version::CAP_FLOWCONTROL)
     }
 
     /// A reader that yields a fixed script of frames, then blocks forever (never EOF,
@@ -1131,11 +1142,7 @@ mod tests {
     }
 
     fn hello_icmp() -> Hello {
-        Hello {
-            version: 1,
-            min_supported: 1,
-            capabilities: crate::version::CAP_ICMP,
-        }
+        Hello::new(1, 1, crate::version::CAP_ICMP)
     }
 
     // --- suspend watchdog -------------------------------------------------------------
@@ -1287,6 +1294,50 @@ mod tests {
             .await
             .expect("idle keepalive timeout must fire closed() on a silent peer")
             .unwrap();
+    }
+
+    /// With CAP_IDLE_TOLERANCE negotiated, the *peer's* request governs how long we tolerate its
+    /// silence — not our local fallback. Same silent peer and same 80ms local config as the test
+    /// above, but now it has asked us for the (clamped) minimum of 15s, so timing it out at 80ms
+    /// would mean the negotiation never reached the reader and the whole wire change is inert.
+    #[tokio::test]
+    async fn a_negotiated_tolerance_overrides_the_local_fallback() {
+        let peer = Hello {
+            version: 1,
+            min_supported: 1,
+            capabilities: crate::version::CAP_KEEPALIVE | crate::version::CAP_IDLE_TOLERANCE,
+            idle_tolerance: 0, // floors to MIN_IDLE_TOLERANCE (15s) — far past the 80ms fallback
+        };
+        let reader = ScriptedThenSilent {
+            frames: vec![hello_frame(peer)].into(),
+        };
+        let cfg = KeepaliveConfig {
+            interval: std::time::Duration::from_millis(20),
+            idle_timeout: std::time::Duration::from_millis(80),
+        };
+        let mux = Mux::start_with_keepalive(
+            reader,
+            RecordingWriter {
+                sent: Arc::new(Mutex::new(Vec::new())),
+            },
+            peer,
+            Role::Client,
+            cfg,
+        )
+        .await
+        .unwrap();
+
+        let mut closed = mux.closed_receiver();
+        // The 80ms fallback must NOT fire: the peer asked for 15s and we granted it.
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(400),
+                closed.wait_for(|v| *v)
+            )
+            .await
+            .is_err(),
+            "the negotiated tolerance must govern, not the local fallback"
+        );
     }
 
     #[tokio::test]
