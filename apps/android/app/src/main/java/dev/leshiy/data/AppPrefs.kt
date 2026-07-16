@@ -18,4 +18,24 @@ object AppPrefs {
 
     fun setBlockIpv6(context: Context, value: Boolean) =
         prefs(context).edit().putBoolean("block_ipv6", value).apply()
+
+    /**
+     * Keep the tunnel alive while the device sleeps, by waking the CPU periodically to ping
+     * (ADR-0031). Off by default.
+     *
+     * Off, the tunnel dies once a sleep outlasts the server's tolerance and re-dials within ~2s of
+     * waking — invisible unless something needed to reach you meanwhile. On, it survives sleep, so
+     * apps routed through the tunnel keep receiving pushes; the cost is a couple of seconds of CPU
+     * every ~9 minutes (Doze's floor for an allow-while-idle alarm), which is far cheaper than a
+     * wakelock but not free.
+     *
+     * Does nothing against a server predating CAP_IDLE_TOLERANCE: it drops the session at 45s
+     * regardless, long before the alarm can fire. Degrades to the off behaviour rather than
+     * breaking.
+     */
+    fun sleepKeepalive(context: Context): Boolean =
+        prefs(context).getBoolean("sleep_keepalive", false)
+
+    fun setSleepKeepalive(context: Context, value: Boolean) =
+        prefs(context).edit().putBoolean("sleep_keepalive", value).apply()
 }

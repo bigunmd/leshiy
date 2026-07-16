@@ -43,6 +43,14 @@
             android:exported="false"
             android:screenOrientation="portrait" />
 
+        <!-- Wakes the CPU so the tunnel's keepalive can fire while the device sleeps (ADR-0031).
+             Not exported: only our own AlarmManager PendingIntent triggers it. No
+             SCHEDULE_EXACT_ALARM permission — setAndAllowWhileIdle is inexact and needs none, and
+             a keepalive doesn't care about a few minutes of jitter. -->
+        <receiver
+            android:name=".KeepalivePingReceiver"
+            android:exported="false" />
+
         <service
             android:name=".LeshiyVpnService"
             android:exported="false"
