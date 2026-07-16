@@ -11,11 +11,7 @@ use leshiy_tls::tls13::messages::{ServerHelloParams, build_server_hello};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 fn hello() -> Hello {
-    Hello {
-        version: 1,
-        min_supported: 1,
-        capabilities: 0,
-    }
+    Hello::new(1, 1, 0)
 }
 
 fn sample_dest_sh(suite: u16) -> Vec<u8> {

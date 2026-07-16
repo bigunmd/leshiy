@@ -103,7 +103,11 @@ pub(crate) fn server_hello() -> Hello {
         capabilities: leshiy_core::version::CAP_DATAGRAM
             | leshiy_core::version::CAP_KEEPALIVE
             | leshiy_core::version::CAP_FLOWCONTROL
-            | leshiy_core::version::CAP_ICMP,
+            | leshiy_core::version::CAP_ICMP
+            | leshiy_core::version::CAP_IDLE_TOLERANCE,
+        // A server never suspends, so it asks for nothing beyond the default; advertising the cap
+        // is what lets it *honour* a sleeping client's request (ADR-0031).
+        idle_tolerance: leshiy_core::version::DEFAULT_IDLE_TOLERANCE,
     }
 }
 

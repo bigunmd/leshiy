@@ -72,6 +72,16 @@ pub fn build_authed_client_hello(
 }
 
 /// The Hello value used on both ends of the REALITY tunnel — MUST match `server_hello()`.
+/// Seconds of client silence we ask the server to tolerate (ADR-0031).
+///
+/// Requested unconditionally, not gated on any user setting — which is what keeps this out of
+/// `Transport::dial`'s signature. A longer server tolerance costs a VPS almost nothing and helps
+/// every client: a phone that sleeps under ten minutes keeps its tunnel outright, rather than
+/// being torn down at 45s and re-dialing on wake. It does not weaken our own blackhole detection,
+/// because that times the *server's* silence and the server still declares 45s and still pings
+/// every 15s.
+const CLIENT_IDLE_TOLERANCE: u32 = 600;
+
 fn client_hello_version() -> Hello {
     Hello {
         version: PROTOCOL_MAJOR,
@@ -79,7 +89,9 @@ fn client_hello_version() -> Hello {
         capabilities: leshiy_core::version::CAP_DATAGRAM
             | leshiy_core::version::CAP_KEEPALIVE
             | leshiy_core::version::CAP_FLOWCONTROL
-            | leshiy_core::version::CAP_ICMP,
+            | leshiy_core::version::CAP_ICMP
+            | leshiy_core::version::CAP_IDLE_TOLERANCE,
+        idle_tolerance: CLIENT_IDLE_TOLERANCE,
     }
 }
 
