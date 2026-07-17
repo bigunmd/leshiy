@@ -102,6 +102,7 @@ class MainActivity : FragmentActivity() {
         UpdateManager.autoCheck(this)
         // Cold start: lock immediately if the feature is on (before any UI is shown).
         locked.value = AppPrefs.appLockEnabled(this)
+        handleShortcut(intent)
         enableEdgeToEdge()
         setContent {
             val lang by LangState.lang.collectAsStateWithLifecycle()
@@ -166,6 +167,22 @@ class MainActivity : FragmentActivity() {
         startService(Intent(this, LeshiyVpnService::class.java).setAction(LeshiyVpnService.ACTION_STOP))
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleShortcut(intent)
+    }
+
+    /** Perform a launcher-shortcut action. Connect/disconnect only touch the service — no UI is
+     *  revealed, so this is safe to run while the app-lock screen is up. */
+    private fun handleShortcut(intent: Intent?) {
+        when (intent?.action) {
+            ACTION_SHORTCUT_CONNECT ->
+                runCatching { Profiles.manager(this).activeUri() }.getOrNull()?.let(::connect)
+            ACTION_SHORTCUT_DISCONNECT -> disconnect()
+        }
+    }
+
     private fun hasAnyServer(): Boolean =
         runCatching { Profiles.manager(this).list().isNotEmpty() }.getOrDefault(false)
 
@@ -211,6 +228,11 @@ class MainActivity : FragmentActivity() {
             builder.setNegativeButtonText(s.lockCancel)
         }
         runCatching { prompt.authenticate(builder.build()) }
+    }
+
+    private companion object {
+        const val ACTION_SHORTCUT_CONNECT = "dev.leshiy.SHORTCUT_CONNECT"
+        const val ACTION_SHORTCUT_DISCONNECT = "dev.leshiy.SHORTCUT_DISCONNECT"
     }
 }
 

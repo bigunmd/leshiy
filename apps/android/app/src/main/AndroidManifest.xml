@@ -40,11 +40,16 @@
 
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Launcher long-press shortcuts (Connect / Disconnect). -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
 
         <activity
@@ -94,6 +99,20 @@
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
         </service>
+
+        <!-- Home-screen toggle widget. exported so the launcher/host can bind it; the toggle
+             broadcast is our own package action. -->
+        <receiver
+            android:name=".LeshiyWidgetProvider"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="dev.leshiy.WIDGET_TOGGLE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/leshiy_widget_info" />
+        </receiver>
 
         <!-- Exposes the downloaded update APK (cacheDir/updates) to the package installer. -->
         <provider
