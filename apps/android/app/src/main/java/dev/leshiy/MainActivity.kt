@@ -1,8 +1,11 @@
 package dev.leshiy
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -20,6 +23,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import dev.leshiy.data.AppPrefs
+import dev.leshiy.data.Profiles
 import dev.leshiy.ui.AppsViewModel
 import dev.leshiy.ui.ConnectViewModel
 import dev.leshiy.ui.ManageViewModel
@@ -36,6 +41,7 @@ import dev.leshiy.ui.screens.ConnectScreen
 import dev.leshiy.ui.screens.CredentialScreen
 import dev.leshiy.ui.screens.DeployScreen
 import dev.leshiy.ui.screens.ManageScreen
+import dev.leshiy.ui.screens.OnboardingScreen
 import dev.leshiy.ui.screens.ProvisioningScreen
 import dev.leshiy.ui.screens.ServerDetailScreen
 import dev.leshiy.ui.screens.ServerUsersScreen
@@ -57,6 +63,12 @@ class MainActivity : ComponentActivity() {
             pendingUri = null
         }
 
+    // POST_NOTIFICATIONS is a runtime permission on Android 13+. Without it the foreground-service
+    // status notification (with the Disconnect action) is silently suppressed — the tunnel still
+    // runs, so we ignore the result and never block a connect on it.
+    private val postNotifications =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* optional */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         LangState.init(this)
@@ -67,7 +79,24 @@ class MainActivity : ComponentActivity() {
             CompositionLocalProvider(LocalStrings provides stringsFor(lang)) {
                 LeshiyTheme {
                     Atmosphere {
-                        AppNav(onConnect = ::connect, onDisconnect = ::disconnect)
+                        var showOnboarding by remember {
+                            mutableStateOf(
+                                shouldShowOnboarding(
+                                    complete = AppPrefs.onboardingComplete(this@MainActivity),
+                                    hasAnyServer = hasAnyServer(),
+                                ),
+                            )
+                        }
+                        var startDest by remember { mutableStateOf(Route.CONNECT) }
+                        if (showOnboarding) {
+                            OnboardingScreen(
+                                onFinish = { finishOnboarding(); startDest = Route.CONNECT; showOnboarding = false },
+                                onAddServer = { finishOnboarding(); startDest = Route.SERVERS; showOnboarding = false },
+                                onDeploy = { finishOnboarding(); startDest = Route.DEPLOY; showOnboarding = false },
+                            )
+                        } else {
+                            AppNav(startDestination = startDest, onConnect = ::connect, onDisconnect = ::disconnect)
+                        }
                     }
                 }
             }
@@ -76,6 +105,9 @@ class MainActivity : ComponentActivity() {
 
     private fun connect(uri: String) {
         if (uri.isEmpty()) return
+        // Ask for notification permission in context (first connect) so the running-VPN status
+        // notification is visible. Fire-and-forget: the tunnel does not depend on it.
+        ensureNotificationPermission()
         val consent = VpnService.prepare(this)
         if (consent != null) {
             pendingUri = uri
@@ -85,6 +117,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun ensureNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) postNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
     private fun startTunnel(uri: String) {
         startService(Intent(this, LeshiyVpnService::class.java).putExtra(LeshiyVpnService.EXTRA_URI, uri))
     }
@@ -92,6 +131,11 @@ class MainActivity : ComponentActivity() {
     private fun disconnect() {
         startService(Intent(this, LeshiyVpnService::class.java).setAction(LeshiyVpnService.ACTION_STOP))
     }
+
+    private fun hasAnyServer(): Boolean =
+        runCatching { Profiles.manager(this).list().isNotEmpty() }.getOrDefault(false)
+
+    private fun finishOnboarding() = AppPrefs.setOnboardingComplete(this, true)
 }
 
 private object Route {
@@ -111,7 +155,7 @@ private object Route {
 }
 
 @Composable
-private fun AppNav(onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
+private fun AppNav(startDestination: String, onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
     val nav = rememberNavController()
     val connectVm: ConnectViewModel = viewModel()
     val profilesVm: ProfilesViewModel = viewModel()
@@ -136,7 +180,7 @@ private fun AppNav(onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
     }
     val context = androidx.compose.ui.platform.LocalContext.current
 
-    NavHost(nav, startDestination = Route.CONNECT) {
+    NavHost(nav, startDestination = startDestination) {
         composable(Route.CONNECT) {
             ConnectScreen(
                 connectVm = connectVm,
