@@ -1,5 +1,7 @@
 package dev.leshiy.ui.screens
 
+import android.content.Intent
+import android.provider.Settings
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -116,6 +118,52 @@ fun SettingsScreen(
                     )
                 }
             }
+
+            Spacer(Modifier.size(6.dp))
+            var reconnectBoot by remember { mutableStateOf(AppPrefs.reconnectOnBoot(context)) }
+            PanelCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(s.reconnectBootTitle, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onBackground)
+                        Text(s.reconnectBootSub, style = MaterialTheme.typography.labelSmall, color = Dim)
+                    }
+                    Spacer(Modifier.size(12.dp))
+                    Switch(
+                        checked = reconnectBoot,
+                        onCheckedChange = { reconnectBoot = it; AppPrefs.setReconnectOnBoot(context, it) },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Bg0,
+                            checkedTrackColor = Wisp,
+                            uncheckedTrackColor = MaterialTheme.colorScheme.surface,
+                            uncheckedBorderColor = MaterialTheme.colorScheme.outline,
+                        ),
+                    )
+                }
+            }
+
+            Spacer(Modifier.size(6.dp))
+            NavRow(LeshiyIcons.Shield, s.alwaysOnTitle, s.alwaysOnSub, tint = Wisp, onClick = {
+                // Opens Android's VPN settings, where the user enables system always-on + "block
+                // connections without VPN". runCatching: some OEM ROMs don't resolve this action.
+                runCatching {
+                    context.startActivity(
+                        Intent(Settings.ACTION_VPN_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }
+            })
+
+            Spacer(Modifier.size(6.dp))
+            NavRow(LeshiyIcons.Info, s.notifSettingsTitle, s.notifSettingsSub, tint = Wisp, onClick = {
+                // One-tap recovery when the running-VPN notification was denied — jumps straight to
+                // this app's notification settings instead of the user hunting through Settings.
+                runCatching {
+                    context.startActivity(
+                        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                            .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }
+            })
 
             Spacer(Modifier.size(6.dp))
             SectionLabel(s.language)
