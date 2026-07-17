@@ -12,12 +12,19 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
@@ -25,6 +32,11 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import dev.leshiy.data.AppPrefs
 import dev.leshiy.data.Profiles
+import dev.leshiy.data.TunnelRepository
+import dev.leshiy.data.UiEvents
+import dev.leshiy.data.UiMessage
+import dev.leshiy.data.UiMessageKind
+import dev.leshiy.data.isFailureEdge
 import dev.leshiy.ui.AppsViewModel
 import dev.leshiy.ui.ConnectViewModel
 import dev.leshiy.ui.ManageViewModel
@@ -33,6 +45,8 @@ import dev.leshiy.ui.ProvisionViewModel
 import dev.leshiy.ui.QrScanActivity
 import dev.leshiy.ui.SplitViewModel
 import dev.leshiy.ui.components.Atmosphere
+import dev.leshiy.ui.components.LeshiySnackbarHost
+import dev.leshiy.ui.components.LeshiySnackbarVisuals
 import dev.leshiy.ui.i18n.LangState
 import dev.leshiy.ui.i18n.LocalStrings
 import dev.leshiy.ui.i18n.stringsFor
@@ -52,6 +66,7 @@ import dev.leshiy.ui.screens.UpgradeScreen
 import dev.leshiy.ui.screens.VaultBackupScreen
 import dev.leshiy.ui.theme.LeshiyTheme
 import dev.leshiy.update.UpdateManager
+import uniffi.leshiy_mobile.ConnState
 
 class MainActivity : ComponentActivity() {
 
@@ -180,6 +195,27 @@ private fun AppNav(startDestination: String, onConnect: (String) -> Unit, onDisc
     }
     val context = androidx.compose.ui.platform.LocalContext.current
 
+    // App-wide snackbar surface + failure wiring.
+    val snackbarHost = remember { SnackbarHostState() }
+    val strings by rememberUpdatedState(LocalStrings.current)
+    LaunchedEffect(Unit) {
+        UiEvents.messages.collect { msg ->
+            snackbarHost.currentSnackbarData?.dismiss()
+            snackbarHost.showSnackbar(LeshiySnackbarVisuals(msg.text, msg.kind))
+        }
+    }
+    LaunchedEffect(Unit) {
+        var prev: ConnState? = null
+        TunnelRepository.status.collect { st ->
+            val next = st?.state ?: ConnState.DISCONNECTED
+            if (isFailureEdge(prev, next)) {
+                UiEvents.emit(UiMessage(strings.connFailed, UiMessageKind.CONNECTION_FAILURE))
+            }
+            prev = next
+        }
+    }
+
+    Box(Modifier.fillMaxSize()) {
     NavHost(nav, startDestination = startDestination) {
         composable(Route.CONNECT) {
             ConnectScreen(
@@ -317,5 +353,12 @@ private fun AppNav(startDestination: String, onConnect: (String) -> Unit, onDisc
                 onBack = { nav.popBackStack() },
             )
         }
+    }
+        LeshiySnackbarHost(
+            hostState = snackbarHost,
+            onRetry = { runCatching { Profiles.manager(context).activeUri() }.getOrNull()?.let(onConnect) },
+            onSwitch = { nav.navigate(Route.SERVERS) },
+            modifier = Modifier.align(Alignment.BottomCenter),
+        )
     }
 }
