@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Notify;
+use tokio::sync::Semaphore;
 
 /// Configuration for one full-tunnel session.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,13 +112,41 @@ const UDP_IDLE: Duration = Duration::from_secs(30);
 /// Above this many installed routes, warn about routing-table bloat / slow per-OS install.
 const ROUTE_WARN_THRESHOLD: usize = 5000;
 
+/// Cap on concurrently-serviced flows (TCP + UDP + ICMP-echo). Each device flow spawns a task
+/// holding a mux stream and a per-flow buffer; without a cap a local process opening sockets (or
+/// `ping -f`-ing many hosts) faster than they complete grows tasks/mux-streams without bound and
+/// exhausts memory (M10). Past the cap, new flows are dropped — which to the originating app looks
+/// like ordinary packet loss / an unreachable host, exactly what an overloaded link produces.
+const MAX_CONCURRENT_FLOWS: usize = 4096;
+
 /// Aborts the wrapped task on drop. Ties the detached domain-resolver task's lifetime to the
 /// engine future, so it stops the instant the session ends or is aborted (rather than
 /// continuing to mutate routes after disconnect).
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
+///
+/// On the *normal* shutdown path, prefer [`shutdown`](Self::shutdown), which additionally awaits
+/// the task's termination so no route-installing `.await` is still in flight (and racing the
+/// bypass teardown that runs next) — the `Drop` path is only the abnormal-cancellation backstop.
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+impl AbortOnDrop {
+    fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self(Some(handle))
+    }
+    /// Abort the task and wait for it to actually stop before returning. Combined with the
+    /// backends recording each bypass route *before* issuing its OS call, this guarantees the
+    /// resolver can neither leave a route unrecorded nor push a new one concurrently with the
+    /// teardown that runs immediately after — closing the cross-session route-leak (H7).
+    async fn shutdown(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+            let _ = handle.await; // returns Err(Cancelled); we only need it fully stopped
+        }
+    }
+}
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
-        self.0.abort();
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
     }
 }
 
@@ -182,10 +211,14 @@ impl TunEngine {
         // Large rule sets bloat the routing table — and on macOS/Windows each route is a
         // separate `route`/`netsh` subprocess, so a big list installs slowly. Warn so it's
         // diagnosable (the engine still proceeds).
-        let route_count = plan.via_tun.len() + plan.bypass.len();
+        // Include a lower-bound estimate of the domain-driven routes (≥1 per domain) so a large
+        // subscription list warns up front, not only once the resolver installs them (M12).
+        let domain_route_estimate = eff_include.domains.len() + eff_exclude.domains.len();
+        let route_count = plan.via_tun.len() + plan.bypass.len() + domain_route_estimate;
         if route_count > ROUTE_WARN_THRESHOLD {
             tracing::warn!(
                 route_count,
+                domain_route_estimate,
                 "split-tunnel: large rule set; route installation may be slow (esp. macOS/Windows)"
             );
         }
@@ -212,8 +245,8 @@ impl TunEngine {
         // (declared after `guard`, so dropped before it) stops the task before `guard`'s
         // teardown removes the routes it installed — clean on both normal exit and abort.
         let has_domains = !eff_include.domains.is_empty() || !eff_exclude.domains.is_empty();
-        let _resolver = has_domains.then(move || {
-            AbortOnDrop(tokio::spawn(crate::resolver::run_resolver(
+        let mut resolver = has_domains.then(move || {
+            AbortOnDrop::new(tokio::spawn(crate::resolver::run_resolver(
                 controller,
                 eff_include.domains,
                 eff_exclude.domains,
@@ -229,7 +262,12 @@ impl TunEngine {
         // caller signals `cancel`; we return normally and tear down in a controlled order, which
         // guarantees the route/DNS restore (`guard`) runs to completion before we return.
         let result = pump(device, cfg.mtu, tunnel, counters, cancel, reattach).await;
-        drop(_resolver); // stop the resolver BEFORE teardown removes its routes
+        // Stop the resolver BEFORE teardown removes its routes — and *await* its termination, so no
+        // in-flight route install can push into `installed_bypass` after teardown drains it (H7).
+        if let Some(r) = resolver.as_mut() {
+            r.shutdown().await;
+        }
+        drop(resolver);
         // Remove bypass routes in-process (fast) BEFORE dropping the guard, so a large rule set
         // doesn't hit the guard's slow per-route subprocess fallback (which makes disconnect take
         // minutes and wedges reconnect). No-op on Linux (its guard batches) / when there are none.
@@ -264,6 +302,8 @@ async fn pump(
     cancel: Arc<Notify>,
     reattach: Arc<Notify>,
 ) -> std::io::Result<()> {
+    // Shared across reattach so the flow cap is global to the session, not reset per device.
+    let flow_sem = Arc::new(Semaphore::new(MAX_CONCURRENT_FLOWS));
     loop {
         let mut ip_stack = netstack::build(device, mtu)?;
         let pumped = tokio::select! {
@@ -273,7 +313,7 @@ async fn pump(
                 Pumped::Stop(Ok(()))
             }
             () = reattach.notified() => Pumped::Reattach,
-            r = accept_loop(&mut ip_stack, tunnel.clone(), counters.clone()) => {
+            r = accept_loop(&mut ip_stack, tunnel.clone(), counters.clone(), flow_sem.clone()) => {
                 tracing::info!(?r, "tun engine accept loop exited");
                 Pumped::Stop(r)
             }
@@ -295,15 +335,23 @@ async fn accept_loop(
     ip_stack: &mut ipstack::IpStack,
     tunnel: Arc<dyn Tunnel>,
     counters: Arc<ByteCounters>,
+    flow_sem: Arc<Semaphore>,
 ) -> std::io::Result<()> {
     loop {
         match ip_stack.accept().await.map_err(to_io)? {
             IpStackStream::Tcp(tcp) => {
                 let dst = tcp.peer_addr();
+                // Bound concurrent flows (M10): drop the flow if we're at the cap. Held for the
+                // task's lifetime, so the permit frees when the flow ends.
+                let Ok(permit) = flow_sem.clone().try_acquire_owned() else {
+                    tracing::debug!(%dst, "flow cap reached; dropping tcp flow");
+                    continue;
+                };
                 tracing::debug!(%dst, "tcp flow opened");
                 let t = tunnel.clone();
                 let c = counters.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     if let Err(e) = pump_tcp(t, dst, tcp, c).await {
                         tracing::info!(%dst, "tcp flow ended: {e}");
                     }
@@ -311,10 +359,15 @@ async fn accept_loop(
             }
             IpStackStream::Udp(udp) => {
                 let dst = udp.peer_addr();
+                let Ok(permit) = flow_sem.clone().try_acquire_owned() else {
+                    tracing::debug!(%dst, "flow cap reached; dropping udp flow");
+                    continue;
+                };
                 tracing::debug!(%dst, "udp flow opened");
                 let t = tunnel.clone();
                 let c = counters.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     if let Err(e) = pump_udp(t, dst, udp, c).await {
                         tracing::info!(%dst, "udp flow ended: {e}");
                     }
@@ -324,9 +377,14 @@ async fn accept_loop(
             // session behind it, so an echo request is handled start-to-finish in one task.
             // ICMP echo rides the tunnel (ADR-0030); everything else is still dropped.
             IpStackStream::UnknownTransport(u) => {
+                let Ok(permit) = flow_sem.clone().try_acquire_owned() else {
+                    tracing::debug!("flow cap reached; dropping icmp echo");
+                    continue;
+                };
                 let t = tunnel.clone();
                 let c = counters.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     if let Err(e) = relay_icmp_echo(t, u, c).await {
                         tracing::debug!("icmp echo dropped: {e}");
                     }
