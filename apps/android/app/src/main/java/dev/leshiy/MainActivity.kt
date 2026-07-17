@@ -42,6 +42,7 @@ import dev.leshiy.ui.screens.ServerUsersScreen
 import dev.leshiy.ui.screens.ServersScreen
 import dev.leshiy.ui.screens.SettingsScreen
 import dev.leshiy.ui.screens.SplitScreen
+import dev.leshiy.ui.screens.UpgradeScreen
 import dev.leshiy.ui.theme.LeshiyTheme
 
 class MainActivity : ComponentActivity() {
@@ -100,6 +101,7 @@ private object Route {
     const val MANAGE = "manage"
     const val SERVER_DETAIL = "manage/server"
     const val SERVER_USERS = "manage/server/users"
+    const val SERVER_UPGRADE = "manage/server/upgrade"
     const val CREDENTIAL = "manage/credential"
     const val CASCADE = "cascade"
 }
@@ -113,6 +115,7 @@ private fun AppNav(onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
     val splitVm: SplitViewModel = viewModel()
     val provisionVm: ProvisionViewModel = viewModel()
     val manageVm: ManageViewModel = viewModel()
+    val upgradeVm: dev.leshiy.ui.UpgradeViewModel = viewModel()
     val cascadeVm: dev.leshiy.ui.CascadeViewModel = viewModel()
     // True while DeployScreen/ProvisioningScreen are serving a cascade hop (vs a standalone deploy).
     var cascadeMode by remember { mutableStateOf(false) }
@@ -234,6 +237,15 @@ private fun AppNav(onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
             ServerUsersScreen(
                 vm = manageVm,
                 onOpenCredential = { nav.navigate(Route.CREDENTIAL) },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable(Route.SERVER_UPGRADE) {
+            UpgradeScreen(
+                vm = upgradeVm,
+                // The vault record changed — without the refresh the Version card would come back
+                // showing the old image ref.
+                onDone = { manageVm.refreshServers(); nav.popBackStack() },
                 onBack = { nav.popBackStack() },
             )
         }
