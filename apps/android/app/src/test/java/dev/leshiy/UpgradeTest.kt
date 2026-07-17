@@ -79,6 +79,24 @@ class UpgradeTest {
         assertEquals(2, s.log.size)
     }
 
+    @Test fun a_step_starting_at_timestamp_zero_still_records_its_duration() {
+        val s = UpgradeState(running = true)
+            .applyEvent("Connect", "Started", "", nowMs = 0)
+            .applyEvent("Connect", "Done", "", nowMs = 1_000)
+        assertEquals(1_000L, s.stepMs[0])
+    }
+
+    @Test fun a_done_with_no_preceding_started_records_no_duration_and_does_not_misattribute() {
+        // Connect's Started/Done pair leaves a stale, nonzero activeSince behind. The old
+        // scalar-sentinel guard (`activeSince > 0L`) would treat that leftover as if it
+        // belonged to RunContainer and record a bogus duration for it.
+        val s = UpgradeState(running = true)
+            .applyEvent("Connect", "Started", "", nowMs = 1_000)
+            .applyEvent("Connect", "Done", "", nowMs = 3_000)
+            .applyEvent("RunContainer", "Done", "", nowMs = 5_000)
+        assertFalse(s.stepMs.containsKey(2))
+    }
+
     @Test fun a_detail_becomes_the_headline_subtitle() {
         val s = UpgradeState(running = true)
             .applyEvent("PullImage", "Started", "ghcr.io/o/r:v1.9.0", nowMs = 0)
