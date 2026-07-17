@@ -36,6 +36,9 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.leshiy.data.AppPrefs
 import dev.leshiy.data.BatteryOptimization
+import dev.leshiy.data.UiEvents
+import dev.leshiy.data.UiMessage
+import dev.leshiy.data.biometricAvailable
 import dev.leshiy.data.shouldPromptBattery
 import dev.leshiy.ui.components.NavRow
 import dev.leshiy.ui.components.PanelCard
@@ -208,6 +211,37 @@ fun SettingsScreen(
                     )
                 }
             })
+
+            Spacer(Modifier.size(6.dp))
+            SectionLabel(s.secSecurity)
+            var appLock by remember { mutableStateOf(AppPrefs.appLockEnabled(context)) }
+            PanelCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(s.appLockTitle, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onBackground)
+                        Text(s.appLockSub, style = MaterialTheme.typography.labelSmall, color = Dim)
+                    }
+                    Spacer(Modifier.size(12.dp))
+                    Switch(
+                        checked = appLock,
+                        onCheckedChange = { want ->
+                            if (want && !biometricAvailable(context)) {
+                                // Nothing enrolled to unlock with — refuse and explain, don't enable.
+                                UiEvents.emit(UiMessage(s.appLockNoBiometric))
+                            } else {
+                                appLock = want
+                                AppPrefs.setAppLockEnabled(context, want)
+                            }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Bg0,
+                            checkedTrackColor = Wisp,
+                            uncheckedTrackColor = MaterialTheme.colorScheme.surface,
+                            uncheckedBorderColor = MaterialTheme.colorScheme.outline,
+                        ),
+                    )
+                }
+            }
 
             Spacer(Modifier.size(6.dp))
             SectionLabel(s.language)

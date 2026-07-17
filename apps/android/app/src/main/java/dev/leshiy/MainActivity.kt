@@ -7,7 +7,7 @@ import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -25,6 +25,11 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
+import androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
+import androidx.biometric.BiometricPrompt
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
@@ -32,6 +37,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import dev.leshiy.data.AppPrefs
 import dev.leshiy.data.Profiles
+import dev.leshiy.data.shouldLock
 import dev.leshiy.data.TunnelRepository
 import dev.leshiy.data.UiEvents
 import dev.leshiy.data.UiMessage
@@ -54,6 +60,7 @@ import dev.leshiy.ui.screens.CascadeBuilderScreen
 import dev.leshiy.ui.screens.ConnectScreen
 import dev.leshiy.ui.screens.CredentialScreen
 import dev.leshiy.ui.screens.DeployScreen
+import dev.leshiy.ui.screens.LockScreen
 import dev.leshiy.ui.screens.ManageScreen
 import dev.leshiy.ui.screens.OnboardingScreen
 import dev.leshiy.ui.screens.ProvisioningScreen
@@ -68,9 +75,14 @@ import dev.leshiy.ui.theme.LeshiyTheme
 import dev.leshiy.update.UpdateManager
 import uniffi.leshiy_mobile.ConnState
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
 
     private var pendingUri: String? = null
+
+    /** App-lock UI gate. Read by [setContent]; the tunnel runs independently while locked. */
+    private val locked = mutableStateOf(false)
+    private var backgroundedAt = 0L
+    private var sawFirstStart = false
 
     private val vpnConsent =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -88,12 +100,19 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         LangState.init(this)
         UpdateManager.autoCheck(this)
+        // Cold start: lock immediately if the feature is on (before any UI is shown).
+        locked.value = AppPrefs.appLockEnabled(this)
         enableEdgeToEdge()
         setContent {
             val lang by LangState.lang.collectAsStateWithLifecycle()
             CompositionLocalProvider(LocalStrings provides stringsFor(lang)) {
                 LeshiyTheme {
                     Atmosphere {
+                        if (locked.value) {
+                            LaunchedEffect(Unit) { promptUnlock() }
+                            LockScreen(onUnlock = ::promptUnlock)
+                            return@Atmosphere
+                        }
                         var showOnboarding by remember {
                             mutableStateOf(
                                 shouldShowOnboarding(
@@ -151,6 +170,48 @@ class MainActivity : ComponentActivity() {
         runCatching { Profiles.manager(this).list().isNotEmpty() }.getOrDefault(false)
 
     private fun finishOnboarding() = AppPrefs.setOnboardingComplete(this, true)
+
+    override fun onStop() {
+        super.onStop()
+        backgroundedAt = SystemClock.elapsedRealtime()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // The first onStart follows onCreate (cold start already handled there); only re-lock on a
+        // genuine return from background, and only past the grace window.
+        if (!sawFirstStart) {
+            sawFirstStart = true
+            return
+        }
+        val elapsed = SystemClock.elapsedRealtime() - backgroundedAt
+        if (shouldLock(AppPrefs.appLockEnabled(this), elapsed)) locked.value = true
+    }
+
+    private fun promptUnlock() {
+        val prompt = BiometricPrompt(
+            this,
+            ContextCompat.getMainExecutor(this),
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    locked.value = false
+                }
+                // onAuthenticationError / failure: stay locked; the user retries via the button.
+            },
+        )
+        val s = stringsFor(LangState.lang.value)
+        val builder = BiometricPrompt.PromptInfo.Builder()
+            .setTitle(s.lockTitle)
+            .setSubtitle(s.lockPrompt)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Combined biometric + device-credential is only allowed together from API 30.
+            builder.setAllowedAuthenticators(BIOMETRIC_STRONG or DEVICE_CREDENTIAL)
+        } else {
+            builder.setAllowedAuthenticators(BIOMETRIC_STRONG)
+            builder.setNegativeButtonText(s.lockCancel)
+        }
+        runCatching { prompt.authenticate(builder.build()) }
+    }
 }
 
 private object Route {

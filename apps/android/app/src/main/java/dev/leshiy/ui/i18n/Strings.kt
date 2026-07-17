@@ -8,7 +8,10 @@ import java.util.Locale
 enum class Lang(val tag: String) { EN("en"), RU("ru") }
 
 /** Typed UI string table. One instance per language; selected via [LocalStrings]. */
-data class Strings(
+// NOT a `data class`: at 250+ fields the generated `copy$default` exceeds the JVM's 255-parameter
+// method limit (ClassFormatError). This table is only constructed (EnStrings/RuStrings) and read via
+// `s.foo` — copy/equals/hashCode/componentN are unused. See docs about splitting this god-object.
+class Strings(
     // Connect
     val stProtected: String,
     val stConnecting: String,
@@ -67,6 +70,14 @@ data class Strings(
     val deployFailedSnack: String,
     val batteryTitle: String,
     val batterySub: String,
+    val secSecurity: String,
+    val appLockTitle: String,
+    val appLockSub: String,
+    val appLockNoBiometric: String,
+    val lockTitle: String,
+    val lockPrompt: String,
+    val lockUnlock: String,
+    val lockCancel: String,
     // Servers
     val savedServers: String,
     val noServers: String,
@@ -336,6 +347,14 @@ val EnStrings = Strings(
     deployFailedSnack = "Deploy failed",
     batteryTitle = "Allow background activity",
     batterySub = "Let Leshiy run unrestricted so the tunnel survives sleep. Recommended if you use keep-alive.",
+    secSecurity = "Security",
+    appLockTitle = "App lock",
+    appLockSub = "Require your fingerprint or screen lock to open the app. The tunnel keeps running while locked.",
+    appLockNoBiometric = "Set up a fingerprint or screen lock first.",
+    lockTitle = "Unlock Leshiy",
+    lockPrompt = "Confirm it's you to open the app.",
+    lockUnlock = "Unlock",
+    lockCancel = "Cancel",
     savedServers = "Saved servers",
     noServers = "No servers yet. Paste a leshiy:// link or scan a QR code below.",
     active = "active",
@@ -584,6 +603,14 @@ val RuStrings = Strings(
     deployFailedSnack = "Развёртывание не удалось",
     batteryTitle = "Разрешить работу в фоне",
     batterySub = "Позвольте Leshiy работать без ограничений, чтобы туннель переживал сон. Рекомендуется при использовании keep-alive.",
+    secSecurity = "Безопасность",
+    appLockTitle = "Блокировка приложения",
+    appLockSub = "Требовать отпечаток или блокировку экрана для открытия приложения. Туннель продолжает работать при блокировке.",
+    appLockNoBiometric = "Сначала настройте отпечаток или блокировку экрана.",
+    lockTitle = "Разблокировать Leshiy",
+    lockPrompt = "Подтвердите, что это вы, чтобы открыть приложение.",
+    lockUnlock = "Разблокировать",
+    lockCancel = "Отмена",
     savedServers = "Сохранённые серверы",
     noServers = "Пока нет серверов. Вставьте ссылку leshiy:// или отсканируйте QR-код ниже.",
     active = "активный",
