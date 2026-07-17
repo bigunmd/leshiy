@@ -28,6 +28,9 @@ pub struct ServerInfo {
     pub downstream: Option<String>,
     /// True when this node exposes a connector credential (exit/middle) usable as a downstream.
     pub has_connector: bool,
+    /// The image ref currently running, so the UI can show `current → target` and whether an
+    /// upgrade would change anything.
+    pub image_ref: String,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -136,6 +139,7 @@ impl ServerManager {
                 role: r.role.clone(),
                 downstream: r.downstream.clone(),
                 has_connector: r.connector_uri.is_some(),
+                image_ref: r.image_ref.clone(),
             })
             .collect()
     }
@@ -379,5 +383,16 @@ mod tests {
         v.upsert(rec("berlin"));
         v.save(std::path::Path::new(&path), "right").unwrap();
         assert!(ServerManager::open(path, "wrong".into()).is_err());
+    }
+
+    #[test]
+    fn servers_expose_the_running_image_ref() {
+        let path = tmp();
+        let mut v = Vault::new();
+        v.upsert(rec("berlin")); // rec() sets image_ref: "img"
+        v.save(std::path::Path::new(&path), "pass").unwrap();
+
+        let sm = ServerManager::open(path, "pass".into()).unwrap();
+        assert_eq!(sm.servers()[0].image_ref, "img");
     }
 }
