@@ -64,6 +64,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true // BuildConfig.VERSION_NAME / DEBUG for the in-app updater
     }
     // The Rust bridge .so files are staged here by scripts/build-android-jni.sh.
     sourceSets["main"].jniLibs.srcDirs("src/main/jniLibs")
