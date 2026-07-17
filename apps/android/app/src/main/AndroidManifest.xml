@@ -60,5 +60,18 @@
                 <action android:name="android.net.VpnService" />
             </intent-filter>
         </service>
+
+        <!-- Quick Settings toggle. exported + BIND_QUICK_SETTINGS_TILE is the platform
+             contract for tiles: only SystemUI holds that permission, so nothing else can bind. -->
+        <service
+            android:name=".LeshiyTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_qs_leshiy"
+            android:label="Leshiy"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>
