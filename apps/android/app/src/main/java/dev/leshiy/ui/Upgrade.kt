@@ -31,7 +31,14 @@ data class UpgradeState(
     val label: String = "",
     /** Finalised per-step durations in ms, keyed by step index. */
     val stepMs: Map<Int, Long> = emptyMap(),
-    /** When the active step started, for its live timer. */
+    /**
+     * When the active step started, for its live timer.
+     *
+     * Only meaningful while [activeIndex] names the step it belongs to — a `Done` for some
+     * other index must not read this as its own start time. `0L` is a valid start time (a
+     * step can legitimately start at `nowMs = 0`), so [activeIndex] identity, not a
+     * greater-than-zero check, is what gates its use in [applyEvent].
+     */
     val activeSince: Long = 0L,
 )
 
@@ -46,7 +53,12 @@ fun UpgradeState.applyEvent(step: String, status: String, detail: String, nowMs:
         "Done" -> next.copy(
             doneCount = maxOf(next.doneCount, i + 1),
             activeIndex = -1,
-            stepMs = if (next.activeSince > 0L) next.stepMs + (i to (nowMs - next.activeSince)) else next.stepMs,
+            // Gate on step identity, not a timestamp sentinel: `activeSince` is only this
+            // step's start time when `activeIndex == i` — a stray Done for a step that never
+            // Started, or one arriving after a different step's stale activeSince, must not
+            // borrow someone else's start time, and a step that legitimately starts at
+            // nowMs = 0 must not have its duration silently dropped.
+            stepMs = if (next.activeIndex == i) next.stepMs + (i to (nowMs - next.activeSince)) else next.stepMs,
         )
         "Failed" -> next.copy(failedIndex = i, activeIndex = -1)
         else -> next
