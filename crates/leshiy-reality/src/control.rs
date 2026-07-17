@@ -123,7 +123,16 @@ pub async fn serve_control(
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     loop {
-        let (conn, _) = listener.accept().await?;
+        // A transient accept() error must not terminate the control listener and tear down the
+        // whole server (C1) — log and continue, like the REALITY accept loop.
+        let (conn, _) = match listener.accept().await {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!(error = %e, "control accept failed; continuing");
+                tokio::task::yield_now().await;
+                continue;
+            }
+        };
         let store = store.clone();
         let issuer = issuer.clone();
         tokio::spawn(async move {
@@ -154,7 +163,14 @@ async fn handle(
     //   .into_inner()              → UnixStream
     let mut stream = r.into_inner().into_inner();
     let resp = match serde_json::from_str::<Req>(line.trim()) {
-        Ok(req) => dispatch(req, &store, &issuer),
+        // `dispatch` performs synchronous, blocking SQLite I/O (WAL commits fsync). Run it on the
+        // blocking pool so it can't stall a Tokio worker — and any data-relay task sharing it (M3).
+        Ok(req) => {
+            let (store, issuer) = (store.clone(), issuer.clone());
+            tokio::task::spawn_blocking(move || dispatch(req, &store, &issuer))
+                .await
+                .unwrap_or_else(|_| Resp::err("internal error"))
+        }
         Err(e) => Resp::err(format!("bad request: {e}")),
     };
     let mut out = serde_json::to_string(&resp).unwrap_or_else(|_| "{\"ok\":false}".into());

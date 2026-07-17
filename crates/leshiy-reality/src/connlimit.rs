@@ -8,8 +8,28 @@
 //! TLS-fingerprint comparison, so this is not the active-probe path.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
+
+/// Collapse an address to its per-source rate-limiting bucket: an IPv4 /32 (the
+/// address itself), or an IPv6 /64 network (interface-id bits zeroed).
+///
+/// A single IPv6 end-user allocation is routinely a whole /64 (2^64 addresses)
+/// or larger, so keying the per-source cap on the bare address would let one
+/// actor mint effectively unlimited distinct sources and bypass it entirely (H2).
+/// Bucketing IPv6 to the /64 makes the cap meaningful against a single allocation.
+fn bucket(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => {
+            let mut octets = v6.octets();
+            for b in &mut octets[8..] {
+                *b = 0;
+            }
+            IpAddr::V6(Ipv6Addr::from(octets))
+        }
+    }
+}
 
 struct Inner {
     total: usize,
@@ -58,18 +78,21 @@ impl ConnLimiter {
     /// Try to admit a connection from `ip`. Returns a guard on success, or
     /// `None` if the total or per-IP cap is already reached.
     pub fn try_acquire(&self, ip: IpAddr) -> Option<ConnGuard> {
+        // Bucket to a /32 (v4) or /64 (v6) so the per-source cap can't be bypassed
+        // by rotating addresses within one IPv6 allocation (H2).
+        let key = bucket(ip);
         let mut g = self.inner.lock().unwrap();
         if g.total >= self.max_total {
             return None;
         }
-        let cur = g.per_ip.get(&ip).copied().unwrap_or(0);
+        let cur = g.per_ip.get(&key).copied().unwrap_or(0);
         if cur >= self.max_per_ip {
             return None;
         }
         g.total += 1;
-        g.per_ip.insert(ip, cur + 1);
+        g.per_ip.insert(key, cur + 1);
         Some(ConnGuard {
-            ip,
+            ip: key,
             inner: self.inner.clone(),
         })
     }
@@ -115,5 +138,34 @@ mod tests {
         let _a = l.try_acquire(ip("1.1.1.1")).unwrap();
         let _b = l.try_acquire(ip("2.2.2.2")).unwrap();
         assert!(l.try_acquire(ip("3.3.3.3")).is_none(), "total cap hit");
+    }
+
+    /// H2: distinct IPv6 addresses within the same /64 share one per-source
+    /// bucket, so an attacker can't rotate the interface-id to bypass the cap.
+    #[test]
+    fn ipv6_addresses_in_the_same_slash64_share_a_bucket() {
+        let l = ConnLimiter::new(100, 2);
+        let _g1 = l
+            .try_acquire(ip("2001:db8:abcd:1234::1"))
+            .expect("1st admitted");
+        let _g2 = l
+            .try_acquire(ip("2001:db8:abcd:1234::2"))
+            .expect("2nd admitted");
+        assert!(
+            l.try_acquire(ip("2001:db8:abcd:1234:ffff:ffff:ffff:ffff"))
+                .is_none(),
+            "3rd address in the same /64 must hit the per-source cap"
+        );
+    }
+
+    /// Addresses in different /64s are still independent.
+    #[test]
+    fn ipv6_addresses_in_different_slash64s_are_independent() {
+        let l = ConnLimiter::new(100, 1);
+        let _a = l.try_acquire(ip("2001:db8:abcd:1111::1")).unwrap();
+        assert!(
+            l.try_acquire(ip("2001:db8:abcd:2222::1")).is_some(),
+            "a different /64 must not share the bucket"
+        );
     }
 }
