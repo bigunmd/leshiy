@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.leshiy.ui.components.ConnectOrb
 import dev.leshiy.ui.components.IconBtn
+import dev.leshiy.ui.components.UpdateCard
 import dev.leshiy.ui.formatBytes
 import dev.leshiy.ui.i18n.LocalStrings
 import dev.leshiy.ui.icons.LeshiyIcons
@@ -76,6 +77,8 @@ fun ConnectScreen(
             Spacer(Modifier.weight(1f))
             IconBtn(LeshiyIcons.Gear, "Settings", tint = Dim, onClick = onOpenSettings)
         }
+
+        UpdateCard(Modifier.padding(horizontal = 18.dp))
 
         // Hero: orb + status + active-server chip.
         Column(
