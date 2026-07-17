@@ -163,6 +163,13 @@ pub struct Vault {
     records: Vec<ServerRecord>,
 }
 
+/// Outcome of merging backup records into a vault.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ImportSummary {
+    pub added: usize,
+    pub replaced: usize,
+}
+
 impl Vault {
     pub fn new() -> Self {
         Self::default()
@@ -240,6 +247,33 @@ impl Vault {
             rec.clone()
         };
         seal(std::slice::from_ref(&out), passphrase)
+    }
+
+    /// Seal every record under `passphrase` — the whole-vault backup form.
+    ///
+    /// The output is byte-compatible with an on-disk vault, so a phone backup restores through
+    /// `leshiy remote restore` and a CLI backup imports into the phone.
+    pub fn export_all(&self, passphrase: &str) -> Result<Vec<u8>> {
+        seal(&self.records, passphrase)
+    }
+
+    /// Merge `recs`, replacing any record with the same id.
+    ///
+    /// The conflict count uses id-only matching to agree with [`Vault::upsert`]. Counting with
+    /// [`Vault::get`] would be wrong: it also matches on label, so a backup record whose label
+    /// collided with a *different* local server would be reported replaced while `upsert`
+    /// actually appends it.
+    pub fn import_records(&mut self, recs: Vec<ServerRecord>) -> ImportSummary {
+        let mut summary = ImportSummary::default();
+        for rec in recs {
+            if self.records.iter().any(|r| r.id == rec.id) {
+                summary.replaced += 1;
+            } else {
+                summary.added += 1;
+            }
+            self.upsert(rec);
+        }
+        summary
     }
 }
 
@@ -396,5 +430,129 @@ mod tests {
         let recs = open(&blob, "share-pw").unwrap();
         assert!(matches!(recs[0].ssh_secret, SshSecret::None));
         assert_eq!(recs[0].clients.len(), 1);
+    }
+
+    #[test]
+    fn export_all_round_trips_every_record() {
+        let mut v = Vault::new();
+        v.upsert(sample());
+        let mut second = sample();
+        second.id = "srv2".into();
+        second.label = "other".into();
+        v.upsert(second);
+
+        let blob = v.export_all("backup-pw").unwrap();
+        let back = open(&blob, "backup-pw").unwrap();
+        assert_eq!(back.len(), 2);
+        let ids: Vec<&str> = back.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"srv1") && ids.contains(&"srv2"));
+    }
+
+    /// Migration is the whole point: a restored vault must still be able to manage its servers,
+    /// which it cannot do without the SSH secret.
+    #[test]
+    fn export_all_keeps_ssh_secrets() {
+        let mut v = Vault::new();
+        v.upsert(sample());
+        let blob = v.export_all("backup-pw").unwrap();
+        match &open(&blob, "backup-pw").unwrap()[0].ssh_secret {
+            SshSecret::Password(p) => assert_eq!(&**p, "hunter2"),
+            _ => panic!("ssh secret lost in backup"),
+        }
+    }
+
+    #[test]
+    fn export_all_wrong_passphrase_fails() {
+        let mut v = Vault::new();
+        v.upsert(sample());
+        let blob = v.export_all("right").unwrap();
+        assert!(open(&blob, "wrong").is_err());
+    }
+
+    #[test]
+    fn export_all_tamper_fails_aead() {
+        let mut v = Vault::new();
+        v.upsert(sample());
+        let mut blob = v.export_all("pw").unwrap();
+        let last = blob.len() - 1;
+        blob[last] ^= 0x01;
+        assert!(open(&blob, "pw").is_err());
+    }
+
+    #[test]
+    fn import_records_counts_added() {
+        let mut v = Vault::new();
+        let s = v.import_records(vec![sample()]);
+        assert_eq!(
+            s,
+            ImportSummary {
+                added: 1,
+                replaced: 0
+            }
+        );
+        assert_eq!(v.list().len(), 1);
+    }
+
+    #[test]
+    fn import_records_replaces_by_id_and_imported_wins() {
+        let mut v = Vault::new();
+        v.upsert(sample());
+        let mut incoming = sample();
+        incoming.host = "198.51.100.9".into();
+
+        let s = v.import_records(vec![incoming]);
+        assert_eq!(
+            s,
+            ImportSummary {
+                added: 0,
+                replaced: 1
+            }
+        );
+        assert_eq!(v.list().len(), 1);
+        assert_eq!(v.get("srv1").unwrap().host, "198.51.100.9");
+    }
+
+    /// `get` matches id OR label, but `upsert` replaces by id only. A label collision must
+    /// therefore count as *added* and leave both records in place — counting it as "replaced"
+    /// would report something the vault did not do.
+    #[test]
+    fn import_records_label_collision_counts_as_added() {
+        let mut v = Vault::new();
+        v.upsert(sample()); // id: srv1, label: my-vps
+        let mut incoming = sample();
+        incoming.id = "srv2".into();
+        incoming.label = "my-vps".into(); // same label, different server
+
+        let s = v.import_records(vec![incoming]);
+        assert_eq!(
+            s,
+            ImportSummary {
+                added: 1,
+                replaced: 0
+            }
+        );
+        assert_eq!(
+            v.list().len(),
+            2,
+            "both records must survive a label collision"
+        );
+    }
+
+    #[test]
+    fn import_records_counts_a_mixed_batch() {
+        let mut v = Vault::new();
+        v.upsert(sample());
+        let mut fresh = sample();
+        fresh.id = "srv2".into();
+
+        let s = v.import_records(vec![sample(), fresh]);
+        assert_eq!(
+            s,
+            ImportSummary {
+                added: 1,
+                replaced: 1
+            }
+        );
+        assert_eq!(v.list().len(), 2);
     }
 }
