@@ -30,6 +30,25 @@ run_server_container() {  # (re)create the leshiy container from the recorded im
     "$img" server --config /etc/leshiy/server.toml
 }
 
+# Let the server open unprivileged ICMP echo sockets, so `ping` works through the tunnel
+# (ADR-0030). The kernel default for ping_group_range is `1 0` — an empty range that excludes even
+# root — so without this the socket fails EACCES, the server declines the association, and the
+# client falls back to dropping ICMP with nothing anywhere saying why.
+#
+# Set on the host, not per-container: both modes share the host's network namespace (the native
+# binary by definition, and docker mode runs --network host, where docker refuses `--sysctl net.*`).
+# Deliberately duplicated from install.sh rather than shared — the two ship as separate files in
+# each release and cannot source each other. Keep them in step.
+#
+# Best-effort: without it everything else still works and only `ping` stays silent.
+enable_ping_sockets() {
+  sysctl -w 'net.ipv4.ping_group_range=0 2147483647' >/dev/null 2>&1 \
+    || echo "could not widen net.ipv4.ping_group_range — ping through the tunnel will not work" >&2
+  mkdir -p /etc/sysctl.d 2>/dev/null || true
+  printf 'net.ipv4.ping_group_range = 0 2147483647\n' \
+    > /etc/sysctl.d/99-leshiy-ping.conf 2>/dev/null || true
+}
+
 resolve_latest_tag() {  # $1 = owner/repo on GitHub → its newest server-train tag (e.g. v1.2.3)
   # The repo also publishes desktop-v*/android-v* releases that share GitHub's single "latest"
   # pointer but carry no server binary/image. Filter to the v-prefixed server train (`^v[0-9]`)
@@ -63,6 +82,10 @@ case "$verb" in
   upgrade)
     # Optional positional VERSION (e.g. v1.2.3) pins a specific release; omit for latest.
     ver="${1:-}"
+    # Before either mode: a box provisioned before 1.9.0 has never had this set, and upgrading is
+    # the moment the server first needs it (CAP_ICMP). Both modes share the host's netns, so one
+    # call covers them.
+    enable_ping_sockets
     if [ "$(mode)" = docker ]; then
       img="$(docker_image)"
       [ -n "$img" ] || { echo "no image recorded in $STATE" >&2; exit 1; }

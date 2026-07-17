@@ -137,7 +137,7 @@ install_leshiyctl() {  # day-2 dispatcher, published alongside install.sh in eac
 # only `ping` through the tunnel stays silent.
 enable_ping_sockets() {
   sysctl -w 'net.ipv4.ping_group_range=0 2147483647' >/dev/null 2>&1 \
-    || echo "could not widen net.ipv4.ping_group_range — ping through the tunnel will not work"
+    || echo "could not widen net.ipv4.ping_group_range — ping through the tunnel will not work" >&2
   mkdir -p /etc/sysctl.d 2>/dev/null || true
   printf 'net.ipv4.ping_group_range = 0 2147483647\n' \
     > /etc/sysctl.d/99-leshiy-ping.conf 2>/dev/null || true
