@@ -29,18 +29,19 @@ pub fn classify_full(ch: &[u8], cfg: &ServerAuthConfig, now_secs: u32) -> Classi
         Ok(f) => f,
         Err(_) => return ClassificationFull::Unauthed,
     };
-    let Some(client_pub) = fields.key_share_x25519 else {
-        return ClassificationFull::Unauthed;
-    };
-    if fields.session_id.len() != 32 {
-        return ClassificationFull::Unauthed;
-    }
-    // SNI must be present and allowed
-    match &fields.sni {
-        Some(s) if cfg.sni_allowed(s) => {}
-        _ => return ClassificationFull::Unauthed,
-    }
-    // recompute shared + auth_key, then open the session_id
+
+    // Collect each validity condition WITHOUT early-returning, so the X25519 DH + HKDF + AEAD
+    // work below runs for every well-formed ClientHello regardless of which check ultimately
+    // fails. Otherwise a disallowed-SNI probe returns before doing any crypto while a
+    // crypto-invalid-but-allowed-SNI probe pays the full cost — a timing oracle for "is my SNI
+    // guess correct?" (M2). Every rejection still lands on the identical silent relay fallback.
+    let sni_ok = matches!(&fields.sni, Some(s) if cfg.sni_allowed(s));
+    let session_ok = fields.session_id.len() == 32;
+    let keyshare_ok = fields.key_share_x25519.is_some();
+    // Use the real client key share when present, else a fixed dummy so the DH still runs.
+    let client_pub = fields.key_share_x25519.unwrap_or([0x09u8; 32]);
+
+    // recompute shared + auth_key, then open the session_id — unconditionally.
     let server_secret = StaticSecret::from(*cfg.static_secret);
     let shared = Zeroizing::new(
         server_secret
@@ -49,11 +50,19 @@ pub fn classify_full(ch: &[u8], cfg: &ServerAuthConfig, now_secs: u32) -> Classi
     );
     let auth_key = derive_auth_key(&shared, &fields.random);
     let aad = aad_from_client_hello(ch);
+    // Zero-padded so the AEAD open is attempted even when session_id is the wrong length.
     let mut sid = [0u8; 32];
-    sid.copy_from_slice(&fields.session_id);
-    let Some(pt) = open_session_id(&auth_key, &fields.random, &sid, &aad) else {
+    let n = fields.session_id.len().min(32);
+    sid[..n].copy_from_slice(&fields.session_id[..n]);
+    let opened = open_session_id(&auth_key, &fields.random, &sid, &aad);
+
+    // Now fold in every condition. Any failure => Unauthed (anti-probe).
+    let Some(pt) = opened else {
         return ClassificationFull::Unauthed;
     };
+    if !(sni_ok && session_ok && keyshare_ok) {
+        return ClassificationFull::Unauthed;
+    }
     let payload = AuthPayload::decode(&pt);
     // NOTE: short_id membership check removed — UserStore is now the registry.
     // timestamp window
@@ -126,8 +135,14 @@ pub async fn serve_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    // 1. read the client's first TLS record
-    let first = read_record(&mut client).await?; // Err here = bare/garbage TCP open → drop
+    // 1. read the client's first TLS record, bounded so a peer that completes the TCP
+    //    handshake and then stalls (or dribbles a partial record) can't pin its admission
+    //    slot forever — a slowloris against the ConnLimiter budget (H1). A timeout is the
+    //    same silent drop as a garbage/bare TCP open.
+    let first = match tokio::time::timeout(INITIAL_READ_TIMEOUT, read_record(&mut client)).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(_)) | Err(_) => return Ok(()),
+    };
     let first_bytes = first.encode();
     // 2. dial dest (bounded), forward the first record. Peek the SNI from the ClientHello so a
     //    multi-name deployment mirrors each advertised name to its OWN origin (per-SNI dest); a
@@ -195,8 +210,14 @@ where
                 }
             };
 
-            // steal dest's ServerHello (its first record), then drop dest
-            let dest_sh_rec = read_record(&mut dest).await?;
+            // steal dest's ServerHello (its first record), then drop dest. Bounded so a
+            // slow/throttled dest can't hang an authorized client's connect and pin its
+            // admission slot indefinitely (M1).
+            let dest_sh_rec =
+                match tokio::time::timeout(INITIAL_READ_TIMEOUT, read_record(&mut dest)).await {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(_)) | Err(_) => return Ok(()),
+                };
             let _ = dest.shutdown().await;
             drop(dest);
             let (cr, cw) = tokio::io::split(client);
@@ -245,6 +266,10 @@ where
 /// black-holed `dest` beyond this is treated as unreachable → `stall_then_drop`,
 /// so a connection can never hang indefinitely on the borrowed-site dial.
 const DEST_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Wall-clock bound on the first client record read and the dest ServerHello read. A peer (or a
+/// throttled dest) that stalls mid-read must be dropped rather than pin a `ConnLimiter` slot
+/// forever (H1/M1). Generous — a real handshake sends its first record immediately.
+const INITIAL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Connect to `dest`, bounded by `timeout`. Returns `None` on either a connect
 /// error or a timeout — both mean "dest is not usable right now" and map to the
@@ -509,7 +534,19 @@ pub async fn run_reality_server(
     // nor reflect onto dest.
     let limiter = crate::connlimit::ConnLimiter::new(MAX_TOTAL_CONNS, MAX_CONNS_PER_IP);
     loop {
-        let (sock, peer) = listener.accept().await?;
+        // A per-connection accept() error (EMFILE/ENFILE under FD pressure, or a peer that
+        // RSTs while still in the accept queue) must never terminate the listener: propagating
+        // it here would exit run_reality_server and, with no supervisor above, kill the whole
+        // daemon for every current and future user (C1). Log and carry on. A brief yield avoids
+        // a tight spin if the condition (e.g. FD exhaustion) persists.
+        let (sock, peer) = match listener.accept().await {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!(error = %e, "accept failed; continuing");
+                tokio::task::yield_now().await;
+                continue;
+            }
+        };
         // Admit before doing any work (including the dial to dest). On rejection
         // the socket is dropped immediately. Normalize a v4-mapped peer (dual-stack
         // listener) so a v4 client isn't limited separately from its `::ffff:` form.
@@ -754,5 +791,37 @@ mod tests {
             }
             ClassificationFull::Unauthed => panic!("should be authed"),
         }
+    }
+
+    /// H1: a client that completes the TCP handshake and then stays silent must be dropped by
+    /// the first-read timeout, not pin its admission slot forever. `start_paused` auto-advances
+    /// the virtual clock so the 10s `INITIAL_READ_TIMEOUT` elapses instantly; the outer 30s guard
+    /// only fails the test if `serve_connection` hangs.
+    #[tokio::test(start_paused = true)]
+    async fn first_read_times_out_on_a_stalled_client() {
+        use crate::handshake::ServerCert;
+        use crate::replay::ReplayGuard;
+
+        // Keep `client_side` alive but silent so the server's read pends (not EOF).
+        let (client_side, server_side) = tokio::io::duplex(4096);
+        let cfg = Arc::new(server_cfg([0x55; 32]));
+        let store: Arc<dyn UserStore> = Arc::new(InMemoryUserStore::from_short_ids([[
+            1u8, 2, 3, 4, 0, 0, 0, 0,
+        ]]));
+        let egress: Arc<dyn Egress> = Arc::new(crate::DirectEgress::new());
+        let cert = Arc::new(ServerCert::generate());
+        let replay = Arc::new(ReplayGuard::new(Duration::from_secs(240)));
+
+        let res = tokio::time::timeout(
+            Duration::from_secs(30),
+            serve_connection(server_side, cfg, store, egress, cert, replay, 1000),
+        )
+        .await;
+
+        assert!(
+            res.is_ok(),
+            "serve_connection must return after the first-read timeout, not hang on a silent peer"
+        );
+        drop(client_side);
     }
 }

@@ -42,11 +42,22 @@ fn check_ip(addr: IpAddr, allow_private: bool) -> Result<()> {
 
     let forbidden = match addr {
         IpAddr::V4(v4) => {
+            let o = v4.octets();
+            // CGNAT / carrier-grade NAT: 100.64.0.0/10 (RFC 6598) — routable-internally, a real
+            // SSRF pivot target, and not covered by `is_private()`. Grouped with private space.
+            let is_cgnat = o[0] == 100 && (o[1] & 0xc0) == 64;
+            // Other special-use v4 blocks that are never a legitimate public relay target,
+            // forbidden regardless of `allow_private`: 192.0.0.0/24 (IETF protocol assignments),
+            // 198.18.0.0/15 (benchmarking, RFC 2544), 240.0.0.0/4 (reserved / class E).
+            let is_special = (o[0] == 192 && o[1] == 0 && o[2] == 0)
+                || (o[0] == 198 && (o[1] == 18 || o[1] == 19))
+                || (o[0] >= 240);
             v4.is_unspecified()
                 || v4.is_multicast()
                 || v4.is_link_local()
                 || v4.is_broadcast()
-                || (!allow_private && (v4.is_loopback() || v4.is_private()))
+                || is_special
+                || (!allow_private && (v4.is_loopback() || v4.is_private() || is_cgnat))
         }
         IpAddr::V6(v6) => {
             // fc00::/7 (unique-local) — checked by hand; `is_unique_local` is unstable.
@@ -160,6 +171,32 @@ mod tests {
         assert!(check_ip(ip("10.0.0.1"), false).is_err());
         assert!(check_ip(ip("172.16.0.1"), false).is_err());
         assert!(check_ip(ip("192.168.1.1"), false).is_err());
+    }
+
+    /// CGNAT 100.64.0.0/10 (RFC 6598) is an SSRF pivot target `is_private()` misses; blocked by
+    /// default, opt-in with `allow_private` like other private space (M13).
+    #[test]
+    fn cgnat_blocked_by_default_allowed_on_opt_in() {
+        assert!(check_ip(ip("100.64.0.1"), false).is_err());
+        assert!(check_ip(ip("100.100.50.1"), false).is_err());
+        assert!(check_ip(ip("100.127.255.254"), false).is_err());
+        assert!(check_ip(ip("100.64.0.1"), true).is_ok());
+        // Boundaries: 100.63.x and 100.128.x are outside the /10 and stay public.
+        assert!(check_ip(ip("100.63.255.255"), false).is_ok());
+        assert!(check_ip(ip("100.128.0.1"), false).is_ok());
+    }
+
+    /// Special-use v4 blocks are forbidden regardless of `allow_private` (M13).
+    #[test]
+    fn special_use_v4_blocked_always() {
+        assert!(check_ip(ip("192.0.0.1"), true).is_err()); // 192.0.0.0/24
+        assert!(check_ip(ip("198.18.0.1"), true).is_err()); // 198.18.0.0/15
+        assert!(check_ip(ip("198.19.255.1"), true).is_err());
+        assert!(check_ip(ip("240.0.0.1"), true).is_err()); // 240.0.0.0/4
+        assert!(check_ip(ip("255.255.255.254"), true).is_err());
+        // Adjacent public addresses unaffected.
+        assert!(check_ip(ip("192.0.1.1"), false).is_ok());
+        assert!(check_ip(ip("198.20.0.1"), false).is_ok());
     }
 
     #[test]
