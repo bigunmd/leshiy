@@ -12,8 +12,8 @@ import uniffi.leshiy_mobile.ServerInfo
 class ManageSudoTest {
     private fun vmWithServers(): ManageViewModel = ManageViewModel().apply {
         servers.value = listOf(
-            ServerInfo(id = "berlin", label = "Berlin", host = "1.2.3.4", port = 22u, sudo = true, role = "single", downstream = null, hasConnector = false),
-            ServerInfo(id = "oslo", label = "Oslo", host = "5.6.7.8", port = 22u, sudo = false, role = "single", downstream = null, hasConnector = false),
+            ServerInfo(id = "berlin", label = "Berlin", host = "1.2.3.4", port = 22u, sudo = true, role = "single", downstream = null, hasConnector = false, imageRef = "ghcr.io/bigunmd/leshiy:v1.9.0"),
+            ServerInfo(id = "oslo", label = "Oslo", host = "5.6.7.8", port = 22u, sudo = false, role = "single", downstream = null, hasConnector = false, imageRef = "ghcr.io/bigunmd/leshiy:v1.9.0"),
         )
     }
 
