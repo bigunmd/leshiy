@@ -14,6 +14,7 @@ import android.net.IpPrefix
 import android.net.Network
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.graphics.drawable.Icon
 import android.os.SystemClock
 import android.util.Log
 import dev.leshiy.data.AppPrefs
@@ -25,6 +26,8 @@ import dev.leshiy.data.TunnelRepository
 import dev.leshiy.data.cidrParts
 import dev.leshiy.data.mergeDomainRoutes
 import dev.leshiy.data.perAppPlan
+import dev.leshiy.ui.i18n.LangState
+import dev.leshiy.ui.i18n.stringsFor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -55,13 +58,16 @@ class LeshiyVpnService : VpnService() {
             }
         }
 
-        // Explicit URI from the UI, or (always-on / boot) the persisted active profile.
+        // Foreground promptly — required within 5s when launched via
+        // startForegroundService (QS tile), and before any potentially slow work.
+        LangState.init(applicationContext)
+        startForeground(NOTIFICATION_ID, buildNotification(activeProfileName()))
+
+        // Explicit URI from the UI, or (always-on / boot / tile) the persisted active profile.
         val uri = intent?.getStringExtra(EXTRA_URI)
             ?: dev.leshiy.data.Profiles.manager(applicationContext).activeUri()
-            ?: return START_NOT_STICKY
+            ?: run { stopTunnel(); return START_NOT_STICKY }
 
-        // Foreground promptly; domain resolution + establish run async so DNS never blocks the UI.
-        startForeground(NOTIFICATION_ID, buildNotification())
         scope.launch { buildAndStart(uri) }
         return START_STICKY
     }
@@ -344,17 +350,45 @@ class LeshiyVpnService : VpnService() {
         super.onDestroy()
     }
 
-    private fun buildNotification(): Notification {
+    /** Display name of the active profile, or null when unnamed/absent. */
+    private fun activeProfileName(): String? =
+        runCatching {
+            dev.leshiy.data.Profiles.manager(applicationContext)
+                .list().firstOrNull { it.isActive }?.name
+        }.getOrNull()?.takeIf { it.isNotBlank() }
+
+    private fun buildNotification(profileName: String?): Notification {
         val mgr = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             mgr.createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, "Leshiy VPN", NotificationManager.IMPORTANCE_LOW),
             )
         }
+        val s = stringsFor(LangState.lang.value)
+        val openApp = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val stop = PendingIntent.getService(
+            this,
+            1,
+            Intent(this, LeshiyVpnService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("Leshiy")
-            .setContentText("Tunnel active")
-            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setContentText(profileName?.let { String.format(s.notifConnected, it) } ?: s.notifConnectedPlain)
+            .setSmallIcon(R.drawable.ic_qs_leshiy)
+            .setContentIntent(openApp)
+            .addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(this, R.drawable.ic_qs_leshiy),
+                    s.notifDisconnect,
+                    stop,
+                ).build(),
+            )
             .setOngoing(true)
             .build()
     }
