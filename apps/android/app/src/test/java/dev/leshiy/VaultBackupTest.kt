@@ -36,13 +36,22 @@ class VaultBackupTest {
     }
 
     @Test fun summary_reports_added_only() {
-        assertEquals("Imported 3 servers", importSummary(EnStrings, ImportReport(3u, 0u)))
+        assertEquals("Servers imported: 3", importSummary(EnStrings, ImportReport(3u, 0u)))
     }
 
     @Test fun summary_reports_replacements_too() {
         assertEquals(
-            "Imported 3 servers (1 replaced an existing record)",
+            "Servers imported: 3 (replaced: 1)",
             importSummary(EnStrings, ImportReport(3u, 1u)),
+        )
+    }
+
+    /** A one-server backup is the common migration case; "Imported 1 servers" would be wrong. */
+    @Test fun summary_reads_correctly_for_a_single_server() {
+        assertEquals("Servers imported: 1", importSummary(EnStrings, ImportReport(1u, 0u)))
+        assertEquals(
+            "Servers imported: 1 (replaced: 1)",
+            importSummary(EnStrings, ImportReport(1u, 1u)),
         )
     }
 }

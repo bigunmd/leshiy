@@ -42,7 +42,16 @@ class VaultBackupViewModel : ViewModel() {
 
     /** Merge a backup blob into the vault and publish what changed. */
     fun import(bytes: ByteArray, pass: String) = op("import") {
+        // Drop any earlier summary first: on failure the assignment below never runs, and a stale
+        // "imported N servers" sitting next to the new error would claim a success that didn't
+        // happen.
+        report.value = null
         report.value = VaultHolder.get()!!.importBackup(bytes, pass)
         refreshServers()
+    }
+
+    /** Surface a failure the screen hit on its own (reading the picked file). */
+    fun fail(e: Throwable) {
+        message.value = e.message ?: "failed"
     }
 }
