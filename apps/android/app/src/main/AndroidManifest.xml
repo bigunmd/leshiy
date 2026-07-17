@@ -13,6 +13,8 @@
          user through the one-time "allow installs from this source" grant on first use. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Reconnect the active profile after a reboot (BootReceiver), gated on a user toggle. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
@@ -53,6 +55,18 @@
         <receiver
             android:name=".KeepalivePingReceiver"
             android:exported="false" />
+
+        <!-- Reconnect the active profile after a reboot or an app self-update. exported=true is
+             required to receive the system BOOT_COMPLETED broadcast; MY_PACKAGE_REPLACED is
+             delivered only to our own package. The gate is BootReceiver + shouldAutoStart. -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <service
             android:name=".LeshiyVpnService"

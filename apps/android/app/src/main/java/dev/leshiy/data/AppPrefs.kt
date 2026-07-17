@@ -39,6 +39,26 @@ object AppPrefs {
     fun setSleepKeepalive(context: Context, value: Boolean) =
         prefs(context).edit().putBoolean("sleep_keepalive", value).apply()
 
+    /**
+     * Reconnect the active profile after a reboot or an app self-update, via [BootReceiver]. Off by
+     * default: auto-starting a VPN on boot without an explicit opt-in is surprising, and Android's
+     * native always-on VPN covers users who want it at the system level. When on, the tunnel is
+     * re-established whenever the toggle, consent and an active profile all hold (see
+     * [shouldAutoStart]).
+     */
+    fun reconnectOnBoot(context: Context): Boolean =
+        prefs(context).getBoolean("reconnect_on_boot", false)
+
+    fun setReconnectOnBoot(context: Context, value: Boolean) =
+        prefs(context).edit().putBoolean("reconnect_on_boot", value).apply()
+
+    /** True once the user has finished or skipped first-run onboarding. See [shouldShowOnboarding]. */
+    fun onboardingComplete(context: Context): Boolean =
+        prefs(context).getBoolean("onboarding_complete", false)
+
+    fun setOnboardingComplete(context: Context, value: Boolean) =
+        prefs(context).edit().putBoolean("onboarding_complete", value).apply()
+
     /** Epoch ms of the last GitHub release check (launch checks are throttled to 24h). */
     fun lastUpdateCheck(context: Context): Long = prefs(context).getLong("last_update_check", 0L)
 
