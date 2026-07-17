@@ -12,6 +12,8 @@ use tun::AbstractDevice; // brings `tun_name()` into scope for the Wintun adapte
 
 const NETSH: &str = "netsh";
 const REG: &str = "reg";
+/// Used only for the IPv6 binding (ADR-0032); everything else here is netsh or the IP Helper API.
+const POWERSHELL: &str = "powershell";
 
 pub struct WindowsOps;
 
@@ -200,18 +202,44 @@ impl PrivilegedOps for WindowsOps {
             );
         }
 
-        // 4. IPv6 leak mitigation (fail-closed): disable IPv6 binding on the original
-        //    interface; restore on drop. Skipped in Include mode. (Full IPv6 is out of scope.)
-        // Applied when the caller asked (IPv4-only session) OR when we meant to carry v6 but
-        // couldn't assign the address. Skipped when v6 is genuinely carried, and in Include mode.
+        // 4. IPv6 leak mitigation (fail-closed): unbind IPv6 from the egress adapter, so v6 has
+        //    no source address and `connect()` fails instantly — which is the whole point.
+        //    Windows prefers IPv6 (RFC 6724), so the failure must be immediate and local or the
+        //    stack never falls back to v4. Measured on real Windows (ADR-0032): a v6-only connect
+        //    fails in 48ms this way, versus 10s — i.e. never — with a route blackhole.
+        //
+        //    This is the analogue of Linux's `disable_ipv6` sysctl and macOS's
+        //    `networksetup -setv6off`; Windows was the odd one out only by accident. The netsh
+        //    this replaces (`interface ipv6 set interface <n> disabled`) bound its bare
+        //    `disabled` to netsh's *forwarding* positional, so it silently did nothing for months
+        //    while every v6-capable site bypassed the tunnel.
+        //
+        //    Applied when the caller asked (IPv4-only session) OR when we meant to carry v6 but
+        //    couldn't assign the address. Skipped when v6 is genuinely carried, and in Include
+        //    mode (where the un-tunneled majority must stay reachable).
         let apply_v6off = ipv6_killswitch || (plan.tun_addr6.is_some() && !carry_v6);
-        let mut v6_disabled_iface = None;
-        if apply_v6off && let Some(name) = &orig_iface {
-            let _ = cmd::run(
-                NETSH,
-                &["interface", "ipv6", "set", "interface", name, "disabled"],
-            );
-            v6_disabled_iface = Some(name.clone());
+        let mut v6_disabled_idx = None;
+        if apply_v6off && let Some(idx) = orig_idx {
+            match v6_binding_enabled(idx) {
+                // Only touch a binding that is actually on, and only remember it once the command
+                // has *succeeded* — teardown must never re-enable IPv6 the operator had already
+                // turned off themselves, nor one we failed to disable.
+                Some(true) => {
+                    match cmd::run(
+                        POWERSHELL,
+                        &as_argv(&cmd::win_v6_binding_set_args(idx, false)),
+                    ) {
+                        Ok(()) => v6_disabled_idx = Some(idx),
+                        Err(e) => tracing::error!(
+                            "failed to disable IPv6 on the egress adapter ({e}); IPv6 will bypass the tunnel"
+                        ),
+                    }
+                }
+                Some(false) => tracing::debug!("IPv6 already unbound on the egress adapter"),
+                None => tracing::error!(
+                    "could not read the egress adapter's IPv6 binding; IPv6 may bypass the tunnel"
+                ),
+            }
         }
 
         let controller = Arc::new(WindowsController {
@@ -228,7 +256,7 @@ impl PrivilegedOps for WindowsOps {
             tun_iface: iface,
             orig_iface: orig_iface_str,
             gateway,
-            v6_disabled_iface,
+            v6_disabled_idx,
             smart_backup,
             installed_bypass,
         };
@@ -368,6 +396,18 @@ fn original_iface_name(idx: u32) -> Option<String> {
     cmd::parse_win_iface_name(&out, idx)
 }
 
+/// Borrow a built arg list as the `&[&str]` the runner takes.
+fn as_argv(args: &[String]) -> Vec<&str> {
+    args.iter().map(String::as_str).collect()
+}
+
+/// Whether IPv6 is currently bound to the adapter carrying `idx`. `None` if it can't be read —
+/// which the caller must treat as "don't touch", never as "already off".
+fn v6_binding_enabled(idx: u32) -> Option<bool> {
+    let out = cmd::run_capture(POWERSHELL, &as_argv(&cmd::win_v6_binding_query_args(idx))).ok()?;
+    cmd::parse_powershell_bool(&out)
+}
+
 /// Read the current `DisableSmartNameResolution` policy value (as a string), or `None`
 /// if unset — so teardown can restore exactly (delete vs. set back).
 fn read_smart_resolution_policy() -> Option<String> {
@@ -395,8 +435,9 @@ struct WindowsTeardown {
     orig_iface: String,
     /// Original gateway, shared by all bypass routes.
     gateway: String,
-    /// `Some(name)` only if we actually disabled IPv6 on that interface (Exclude mode).
-    v6_disabled_iface: Option<String>,
+    /// `Some(ifindex)` only if we actually unbound IPv6 from that adapter and the command
+    /// succeeded — so teardown can never re-enable IPv6 that the operator had off to begin with.
+    v6_disabled_idx: Option<u32>,
     smart_backup: Option<String>,
     /// All bypass routes still installed (static + resolver-added) — removed on teardown.
     installed_bypass: Arc<Mutex<Vec<Cidr>>>,
@@ -454,11 +495,20 @@ impl Drop for WindowsTeardown {
             }
         }
 
-        if let Some(name) = &self.v6_disabled_iface {
-            let _ = cmd::run(
-                NETSH,
-                &["interface", "ipv6", "set", "interface", name, "enabled"],
-            );
+        // Give the user their IPv6 back. Only fires when we were the one that took it away; the
+        // command this replaces ran unconditionally and — because netsh read its bare `enabled`
+        // as the *forwarding* positional — left the NIC configured as an IPv6 router after every
+        // single disconnect, a state it had never been in.
+        if let Some(idx) = self.v6_disabled_idx {
+            let args = cmd::win_v6_binding_set_args(idx, true);
+            if let Err(e) = cmd::run(POWERSHELL, &as_argv(&args)) {
+                tracing::error!(
+                    ifindex = idx,
+                    "failed to restore IPv6 on the egress adapter ({e}); re-enable it with: \
+                     Get-NetAdapter -InterfaceIndex {idx} | \
+                     Enable-NetAdapterBinding -ComponentID ms_tcpip6"
+                );
+            }
         }
     }
 }

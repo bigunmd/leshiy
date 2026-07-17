@@ -129,6 +129,61 @@ pub(crate) fn parse_win_iface_name(table: &str, want_idx: u32) -> Option<String>
     })
 }
 
+/// Fixed prefix for every PowerShell invocation: no profile (an operator's `$PROFILE` must not
+/// change what a privileged helper runs) and non-interactive (never block waiting on a prompt).
+#[cfg(any(target_os = "windows", test))]
+fn powershell_prefix() -> Vec<String> {
+    vec![
+        "-NoProfile".into(),
+        "-NonInteractive".into(),
+        "-Command".into(),
+    ]
+}
+
+/// Read whether IPv6 (`ms_tcpip6`) is bound to the adapter carrying `ifindex`.
+///
+/// Keyed on the interface index rather than a name: it comes from the live default route, so it
+/// needs no parsing and cannot be confused by an adapter whose name has a space in it.
+/// `ifindex` is a `u32` formatted into the command, so there is nothing here to quote or escape.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn win_v6_binding_query_args(ifindex: u32) -> Vec<String> {
+    let mut v = powershell_prefix();
+    v.push(format!(
+        "(Get-NetAdapter -InterfaceIndex {ifindex} | \
+         Get-NetAdapterBinding -ComponentID ms_tcpip6).Enabled"
+    ));
+    v
+}
+
+/// Bind or unbind IPv6 (`ms_tcpip6`) on the adapter carrying `ifindex`.
+///
+/// This is the Windows analogue of Linux's `disable_ipv6` sysctl and macOS's
+/// `networksetup -setv6off`: it takes IPv6 off the NIC outright, so there is no source address
+/// and `connect()` fails immediately rather than hanging — which is what lets RFC 6724 fall
+/// straight back to IPv4. Measured on real Windows: a v6-only connect fails in 48ms this way
+/// versus 10s (i.e. never) with a route blackhole. See ADR-0032.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn win_v6_binding_set_args(ifindex: u32, enable: bool) -> Vec<String> {
+    let verb = if enable { "Enable" } else { "Disable" };
+    let mut v = powershell_prefix();
+    v.push(format!(
+        "Get-NetAdapter -InterfaceIndex {ifindex} | \
+         {verb}-NetAdapterBinding -ComponentID ms_tcpip6"
+    ));
+    v
+}
+
+/// PowerShell renders a `[bool]` as `True`/`False`. Anything else (an error, an empty result from
+/// a vanished adapter) is `None` — the caller must not guess.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn parse_powershell_bool(out: &str) -> Option<bool> {
+    match out.trim() {
+        "True" => Some(true),
+        "False" => Some(false),
+        _ => None,
+    }
+}
+
 /// `netsh interface ipv6 add address <iface> <v6>` — add an IPv6 address to the tun adapter so
 /// IPv6 can ride the tunnel (the `tun` crate assigns only the v4 address at creation).
 #[cfg(any(target_os = "windows", test))]
@@ -422,6 +477,69 @@ Idx     Met         MTU          State                Name
             parse_win_iface_name(" 12          25        1500  connected", 12),
             None
         );
+    }
+
+    /// The exact commands verified by hand on real Windows (ADR-0032): 382ms to disable with no
+    /// adapter rebind, after which a v6-only connect fails in 48ms.
+    #[test]
+    fn win_v6_binding_args_build() {
+        assert_eq!(
+            win_v6_binding_set_args(7, false),
+            vec![
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-NetAdapter -InterfaceIndex 7 | Disable-NetAdapterBinding -ComponentID ms_tcpip6",
+            ]
+        );
+        assert_eq!(
+            win_v6_binding_set_args(7, true),
+            vec![
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-NetAdapter -InterfaceIndex 7 | Enable-NetAdapterBinding -ComponentID ms_tcpip6",
+            ]
+        );
+        assert_eq!(
+            win_v6_binding_query_args(7),
+            vec![
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "(Get-NetAdapter -InterfaceIndex 7 | Get-NetAdapterBinding -ComponentID ms_tcpip6).Enabled",
+            ]
+        );
+    }
+
+    /// `-NoProfile` is not cosmetic: without it an operator's `$PROFILE` runs inside a privileged
+    /// helper's subprocess and can redefine the very cmdlets we rely on.
+    #[test]
+    fn powershell_is_invoked_without_a_profile_and_non_interactively() {
+        for args in [
+            win_v6_binding_set_args(1, true),
+            win_v6_binding_set_args(1, false),
+            win_v6_binding_query_args(1),
+        ] {
+            assert_eq!(&args[0], "-NoProfile", "{args:?}");
+            assert_eq!(&args[1], "-NonInteractive", "{args:?}");
+        }
+    }
+
+    #[test]
+    fn powershell_bool_parses_only_a_real_bool() {
+        assert_eq!(parse_powershell_bool("True\r\n"), Some(true));
+        assert_eq!(parse_powershell_bool("False\n"), Some(false));
+        assert_eq!(parse_powershell_bool(" True "), Some(true));
+        // An empty result (adapter gone) or an error must not be read as "already disabled" —
+        // that would have us skip the kill-switch and leak, or "restore" a binding we never
+        // touched.
+        assert_eq!(parse_powershell_bool(""), None);
+        assert_eq!(
+            parse_powershell_bool("Get-NetAdapter : No matching interface"),
+            None
+        );
+        assert_eq!(parse_powershell_bool("true"), None);
     }
 
     #[test]
