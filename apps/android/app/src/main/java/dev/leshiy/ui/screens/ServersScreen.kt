@@ -23,17 +23,23 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.leshiy.data.fastestReachable
+import dev.leshiy.ui.Latency
+import dev.leshiy.ui.LatencyViewModel
 import dev.leshiy.ui.ProfilesViewModel
 import dev.leshiy.ui.components.Field
 import dev.leshiy.ui.components.IconBtn
+import dev.leshiy.ui.components.OutlineButton
 import dev.leshiy.ui.components.PanelCard
 import dev.leshiy.ui.components.PrimaryButton
 import dev.leshiy.ui.components.ScreenFrame
 import dev.leshiy.ui.components.SectionLabel
+import dev.leshiy.ui.components.Spinner
 import dev.leshiy.ui.i18n.LocalStrings
 import dev.leshiy.ui.icons.LeshiyIcons
 import dev.leshiy.ui.theme.Dim
 import dev.leshiy.ui.theme.Moss
+import dev.leshiy.ui.theme.Warn
 import dev.leshiy.ui.theme.Wisp
 
 @Composable
@@ -46,6 +52,11 @@ fun ServersScreen(
 ) {
     val s = LocalStrings.current
     val profiles by vm.profiles.collectAsStateWithLifecycle()
+    val latencyVm: LatencyViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
+    val results by latencyVm.results.collectAsStateWithLifecycle()
+    val fastest = fastestReachable(results.mapValues { (_, v) -> (v as? Latency.Reachable)?.ms })
+    // Ping when the set of servers changes (covers screen open); activating doesn't re-ping.
+    androidx.compose.runtime.LaunchedEffect(profiles.map { it.id }) { latencyVm.ping(profiles) }
     val clipboard = LocalClipboardManager.current
     var name by remember { mutableStateOf("") }
     var uri by remember { mutableStateOf("") }
@@ -86,7 +97,18 @@ fun ServersScreen(
                                 color = if (p.isActive) Wisp else Dim,
                             )
                         }
+                        LatencyTag(results[p.id], isFastest = p.id == fastest)
+                        Spacer(Modifier.width(8.dp))
                         IconBtn(LeshiyIcons.Trash, s.remove, tint = MaterialTheme.colorScheme.error) { vm.remove(p.id) }
+                    }
+                }
+            }
+
+            if (profiles.isNotEmpty()) {
+                item {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlineButton(s.useFastest, onClick = { latencyVm.fastestId()?.let(vm::activate) }, modifier = Modifier.weight(1f))
+                        OutlineButton(s.rePing, onClick = { latencyVm.ping(profiles) }, modifier = Modifier.weight(1f))
                     }
                 }
             }
@@ -117,5 +139,20 @@ fun ServersScreen(
                 }
             }
         }
+    }
+}
+
+/** Per-server latency: a spinner while measuring, "<ms> ms" (with a ★ on the fastest), or unreachable. */
+@Composable
+private fun LatencyTag(latency: Latency?, isFastest: Boolean) {
+    val s = LocalStrings.current
+    when (latency) {
+        Latency.Pinging -> Spinner(size = 12, color = Dim, stroke = 2)
+        is Latency.Reachable -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            if (isFastest) Text("★ ${s.fastest}", style = MaterialTheme.typography.labelSmall, color = Wisp)
+            Text("${latency.ms} ms", style = MaterialTheme.typography.labelSmall, color = if (isFastest) Wisp else Dim)
+        }
+        Latency.Unreachable -> Text(s.latencyUnreachable, style = MaterialTheme.typography.labelSmall, color = Warn)
+        null -> {}
     }
 }

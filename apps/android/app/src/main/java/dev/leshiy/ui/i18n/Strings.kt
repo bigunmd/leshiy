@@ -86,6 +86,10 @@ interface Strings {
     val statLatency: String
     val statDown: String
     val statUp: String
+    val latencyUnreachable: String
+    val fastest: String
+    val useFastest: String
+    val rePing: String
     // Servers
     val savedServers: String
     val noServers: String
@@ -365,6 +369,10 @@ val EnStrings: Strings = object : Strings {
     override val statLatency = "Latency"
     override val statDown = "Download rate"
     override val statUp = "Upload rate"
+    override val latencyUnreachable = "unreachable"
+    override val fastest = "fastest"
+    override val useFastest = "Use fastest"
+    override val rePing = "Re-ping"
     override val savedServers = "Saved servers"
     override val noServers = "No servers yet. Paste a leshiy:// link or scan a QR code below."
     override val active = "active"
@@ -624,6 +632,10 @@ val RuStrings: Strings = object : Strings {
     override val statLatency = "Задержка"
     override val statDown = "Скорость загрузки"
     override val statUp = "Скорость отдачи"
+    override val latencyUnreachable = "недоступен"
+    override val fastest = "быстрейший"
+    override val useFastest = "Выбрать быстрейший"
+    override val rePing = "Пере-пинг"
     override val savedServers = "Сохранённые серверы"
     override val noServers = "Пока нет серверов. Вставьте ссылку leshiy:// или отсканируйте QR-код ниже."
     override val active = "активный"
