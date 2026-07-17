@@ -222,6 +222,10 @@ data class Strings(
     val stepPullImage: String,
     val stepRecreate: String,
     val stepSave: String,
+    // Shade (notification + QS tile)
+    val notifConnected: String,
+    val notifConnectedPlain: String,
+    val notifDisconnect: String,
 ) {
     /** Localized role name for a wire role string. */
     fun roleName(role: String): String = when (role) {
@@ -433,6 +437,9 @@ val EnStrings = Strings(
     stepPullImage = "Pull image",
     stepRecreate = "Recreate container",
     stepSave = "Save",
+    notifConnected = "Connected — %1\$s",
+    notifConnectedPlain = "Connected",
+    notifDisconnect = "Disconnect",
 )
 
 val RuStrings = Strings(
@@ -634,6 +641,9 @@ val RuStrings = Strings(
     stepPullImage = "Загрузка образа",
     stepRecreate = "Пересоздание контейнера",
     stepSave = "Сохранение",
+    notifConnected = "Подключено — %1\$s",
+    notifConnectedPlain = "Подключено",
+    notifDisconnect = "Отключить",
 )
 
 fun stringsFor(lang: Lang): Strings = if (lang == Lang.RU) RuStrings else EnStrings
