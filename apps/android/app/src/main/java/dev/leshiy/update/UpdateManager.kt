@@ -5,6 +5,10 @@ import android.content.Intent
 import androidx.core.content.FileProvider
 import dev.leshiy.BuildConfig
 import dev.leshiy.data.AppPrefs
+import dev.leshiy.data.UiEvents
+import dev.leshiy.data.UiMessage
+import dev.leshiy.ui.i18n.LangState
+import dev.leshiy.ui.i18n.stringsFor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -91,6 +95,7 @@ object UpdateManager {
                 _state.value = UpdateUi.ReadyToInstall(candidate, apk)
             } catch (_: Exception) {
                 _state.value = UpdateUi.Failed
+                UiEvents.emit(UiMessage(stringsFor(LangState.lang.value).updateFailedSnack))
             }
         }
     }
@@ -127,6 +132,8 @@ object UpdateManager {
             }
         } catch (_: Exception) {
             _state.value = if (manual) UpdateUi.Failed else UpdateUi.Idle
+            // Only manual checks surface a message; silent background checks stay quiet.
+            if (manual) UiEvents.emit(UiMessage(stringsFor(LangState.lang.value).updateFailedSnack))
         }
     }
 

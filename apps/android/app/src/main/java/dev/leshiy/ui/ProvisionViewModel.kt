@@ -3,7 +3,11 @@ package dev.leshiy.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import dev.leshiy.data.UiEvents
+import dev.leshiy.data.UiMessage
 import dev.leshiy.data.VaultHolder
+import dev.leshiy.ui.i18n.LangState
+import dev.leshiy.ui.i18n.stringsFor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -62,7 +66,9 @@ class ProvisionViewModel(app: Application) : AndroidViewModel(app) {
                     _state.value = _state.value.copy(running = false, resultUri = uri, stepIndex = STEPS.size)
                 },
                 onFailure = { e ->
-                    _state.value = _state.value.copy(running = false, error = e.message ?: "failed")
+                    val detail = e.message ?: "failed"
+                    _state.value = _state.value.copy(running = false, error = detail)
+                    UiEvents.emit(UiMessage("${stringsFor(LangState.lang.value).deployFailedSnack}: $detail"))
                 },
             )
         }
