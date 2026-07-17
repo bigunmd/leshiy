@@ -432,6 +432,18 @@ pub enum RemoteCmd {
     },
     /// Show whether a saved server is running.
     Status { server: String },
+    /// Upgrade a saved server: pull a new image and recreate its container.
+    ///
+    /// Re-running `provision` does NOT do this — it reuses an already-running container by
+    /// design, so it silently changes nothing. Users, keys and client URIs survive (they live on
+    /// the data volume); only `teardown --purge` removes those.
+    Upgrade {
+        server: String,
+        /// Image reference to upgrade to. Defaults to the release matching this CLI
+        /// (`ghcr.io/bigunmd/leshiy:v<CLI version>`), the tag CI publishes.
+        #[arg(long, default_value = concat!("ghcr.io/bigunmd/leshiy:v", env!("CARGO_PKG_VERSION")))]
+        image: String,
+    },
     /// Export an encrypted backup of a saved server.
     Backup {
         server: String,

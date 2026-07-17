@@ -115,6 +115,56 @@ pub fn container_rm_cmd(container: &str) -> String {
     format!("sudo docker rm -f {container}")
 }
 
+/// Print the live container's `LESHIY_*` env and `--dns` list as JSON, so an upgrade can
+/// **preserve** them rather than reconstruct them.
+///
+/// Reconstruction is not an option: `ServerRecord` never stored `dest_sni`, and `LESHIY_DEST` is
+/// *required* by the container's `boot` — it errors before it checks whether config generation is
+/// even needed, so a container started without it crash-loops under `--restart=unless-stopped`.
+/// The values are ignored on an upgrade (`boot` skips `init` whenever `server.toml` already
+/// exists on the surviving volume), but they must be *present*. Carrying the old container's env
+/// across verbatim is both simpler than storing more state and correct for servers provisioned by
+/// any earlier version, whose vault records predate whatever we would have added.
+pub fn inspect_env_cmd(container: &str) -> String {
+    format!("sudo docker inspect {container} --format '{{{{json .Config.Env}}}}'")
+}
+
+/// The container's configured `--dns` servers as JSON. Preserved across an upgrade so an
+/// operator's explicit `--dns` override isn't silently swapped for a re-detected default.
+pub fn inspect_dns_cmd(container: &str) -> String {
+    format!("sudo docker inspect {container} --format '{{{{json .HostConfig.Dns}}}}'")
+}
+
+/// Parse a `docker inspect --format '{{json ...}}'` string array. `null` (an unset field) and
+/// malformed output are both an empty list — the caller decides what that means.
+pub fn parse_json_string_list(stdout: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(stdout.trim()).unwrap_or_default()
+}
+
+/// Keep only the `LESHIY_*` entries of a container's env, as `(key, value)`.
+///
+/// Docker's `.Config.Env` also carries `PATH` and whatever the image's `ENV` set; re-passing
+/// those with `-e` would pin values that belong to the *new* image. Only our own configuration
+/// travels across an upgrade.
+pub fn leshiy_envs(env: &[String]) -> Vec<(String, String)> {
+    env.iter()
+        .filter(|e| e.starts_with("LESHIY_"))
+        .filter_map(|e| {
+            e.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+        })
+        .collect()
+}
+
+/// The port from a `host:port` string (`1.2.3.4:443`, `[2001:db8::1]:443`).
+///
+/// The listen port is not stored on `ServerRecord` as a number — it only survives inside
+/// `public_host`, and the QUIC port inside `quic.addr` — so an upgrade recovers both from there
+/// to rebuild the `-p` publishes. Splits on the **last** colon so an IPv6 literal doesn't break it.
+pub fn port_of(host_port: &str) -> Option<u16> {
+    host_port.trim().rsplit_once(':')?.1.parse().ok()
+}
+
 /// Print the host's first container-usable **IPv4** DNS server (or nothing).
 ///
 /// Prefers a non-loopback `nameserver` from `/etc/resolv.conf`; on
@@ -237,6 +287,88 @@ mod tests {
             run.contains("--sysctl 'net.ipv4.ping_group_range=0 2147483647'"),
             "icmp echo needs the sysctl, quoted as one arg: {run}"
         );
+    }
+
+    // --- upgrade: preserving the live container's config ---------------------------
+
+    #[test]
+    fn inspect_cmds_build() {
+        assert_eq!(
+            inspect_env_cmd("leshiy"),
+            "sudo docker inspect leshiy --format '{{json .Config.Env}}'"
+        );
+        assert_eq!(
+            inspect_dns_cmd("leshiy"),
+            "sudo docker inspect leshiy --format '{{json .HostConfig.Dns}}'"
+        );
+    }
+
+    #[test]
+    fn parses_a_json_string_list() {
+        assert_eq!(
+            parse_json_string_list(r#"["1.1.1.1","8.8.8.8"]"#),
+            vec!["1.1.1.1", "8.8.8.8"]
+        );
+        assert_eq!(parse_json_string_list("[]\n"), Vec::<String>::new());
+        // `docker inspect` prints `null` for an unset field — must not panic or poison the list.
+        assert_eq!(parse_json_string_list("null"), Vec::<String>::new());
+        assert_eq!(parse_json_string_list(""), Vec::<String>::new());
+        assert_eq!(
+            parse_json_string_list("Error: no such object"),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Only our own config travels across an upgrade. Re-passing the image's own PATH etc. with
+    /// `-e` would pin values belonging to the *old* image onto the new one.
+    #[test]
+    fn only_leshiy_envs_are_carried_across() {
+        let env = vec![
+            "PATH=/usr/local/bin:/usr/bin".to_string(),
+            "LESHIY_HOST=1.2.3.4:443".to_string(),
+            "LESHIY_DEST=www.microsoft.com:443".to_string(),
+            "SSL_CERT_FILE=/etc/ssl/certs/ca.pem".to_string(),
+            "LESHIY_LISTEN=[::]:443".to_string(),
+        ];
+        assert_eq!(
+            leshiy_envs(&env),
+            vec![
+                ("LESHIY_HOST".to_string(), "1.2.3.4:443".to_string()),
+                (
+                    "LESHIY_DEST".to_string(),
+                    "www.microsoft.com:443".to_string()
+                ),
+                ("LESHIY_LISTEN".to_string(), "[::]:443".to_string()),
+            ]
+        );
+    }
+
+    /// LESHIY_DEST is the one that matters: `boot` *requires* it and errors before it checks
+    /// whether config generation is needed, so losing it crash-loops the upgraded container.
+    #[test]
+    fn a_value_containing_an_equals_sign_survives() {
+        let env = vec!["LESHIY_CONNECTOR=leshiy://k?sni=a.com&sid=ff".to_string()];
+        assert_eq!(
+            leshiy_envs(&env),
+            vec![(
+                "LESHIY_CONNECTOR".to_string(),
+                "leshiy://k?sni=a.com&sid=ff".to_string()
+            )]
+        );
+    }
+
+    /// The listen port survives only inside `public_host`, and the QUIC port inside `quic.addr` —
+    /// `ServerRecord::port` is the *SSH* port. Splitting on the last colon keeps v6 literals whole.
+    #[test]
+    fn port_is_taken_from_the_last_colon() {
+        assert_eq!(port_of("1.2.3.4:443"), Some(443));
+        assert_eq!(port_of("vps.example.com:8443"), Some(8443));
+        assert_eq!(port_of("[2001:db8::1]:443"), Some(443));
+        assert_eq!(port_of(" 1.2.3.4:443 "), Some(443));
+        assert_eq!(port_of("1.2.3.4"), None);
+        assert_eq!(port_of(""), None);
+        assert_eq!(port_of("1.2.3.4:notaport"), None);
+        assert_eq!(port_of("1.2.3.4:99999"), None); // > u16
     }
 
     #[test]
