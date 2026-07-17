@@ -22,11 +22,34 @@ impl Default for Masquerade {
     }
 }
 
-/// A response fetched from a reverse-proxy origin: HTTP status + raw body bytes.
+/// A response fetched from a reverse-proxy origin: HTTP status, an allowlist of forwarded
+/// headers, and the raw body bytes.
 pub(crate) struct OriginResponse {
     pub status: u16,
+    /// Allowlisted response headers to forward to the client, so the masqueraded H3 response
+    /// carries the same content-type/caching metadata a genuine H3 fetch of the origin would —
+    /// closing a fidelity gap that a prober could otherwise use to distinguish the cover (M8).
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
+
+/// Response headers safe to forward verbatim from the origin. Lowercased for case-insensitive
+/// matching. Deliberately excludes hop-by-hop / framing headers (`content-length`,
+/// `transfer-encoding`, `connection`, `set-cookie`, …) which h3 sets itself or which would leak
+/// origin state.
+const FORWARDED_HEADERS: &[&str] = &[
+    "content-type",
+    "cache-control",
+    "last-modified",
+    "etag",
+    "content-language",
+    "vary",
+    "expires",
+];
+
+/// Maximum origin body buffered in memory. A prober repeatedly requesting a large backend
+/// resource must not be able to OOM the server; anything larger is truncated (M6).
+const MAX_ORIGIN_BODY: u64 = 2 * 1024 * 1024;
 
 /// Fetch `method path` from an HTTP/1.1 origin (`host:port`) over plain TCP, mirroring the
 /// prober's method and path. Uses `Connection: close` so the body is delimited by EOF (no
@@ -45,8 +68,13 @@ pub(crate) async fn fetch_origin(origin: &str, method: &str, path: &str) -> Opti
         let mut sock = tokio::net::TcpStream::connect(origin).await.ok()?;
         sock.write_all(req.as_bytes()).await.ok()?;
         sock.flush().await.ok()?;
+        // Cap the buffered body so a large backend resource can't be used to exhaust memory (M6).
         let mut raw = Vec::new();
-        sock.read_to_end(&mut raw).await.ok()?;
+        (&mut sock)
+            .take(MAX_ORIGIN_BODY)
+            .read_to_end(&mut raw)
+            .await
+            .ok()?;
         parse_http_response(&raw)
     };
     tokio::time::timeout(ORIGIN_TIMEOUT, work)
@@ -63,10 +91,29 @@ fn parse_http_response(raw: &[u8]) -> Option<OriginResponse> {
     let head = &raw[..sep];
     let body = raw.get(sep + 4..).unwrap_or(&[]).to_vec();
     // Status line: "HTTP/1.1 200 OK" — take the second whitespace-separated token.
-    let first_line = head.split(|&b| b == b'\n').next()?;
+    let mut lines = head.split(|&b| b == b'\n');
+    let first_line = lines.next()?;
     let line = std::str::from_utf8(first_line).ok()?;
     let status = line.split_whitespace().nth(1)?.parse::<u16>().ok()?;
-    Some(OriginResponse { status, body })
+    // Collect allowlisted headers (each "Name: value", trailing CR trimmed) to forward (M8).
+    let mut headers = Vec::new();
+    for raw_line in lines {
+        let Ok(l) = std::str::from_utf8(raw_line) else {
+            continue;
+        };
+        let l = l.trim_end_matches(['\r', '\n']);
+        if let Some((name, value)) = l.split_once(':') {
+            let name = name.trim().to_ascii_lowercase();
+            if FORWARDED_HEADERS.contains(&name.as_str()) {
+                headers.push((name, value.trim().to_string()));
+            }
+        }
+    }
+    Some(OriginResponse {
+        status,
+        headers,
+        body,
+    })
 }
 
 #[cfg(test)]
@@ -79,6 +126,26 @@ mod tests {
         let r = parse_http_response(raw).unwrap();
         assert_eq!(r.status, 200);
         assert_eq!(r.body, b"<h1>hi</h1>");
+    }
+
+    /// M8: allowlisted response headers are captured (lowercased) for forwarding, while
+    /// framing/hop-by-hop headers are dropped.
+    #[test]
+    fn captures_allowlisted_headers_only() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 9\r\nCache-Control: max-age=60\r\nSet-Cookie: sid=secret\r\nConnection: close\r\n\r\n<h1>hi</h1>";
+        let r = parse_http_response(raw).unwrap();
+        assert!(
+            r.headers
+                .contains(&("content-type".into(), "text/html; charset=utf-8".into()))
+        );
+        assert!(
+            r.headers
+                .contains(&("cache-control".into(), "max-age=60".into()))
+        );
+        // Framing / stateful headers must NOT be forwarded.
+        assert!(r.headers.iter().all(|(n, _)| n != "content-length"));
+        assert!(r.headers.iter().all(|(n, _)| n != "set-cookie"));
+        assert!(r.headers.iter().all(|(n, _)| n != "connection"));
     }
 
     #[test]

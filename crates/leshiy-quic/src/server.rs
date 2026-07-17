@@ -39,9 +39,21 @@ pub async fn serve_quic_on_endpoint(
     masquerade: Masquerade,
     egress: Arc<dyn Egress>,
 ) -> Result<()> {
+    // Pre-auth admission control, mirroring the REALITY/TCP server: no client cert is required, so
+    // without this an unauthenticated peer could open unbounded concurrent QUIC connections — each
+    // spawning an h3 driver + demux task with per-stream flow-control buffers — before any auth
+    // runs (H5). A rejected attempt is ignored silently (no response), so it's not a probe oracle.
+    let limiter =
+        leshiy_reality::connlimit::ConnLimiter::new(MAX_QUIC_CONNS, MAX_QUIC_CONNS_PER_IP);
     while let Some(incoming) = endpoint.accept().await {
+        let ip = leshiy_reality::netguard::canonical_ip(incoming.remote_address().ip());
+        let Some(guard) = limiter.try_acquire(ip) else {
+            incoming.ignore();
+            continue;
+        };
         let (store, masq, egress) = (store.clone(), masquerade.clone(), egress.clone());
         tokio::spawn(async move {
+            let _guard = guard; // released when the connection handler returns
             if let Ok(conn) = incoming.await {
                 let _ = serve_h3_conn(conn, store, masq, egress).await;
             }
@@ -49,6 +61,13 @@ pub async fn serve_quic_on_endpoint(
     }
     Ok(())
 }
+
+/// Total concurrent QUIC connections serviced at once (mirrors the REALITY server's cap).
+const MAX_QUIC_CONNS: usize = 4096;
+/// Concurrent QUIC connections from a single source bucket (/32 v4, /64 v6).
+const MAX_QUIC_CONNS_PER_IP: usize = 64;
+/// Maximum QPACK header-section size we advertise to peers (H3 SETTINGS), in bytes (M7).
+const MAX_FIELD_SECTION_SIZE: u64 = 16 * 1024;
 
 async fn serve_h3_conn(
     conn: quinn::Connection,
@@ -62,6 +81,11 @@ async fn serve_h3_conn(
     let dgram_conn = conn.clone();
     let mut builder = h3::server::builder();
     builder.enable_extended_connect(true).enable_datagram(true);
+    // Cap the QPACK header-block budget we advertise. h3's default is effectively unbounded
+    // (VarInt::MAX), which — with no client cert required — lets a peer consume sizable pre-auth
+    // memory via oversized header blocks. 16 KiB is far above any real leshiy-auth/:authority
+    // header and far below anything useful for abuse (M7).
+    builder.max_field_section_size(MAX_FIELD_SECTION_SIZE);
     let mut h3 = builder
         .build(h3_quinn::Connection::new(conn))
         .await
@@ -143,12 +167,22 @@ async fn serve_masquerade_page(
     // Serve 200 only for GET or HEAD "/"; unauthorized CONNECT and everything else gets 404.
     // HEAD gets the correct status but NO body (RFC 9110 §9.3.2).
     let path_root = req.uri().path() == "/" && *req.method() != Method::CONNECT;
-    let (status, body) = if (*req.method() == Method::GET || is_head) && path_root {
-        (StatusCode::OK, html)
+    let (status, body, ctype) = if (*req.method() == Method::GET || is_head) && path_root {
+        (StatusCode::OK, html, "text/html; charset=utf-8")
     } else {
-        (StatusCode::NOT_FOUND, "Not Found".to_string())
+        (
+            StatusCode::NOT_FOUND,
+            "Not Found".to_string(),
+            "text/plain; charset=utf-8",
+        )
     };
-    let resp = http::Response::builder().status(status).body(()).unwrap();
+    // Carry a realistic content-type so the canned page isn't trivially distinguishable from a
+    // genuine H3 response by its missing headers (M8).
+    let resp = http::Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, ctype)
+        .body(())
+        .unwrap();
     stream
         .send_response(resp)
         .await
@@ -179,19 +213,48 @@ async fn serve_masquerade_reverse(
     // requesting a path that the origin will 404 — but simplest is to only proxy GET/HEAD and 404
     // everything else, matching the static path's behavior.
     let proxied = *req.method() == Method::GET || is_head;
-    let (status, body) = if proxied {
+    let (status, headers, body) = if proxied {
         match crate::masquerade::fetch_origin(origin, req.method().as_str(), req.uri().path()).await
         {
             Some(r) => (
                 StatusCode::from_u16(r.status).unwrap_or(StatusCode::BAD_GATEWAY),
+                r.headers,
                 r.body,
             ),
-            None => (StatusCode::BAD_GATEWAY, b"Bad Gateway".to_vec()),
+            None => (
+                StatusCode::BAD_GATEWAY,
+                vec![(
+                    "content-type".to_string(),
+                    "text/plain; charset=utf-8".to_string(),
+                )],
+                b"Bad Gateway".to_vec(),
+            ),
         }
     } else {
-        (StatusCode::NOT_FOUND, b"Not Found".to_vec())
+        (
+            StatusCode::NOT_FOUND,
+            vec![(
+                "content-type".to_string(),
+                "text/plain; charset=utf-8".to_string(),
+            )],
+            b"Not Found".to_vec(),
+        )
     };
-    let resp = http::Response::builder().status(status).body(()).unwrap();
+    // Forward the allowlisted origin headers so the reverse-proxied response looks like a genuine
+    // H3 fetch of the backend, not a header-stripped stub (M8). Invalid header names/values from
+    // the origin are skipped rather than aborting the response.
+    let mut builder = http::Response::builder().status(status);
+    for (name, value) in &headers {
+        if let (Ok(n), Ok(v)) = (
+            http::header::HeaderName::from_bytes(name.as_bytes()),
+            http::header::HeaderValue::from_str(value),
+        ) {
+            builder = builder.header(n, v);
+        }
+    }
+    let resp = builder
+        .body(())
+        .unwrap_or_else(|_| http::Response::builder().status(status).body(()).unwrap());
     stream
         .send_response(resp)
         .await
@@ -369,8 +432,15 @@ async fn tunnel_udp(
                 Ok(n) => {
                     if let Some(tb) = &limits.down { tb.consume(n as u64).await; }
                     let dg = crate::dgram::encode(stream_id, Bytes::copy_from_slice(&buf[..n]));
-                    if dgram_conn.send_datagram(dg).is_err() { break; }
-                    store.add_usage(&sid, 0, n as u64);
+                    match dgram_conn.send_datagram(dg) {
+                        Ok(()) => store.add_usage(&sid, 0, n as u64),
+                        // A single datagram larger than the QUIC datagram MTU (e.g. a big
+                        // EDNS0/DNSSEC DNS reply) must be dropped like ordinary UDP loss, not
+                        // tear down the whole association — every smaller datagram still flows (H6).
+                        Err(quinn::SendDatagramError::TooLarge) => {}
+                        // Connection-wide failures (lost / disabled / unsupported) do end it.
+                        Err(_) => break,
+                    }
                 }
                 Err(_) => break,
             },
