@@ -124,6 +124,12 @@ fun VaultBackupScreen(vm: VaultBackupViewModel, onBack: () -> Unit) {
                     importBytes = bytes
                     importName = name
                     vm.report.value = null
+                    vm.message.value = null
+                }.onFailure {
+                    // Without this the read failure is invisible: the picker closes and nothing
+                    // on screen changes, which reads as "the tap did nothing".
+                    importBytes = null
+                    vm.fail(it)
                 }
             }
         }

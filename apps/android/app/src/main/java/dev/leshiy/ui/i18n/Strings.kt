@@ -318,8 +318,10 @@ val EnStrings = Strings(
     secImport = "Import",
     chooseBackupFile = "Choose backup file",
     importAction = "Import",
-    importedServers = "Imported %d servers",
-    importedServersReplaced = "Imported %d servers (%d replaced an existing record)",
+    // Label form, not "Imported %d servers": a one-server backup is the common migration case and
+    // would render "Imported 1 servers". Russian sidesteps plural agreement the same way.
+    importedServers = "Servers imported: %d",
+    importedServersReplaced = "Servers imported: %d (replaced: %d)",
     noSavedServers = "No saved servers. Provision one from Deploy while the vault is unlocked, and it'll appear here.",
     users = "Users",
     newUserLabel = "New user label",
