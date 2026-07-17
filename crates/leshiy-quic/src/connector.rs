@@ -12,6 +12,10 @@ use leshiy_reality::egress::{Egress, EgressRead, EgressWrite, UdpEgress};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Upper bound on a reconnect to Exit B, so a blackholed exit can't hold the reconnect mutex
+/// (and stall every other multiplexed user) forever (M9).
+const B_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Egress that forwards to an Exit B over a lazy-reconnectable H3 CONNECT connection.
 pub struct ConnectorEgress {
     b_addr: std::net::SocketAddr,
@@ -45,20 +49,27 @@ impl ConnectorEgress {
     }
 
     /// Return the live connection, or establish a new one if `conn` is `None`.
-    /// Holding the mutex across `connect_quic` serializes reconnects (no stampede).
+    /// Holding the mutex across `connect_quic` serializes reconnects (no stampede). The connect is
+    /// bounded by [`B_CONNECT_TIMEOUT`] so a blackholed Exit B can't pin the mutex — and thereby
+    /// head-of-line-block every other multiplexed user's `open()` — indefinitely (M9). A timed-out
+    /// reconnect leaves `conn` as `None`, so the next caller simply retries.
     async fn get_or_connect(&self) -> crate::Result<Arc<QuicConn>> {
         let mut g = self.conn.lock().await;
         if let Some(c) = g.as_ref() {
             return Ok(c.clone());
         }
         let c = Arc::new(
-            crate::client::connect_quic(
-                self.b_addr,
-                &self.b_sni,
-                self.short_id,
-                self.verification.clone(),
+            tokio::time::timeout(
+                B_CONNECT_TIMEOUT,
+                crate::client::connect_quic(
+                    self.b_addr,
+                    &self.b_sni,
+                    self.short_id,
+                    self.verification.clone(),
+                ),
             )
-            .await?,
+            .await
+            .map_err(|_| QuicError::Conn("exit B connect timed out".into()))??,
         );
         *g = Some(c.clone());
         Ok(c)

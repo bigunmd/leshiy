@@ -63,7 +63,13 @@ pub fn server_endpoint(
     .with_single_cert(certs, key)
     .map_err(|e| crate::QuicError::Conn(format!("server cert: {e}")))?;
     tls.alpn_protocols = vec![b"h3".to_vec()];
-    tls.max_early_data_size = u32::MAX;
+    // 0-RTT is left DISABLED (rustls default). The CONNECT / CONNECT-UDP requests carried over
+    // this transport are non-idempotent (they dial egress and consume the user's data cap), and
+    // TLS 1.3 / QUIC early data is replayable within the ticket window. Accepting it would let a
+    // credential-holder replay a captured 0-RTT flight to amplify egress dials, and let an on-path
+    // adversary replay a victim's flight to burn their data cap — both without any crypto break
+    // (H4). Enabling it later requires gating non-idempotent requests behind a replay cache.
+    tls.max_early_data_size = 0;
     let quic_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls)
         .map_err(|e| crate::QuicError::Conn(format!("quic server cfg: {e}")))?;
     let mut cfg = ServerConfig::with_crypto(Arc::new(quic_crypto));
