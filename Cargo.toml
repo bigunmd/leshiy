@@ -5,7 +5,7 @@ exclude = ["apps/gui/src-tauri"]
 
 [workspace.package]
 edition = "2024"
-version = "1.10.0"
+version = "1.11.0"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
