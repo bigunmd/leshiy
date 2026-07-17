@@ -49,6 +49,7 @@ fun SettingsScreen(
     onDeploy: () -> Unit,
     onManage: () -> Unit,
     onCascade: () -> Unit,
+    onVaultBackup: () -> Unit,
 ) {
     val s = LocalStrings.current
     val context = LocalContext.current
@@ -68,6 +69,7 @@ fun SettingsScreen(
             NavRow(LeshiyIcons.Rocket, s.deploy, s.deploySub, tint = Wisp, onClick = onDeploy)
             NavRow(LeshiyIcons.Globe, s.buildCascade, s.cascadeSubtitle, tint = Wisp, onClick = onCascade)
             NavRow(LeshiyIcons.Gear, s.manage, s.manageSub, tint = Warn, onClick = onManage)
+            NavRow(LeshiyIcons.Shield, s.vaultBackup, s.vaultBackupSub, tint = Wisp, onClick = onVaultBackup)
 
             Spacer(Modifier.size(6.dp))
             SectionLabel(s.secNetwork)

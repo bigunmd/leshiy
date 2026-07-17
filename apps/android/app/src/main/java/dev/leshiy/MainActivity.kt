@@ -43,6 +43,7 @@ import dev.leshiy.ui.screens.ServersScreen
 import dev.leshiy.ui.screens.SettingsScreen
 import dev.leshiy.ui.screens.SplitScreen
 import dev.leshiy.ui.screens.UpgradeScreen
+import dev.leshiy.ui.screens.VaultBackupScreen
 import dev.leshiy.ui.theme.LeshiyTheme
 
 class MainActivity : ComponentActivity() {
@@ -104,6 +105,7 @@ private object Route {
     const val SERVER_UPGRADE = "manage/server/upgrade"
     const val CREDENTIAL = "manage/credential"
     const val CASCADE = "cascade"
+    const val VAULT_BACKUP = "manage/backup"
 }
 
 @Composable
@@ -117,6 +119,7 @@ private fun AppNav(onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
     val manageVm: ManageViewModel = viewModel()
     val upgradeVm: dev.leshiy.ui.UpgradeViewModel = viewModel()
     val cascadeVm: dev.leshiy.ui.CascadeViewModel = viewModel()
+    val backupVm: dev.leshiy.ui.VaultBackupViewModel = viewModel()
     // True while DeployScreen/ProvisioningScreen are serving a cascade hop (vs a standalone deploy).
     var cascadeMode by remember { mutableStateOf(false) }
 
@@ -150,6 +153,7 @@ private fun AppNav(onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
                 onDeploy = { nav.navigate(Route.DEPLOY) },
                 onManage = { nav.navigate(Route.MANAGE) },
                 onCascade = { cascadeVm.reset(); nav.navigate(Route.CASCADE) },
+                onVaultBackup = { nav.navigate(Route.VAULT_BACKUP) },
             )
         }
         composable(Route.SERVERS) {
@@ -218,6 +222,9 @@ private fun AppNav(onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
                 },
                 onBack = { nav.popBackStack() },
             )
+        }
+        composable(Route.VAULT_BACKUP) {
+            VaultBackupScreen(vm = backupVm, onBack = { nav.popBackStack() })
         }
         composable(Route.MANAGE) {
             ManageScreen(
