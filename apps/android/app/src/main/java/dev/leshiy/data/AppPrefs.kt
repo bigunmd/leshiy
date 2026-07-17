@@ -59,6 +59,13 @@ object AppPrefs {
     fun setOnboardingComplete(context: Context, value: Boolean) =
         prefs(context).edit().putBoolean("onboarding_complete", value).apply()
 
+    /** Require biometric/device-credential unlock to open the app UI. Off by default. */
+    fun appLockEnabled(context: Context): Boolean =
+        prefs(context).getBoolean("app_lock", false)
+
+    fun setAppLockEnabled(context: Context, value: Boolean) =
+        prefs(context).edit().putBoolean("app_lock", value).apply()
+
     /** Epoch ms of the last GitHub release check (launch checks are throttled to 24h). */
     fun lastUpdateCheck(context: Context): Long = prefs(context).getLong("last_update_check", 0L)
 
