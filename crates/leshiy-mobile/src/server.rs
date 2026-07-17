@@ -566,6 +566,34 @@ mod tests {
         );
     }
 
+    /// Phone → CLI: `leshiy remote restore` reads the file and calls the bare
+    /// `vault::open` (`remote_cli.rs`), *not* `import_backup`. An export must therefore open with
+    /// that function alone, or the interop claim is only true of our own round trip.
+    #[test]
+    fn an_export_opens_with_the_bare_vault_fn_that_cli_restore_uses() {
+        let sm = ServerManager::open(tmp(), "device-pw".into()).unwrap();
+        seed(&sm, "berlin");
+        let blob = sm.export_backup("backup-pw".into()).unwrap();
+
+        let recs = leshiy_provision::vault::open(&blob, "backup-pw").unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].id, "berlin");
+    }
+
+    /// CLI → phone: `leshiy remote backup --out f` writes `export_one`'s output — a sealed
+    /// one-element array. Import must take it unchanged.
+    #[test]
+    fn imports_a_blob_produced_by_the_cli_remote_backup() {
+        let mut cli_vault = Vault::new();
+        cli_vault.upsert(rec("berlin"));
+        let blob = cli_vault.export_one("berlin", false, "share-pw").unwrap();
+
+        let sm = ServerManager::open(tmp(), "device-pw".into()).unwrap();
+        let report = sm.import_backup(blob, "share-pw".into()).unwrap();
+        assert_eq!(report.added, 1);
+        assert_eq!(sm.servers()[0].id, "berlin");
+    }
+
     #[test]
     fn importing_a_known_id_reports_replaced() {
         let src = ServerManager::open(tmp(), "device-pw".into()).unwrap();
