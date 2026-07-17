@@ -47,6 +47,13 @@ pub struct RemoteUserInfo {
     pub uri: String,
 }
 
+/// What an [`ServerManager::import_backup`] merge did, so the UI can say so.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ImportReport {
+    pub added: u32,
+    pub replaced: u32,
+}
+
 /// Vault-backed manager for provisioned servers (one unlocked instance per session).
 #[derive(uniffi::Object)]
 pub struct ServerManager {
@@ -313,6 +320,38 @@ impl ServerManager {
         v.remove(&server_id);
         v.save(&self.path, &self.passphrase).map_err(err)
     }
+
+    /// Seal every saved record under `backup_passphrase` — the whole-vault backup form, returned
+    /// for the caller to write (Android hands it to the Storage Access Framework, whose
+    /// `content://` URIs are not paths Rust could open).
+    ///
+    /// The passphrase is deliberately independent of the device vault passphrase, so the two can
+    /// be rotated separately. The returned blob is ciphertext: this does not breach the
+    /// no-cleartext-secrets-over-FFI contract this module opens with.
+    pub fn export_backup(&self, backup_passphrase: String) -> Result<Vec<u8>, BridgeError> {
+        let pass = Zeroizing::new(backup_passphrase);
+        self.vault.lock().unwrap().export_all(&pass).map_err(err)
+    }
+
+    /// Decrypt a backup blob under `backup_passphrase` and merge it into the vault, persisting
+    /// under the device passphrase. Records with a matching id are replaced.
+    ///
+    /// Decryption comes first, so a wrong passphrase or a corrupt file leaves the vault untouched.
+    pub fn import_backup(
+        &self,
+        blob: Vec<u8>,
+        backup_passphrase: String,
+    ) -> Result<ImportReport, BridgeError> {
+        let pass = Zeroizing::new(backup_passphrase);
+        let recs = leshiy_provision::vault::open(&blob, &pass).map_err(err)?;
+        let mut v = self.vault.lock().unwrap();
+        let summary = v.import_records(recs);
+        v.save(&self.path, &self.passphrase).map_err(err)?;
+        Ok(ImportReport {
+            added: summary.added as u32,
+            replaced: summary.replaced as u32,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -461,5 +500,82 @@ mod tests {
             .upgrade("nope".into(), None, None, Box::new(NullListener))
             .unwrap_err();
         assert!(matches!(e, BridgeError::NoSuchProfile));
+    }
+
+    /// Seed a record straight into the vault and persist it — the manager's own write path.
+    /// Provisioning for real would need a live SSH host.
+    fn seed(sm: &ServerManager, id: &str) {
+        let mut v = sm.vault.lock().unwrap();
+        v.upsert(rec(id));
+        v.save(&sm.path, &sm.passphrase).unwrap();
+    }
+
+    #[test]
+    fn backup_round_trips_onto_a_fresh_device() {
+        let sm = ServerManager::open(tmp(), "device-pw".into()).unwrap();
+        seed(&sm, "berlin");
+        let blob = sm.export_backup("backup-pw".into()).unwrap();
+
+        // A new phone: its own vault, its own passphrase, empty.
+        let fresh = ServerManager::open(tmp(), "other-device-pw".into()).unwrap();
+        assert!(fresh.servers().is_empty());
+
+        let report = fresh.import_backup(blob, "backup-pw".into()).unwrap();
+        assert_eq!(report.added, 1);
+        assert_eq!(report.replaced, 0);
+        assert_eq!(fresh.servers()[0].id, "berlin");
+    }
+
+    /// The backup passphrase and the device passphrase are independent: import must decrypt with
+    /// the former and persist with the latter.
+    #[test]
+    fn imported_records_persist_under_the_device_passphrase() {
+        let src = ServerManager::open(tmp(), "device-pw".into()).unwrap();
+        seed(&src, "berlin");
+        let blob = src.export_backup("backup-pw".into()).unwrap();
+
+        let path = tmp();
+        let sm = ServerManager::open(path.clone(), "new-device".into()).unwrap();
+        sm.import_backup(blob, "backup-pw".into()).unwrap();
+
+        let reopened = ServerManager::open(path, "new-device".into()).unwrap();
+        assert_eq!(reopened.servers().len(), 1);
+        assert_eq!(reopened.servers()[0].id, "berlin");
+    }
+
+    #[test]
+    fn import_backup_wrong_passphrase_fails_and_changes_nothing() {
+        let src = ServerManager::open(tmp(), "device-pw".into()).unwrap();
+        seed(&src, "berlin");
+        let blob = src.export_backup("right".into()).unwrap();
+
+        let sm = ServerManager::open(tmp(), "device-pw".into()).unwrap();
+        assert!(sm.import_backup(blob, "wrong".into()).is_err());
+        assert!(
+            sm.servers().is_empty(),
+            "a failed import must not mutate the vault"
+        );
+    }
+
+    #[test]
+    fn import_backup_rejects_a_file_that_is_not_a_vault() {
+        let sm = ServerManager::open(tmp(), "device-pw".into()).unwrap();
+        assert!(
+            sm.import_backup(b"definitely not a vault".to_vec(), "pw".into())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn importing_a_known_id_reports_replaced() {
+        let src = ServerManager::open(tmp(), "device-pw".into()).unwrap();
+        seed(&src, "berlin");
+        let blob = src.export_backup("backup-pw".into()).unwrap();
+
+        let sm = ServerManager::open(tmp(), "device-pw".into()).unwrap();
+        seed(&sm, "berlin"); // same id already present
+        let report = sm.import_backup(blob, "backup-pw".into()).unwrap();
+        assert_eq!(report.added, 0);
+        assert_eq!(report.replaced, 1);
     }
 }
