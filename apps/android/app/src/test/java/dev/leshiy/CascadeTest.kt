@@ -101,6 +101,7 @@ class BuildCascadesTest {
         ServerInfo(
             id = id, label = id, host = "1.1.1.1", port = 443u, sudo = false,
             role = role, downstream = downstream, hasConnector = role == "exit" || role == "middle",
+            imageRef = "ghcr.io/bigunmd/leshiy:v1.9.0",
         )
 
     @Test fun follows_downstream_entry_to_exit() {

@@ -87,6 +87,7 @@ object LeshiyIcons {
     )
 
     val Check = stroked("M5 12 l4 4 L19 7", sw = 2.4f)
+    val Close = stroked("M6 6 L18 18 M18 6 L6 18", sw = 2.4f)
     val Search = stroked("M11 4 a7 7 0 1 0 0.001 0 z M16.5 16.5 L20.5 20.5", sw = 1.8f)
     val Info = mixed(
         strokeD = "M12 3 a9 9 0 1 0 0.001 0 z M12 11 V16.5",

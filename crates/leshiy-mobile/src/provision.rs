@@ -55,10 +55,27 @@ pub trait ProvisionListener: Send + Sync {
     fn on_update(&self, update: ProvisionUpdate);
 }
 
-fn step_str(s: Step) -> String {
+/// The container image this build provisions and upgrades to: the tag CI publishes for this
+/// version. Deploy's default and Upgrade's target read the same value, so they cannot drift.
+#[uniffi::export]
+pub fn default_image_ref() -> String {
+    concat!("ghcr.io/bigunmd/leshiy:v", env!("CARGO_PKG_VERSION")).to_string()
+}
+
+/// An image ref with blank/whitespace treated as "unset" — the UI sends an empty Advanced field
+/// rather than omitting it.
+pub(crate) fn resolve_image_ref(image_ref: Option<&str>) -> String {
+    image_ref
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(default_image_ref)
+}
+
+pub(crate) fn step_str(s: Step) -> String {
     format!("{s:?}")
 }
-fn status_str(s: Status) -> String {
+pub(crate) fn status_str(s: Status) -> String {
     format!("{s:?}")
 }
 
@@ -124,13 +141,7 @@ pub fn build_params(cfg: &ProvisionConfig, now: u64) -> ProvisionParams {
         secret: ssh_secret(cfg),
         public_host: format!("{}:{}", cfg.host, cfg.listen_port),
         dest_sni: cfg.dest.clone(),
-        image_ref: cfg
-            .image_ref
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| {
-                concat!("ghcr.io/bigunmd/leshiy:v", env!("CARGO_PKG_VERSION")).to_string()
-            }),
+        image_ref: resolve_image_ref(cfg.image_ref.as_deref()),
         container: "leshiy".into(),
         quic_port,
         listen_port: cfg.listen_port,
@@ -324,5 +335,38 @@ mod tests {
         let mut c = cfg();
         c.sudo_password = Some("s".into());
         assert!(build_params(&c, 100).sudo);
+    }
+
+    #[test]
+    fn default_image_ref_is_the_tag_ci_publishes_for_this_build() {
+        assert_eq!(
+            default_image_ref(),
+            format!("ghcr.io/bigunmd/leshiy:v{}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn resolve_image_ref_treats_blank_as_unset() {
+        assert_eq!(resolve_image_ref(None), default_image_ref());
+        assert_eq!(resolve_image_ref(Some("")), default_image_ref());
+        assert_eq!(resolve_image_ref(Some("   ")), default_image_ref());
+    }
+
+    #[test]
+    fn resolve_image_ref_keeps_an_explicit_override_trimmed() {
+        assert_eq!(
+            resolve_image_ref(Some("  ghcr.io/o/r:v1.2.3  ")),
+            "ghcr.io/o/r:v1.2.3"
+        );
+    }
+
+    /// Deploy's default and Upgrade's target must be the same string, or a phone could
+    /// "upgrade" a server to an image older than the one it just deployed.
+    #[test]
+    fn provision_defaults_to_the_same_image_upgrade_targets() {
+        assert_eq!(
+            build_params(&cfg(), 1_700_000_000).image_ref,
+            default_image_ref()
+        );
     }
 }

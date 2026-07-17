@@ -37,7 +37,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import dev.leshiy.ui.ProvisionViewModel
 import dev.leshiy.ui.components.Field
-import dev.leshiy.ui.components.IconBtn
+import dev.leshiy.ui.components.HelpField
 import dev.leshiy.ui.components.PanelCard
 import dev.leshiy.ui.components.PrimaryButton
 import dev.leshiy.ui.components.ScreenFrame
@@ -225,28 +225,6 @@ fun DeployScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
         }
-    }
-}
-
-/** A field with an info button that toggles a one-line explanation beneath it. */
-@Composable
-private fun HelpField(
-    value: String,
-    onChange: (String) -> Unit,
-    label: String,
-    help: String,
-    singleLine: Boolean = true,
-) {
-    val s = LocalStrings.current
-    var show by remember { mutableStateOf(false) }
-    Field(value, onChange, label, singleLine = singleLine, trailing = { IconBtn(LeshiyIcons.Info, s.help, tint = Moss) { show = !show } })
-    if (show) {
-        Text(
-            help,
-            style = MaterialTheme.typography.labelSmall,
-            color = Dim,
-            modifier = Modifier.padding(start = 4.dp, top = 2.dp),
-        )
     }
 }
 
