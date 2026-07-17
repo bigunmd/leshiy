@@ -1,12 +1,15 @@
 package dev.leshiy.ui.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -20,24 +23,34 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.leshiy.ui.ManageViewModel
 import dev.leshiy.ui.ServerStatus
+import dev.leshiy.ui.UpgradeViewModel
 import dev.leshiy.ui.components.Field
+import dev.leshiy.ui.components.HelpField
 import dev.leshiy.ui.components.LoadingButton
 import dev.leshiy.ui.components.NavRow
 import dev.leshiy.ui.components.OutlineButton
+import dev.leshiy.ui.components.PanelCard
+import dev.leshiy.ui.components.PrimaryButton
 import dev.leshiy.ui.components.ScreenFrame
 import dev.leshiy.ui.components.SectionLabel
 import dev.leshiy.ui.components.StatusPill
 import dev.leshiy.ui.i18n.LocalStrings
 import dev.leshiy.ui.icons.LeshiyIcons
+import dev.leshiy.ui.shortVersion
 import dev.leshiy.ui.theme.Dim
+import dev.leshiy.ui.theme.Moss
 import dev.leshiy.ui.theme.Warn
 import dev.leshiy.ui.theme.Wisp
+import dev.leshiy.ui.updateAvailable
+import uniffi.leshiy_mobile.defaultImageRef
 
-/** One server's management hub: sudo gate, run-status, a way into its users, and teardown. */
+/** One server's management hub: sudo gate, run-status, a way into its users/version, and teardown. */
 @Composable
 fun ServerDetailScreen(
     vm: ManageViewModel,
+    upgradeVm: UpgradeViewModel,
     onOpenUsers: () -> Unit,
+    onOpenUpgrade: () -> Unit,
     onBack: () -> Unit,
 ) {
     val s = LocalStrings.current
@@ -98,6 +111,71 @@ fun ServerDetailScreen(
 
             SectionLabel(s.users)
             NavRow(icon = LeshiyIcons.Users, title = s.users, subtitle = s.manageUsersSubtitle, onClick = onOpenUsers)
+
+            SectionLabel(s.version)
+            val target = remember { defaultImageRef() }
+            var imageOverride by remember(server.id) { mutableStateOf("") }
+            var advOpen by remember(server.id) { mutableStateOf(false) }
+            // An Advanced override wins; blank means "match this app's version".
+            val effective = imageOverride.trim().ifBlank { target }
+            val hasUpdate = updateAvailable(server.imageRef, effective)
+            PanelCard {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        if (hasUpdate) {
+                            "${shortVersion(server.imageRef)}  →  ${shortVersion(effective)}"
+                        } else {
+                            shortVersion(server.imageRef)
+                        },
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onBackground,
+                    )
+                    StatusPill(
+                        if (hasUpdate) s.updateAvailable else s.upToDate,
+                        if (hasUpdate) Wisp else Dim,
+                        loading = false,
+                    )
+                    // Never disabled when up to date: a re-run is how new container run-flags land
+                    // (provision reuses a running container and would change nothing).
+                    PrimaryButton(
+                        if (hasUpdate) s.upgradeServer else s.reapplyVersion.format(shortVersion(effective)),
+                        onClick = {
+                            upgradeVm.reset()
+                            upgradeVm.upgrade(
+                                serverId = server.id,
+                                label = server.label,
+                                fromRef = server.imageRef,
+                                targetRef = effective,
+                                sudoPassword = sudoPw[server.id]?.takeIf { it.isNotBlank() },
+                            )
+                            onOpenUpgrade()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(s.upgradeTunnelNote, style = MaterialTheme.typography.labelSmall, color = Dim)
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable { advOpen = !advOpen }.padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            if (advOpen) LeshiyIcons.ChevronDown else LeshiyIcons.ChevronRight,
+                            null,
+                            tint = Moss,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        SectionLabel(s.advanced)
+                    }
+                    if (advOpen) {
+                        HelpField(
+                            imageOverride,
+                            { imageOverride = it },
+                            s.containerImageOpt,
+                            s.helpImage,
+                        )
+                    }
+                }
+            }
 
             Spacer(Modifier.size(2.dp))
             OutlineButton(

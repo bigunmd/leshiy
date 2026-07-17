@@ -229,7 +229,9 @@ private fun AppNav(onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
         composable(Route.SERVER_DETAIL) {
             ServerDetailScreen(
                 vm = manageVm,
+                upgradeVm = upgradeVm,
                 onOpenUsers = { nav.navigate(Route.SERVER_USERS) },
+                onOpenUpgrade = { nav.navigate(Route.SERVER_UPGRADE) },
                 onBack = { nav.popBackStack() },
             )
         }

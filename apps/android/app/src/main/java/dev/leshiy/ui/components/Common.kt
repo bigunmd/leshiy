@@ -24,6 +24,10 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -33,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.leshiy.ui.i18n.LocalStrings
 import dev.leshiy.ui.icons.LeshiyIcons
 import dev.leshiy.ui.theme.Bg0
 import dev.leshiy.ui.theme.BorderCol
@@ -172,6 +177,28 @@ fun Field(
             unfocusedContainerColor = Bg0,
         ),
     )
+}
+
+/** A field with an info button that toggles a one-line explanation beneath it. */
+@Composable
+fun HelpField(
+    value: String,
+    onChange: (String) -> Unit,
+    label: String,
+    help: String,
+    singleLine: Boolean = true,
+) {
+    val s = LocalStrings.current
+    var show by remember { mutableStateOf(false) }
+    Field(value, onChange, label, singleLine = singleLine, trailing = { IconBtn(LeshiyIcons.Info, s.help, tint = Moss) { show = !show } })
+    if (show) {
+        Text(
+            help,
+            style = MaterialTheme.typography.labelSmall,
+            color = Dim,
+            modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+        )
+    }
 }
 
 /** Settings-hub / list row: leading icon, title + subtitle, trailing chevron or content. */
