@@ -38,4 +38,17 @@ object AppPrefs {
 
     fun setSleepKeepalive(context: Context, value: Boolean) =
         prefs(context).edit().putBoolean("sleep_keepalive", value).apply()
+
+    /** Epoch ms of the last GitHub release check (launch checks are throttled to 24h). */
+    fun lastUpdateCheck(context: Context): Long = prefs(context).getLong("last_update_check", 0L)
+
+    fun setLastUpdateCheck(context: Context, value: Long) =
+        prefs(context).edit().putLong("last_update_check", value).apply()
+
+    /** Version whose "new version" card the user dismissed — don't re-nag on launch checks. */
+    fun dismissedUpdateVersion(context: Context): String? =
+        prefs(context).getString("dismissed_update_version", null)
+
+    fun setDismissedUpdateVersion(context: Context, value: String) =
+        prefs(context).edit().putString("dismissed_update_version", value).apply()
 }
