@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.WindowInsets
@@ -25,8 +26,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.leshiy.ui.Sample
 import dev.leshiy.ui.components.ConnectOrb
 import dev.leshiy.ui.components.IconBtn
+import dev.leshiy.ui.components.Sparkline
 import dev.leshiy.ui.components.UpdateCard
 import dev.leshiy.ui.formatBytes
 import dev.leshiy.ui.i18n.LocalStrings
@@ -52,6 +55,7 @@ fun ConnectScreen(
     onOpenServers: () -> Unit,
 ) {
     val ui by connectVm.uiState.collectAsStateWithLifecycle()
+    val history by connectVm.history.collectAsStateWithLifecycle()
     val profiles by profilesVm.profiles.collectAsStateWithLifecycle()
     val active = profiles.firstOrNull { it.isActive }
 
@@ -96,6 +100,11 @@ fun ConnectScreen(
 
             Spacer(Modifier.size(28.dp))
             StatusReadout(ui.state, ui.upBytes, ui.downBytes, ui.rttMs)
+
+            if (ui.state == ConnState.CONNECTED && history.isNotEmpty()) {
+                Spacer(Modifier.size(18.dp))
+                LiveStats(history)
+            }
 
             Spacer(Modifier.size(10.dp))
             if (active == null) {
@@ -149,6 +158,35 @@ private fun Meter(icon: androidx.compose.ui.graphics.vector.ImageVector, text: S
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         Icon(icon, null, tint = Dim, modifier = Modifier.size(10.dp))
         Text(text, fontFamily = PlexMono, fontSize = 12.sp, color = Dim)
+    }
+}
+
+/** Live one-minute trend: RTT, download rate, upload rate — each a labeled single-series sparkline. */
+@Composable
+private fun LiveStats(history: List<Sample>) {
+    val s = LocalStrings.current
+    val last = history.last()
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 44.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        StatRow(LeshiyIcons.Bolt, s.statLatency, "${last.rtt} ms", history.map { it.rtt.toFloat() })
+        StatRow(LeshiyIcons.ArrowDown, s.statDown, "${formatBytes(last.downRate.toULong())}/s", history.map { it.downRate.toFloat() })
+        StatRow(LeshiyIcons.ArrowUp, s.statUp, "${formatBytes(last.upRate.toULong())}/s", history.map { it.upRate.toFloat() })
+    }
+}
+
+@Composable
+private fun StatRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    desc: String,
+    value: String,
+    values: List<Float>,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Icon(icon, contentDescription = desc, tint = Dim, modifier = Modifier.size(11.dp))
+        Text(value, fontFamily = PlexMono, fontSize = 11.sp, color = Dim, modifier = Modifier.width(72.dp))
+        Sparkline(values, color = Wisp, modifier = Modifier.weight(1f).height(20.dp))
     }
 }
 
