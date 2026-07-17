@@ -191,6 +191,20 @@ data class Strings(
     val doneAction: String,
     // Common
     val back: String,
+    // Upgrade
+    val version: String,
+    val updateAvailable: String,
+    val upToDate: String,
+    val upgradeServer: String,
+    val reapplyVersion: String,
+    val upgradingTitle: String,
+    val upgraded: String,
+    val upgradeFailed: String,
+    val upgradeTunnelNote: String,
+    val stepConnect: String,
+    val stepPullImage: String,
+    val stepRecreate: String,
+    val stepSave: String,
 ) {
     /** Localized role name for a wire role string. */
     fun roleName(role: String): String = when (role) {
@@ -371,6 +385,19 @@ val EnStrings = Strings(
     cascadeReady = "Cascade ready",
     doneAction = "Done",
     back = "Back",
+    version = "Version",
+    updateAvailable = "Update available",
+    upToDate = "Up to date",
+    upgradeServer = "Upgrade server",
+    reapplyVersion = "Re-apply %1\$s",
+    upgradingTitle = "Upgrading",
+    upgraded = "Upgraded to %1\$s",
+    upgradeFailed = "Upgrade failed",
+    upgradeTunnelNote = "The tunnel through this server drops briefly while the container is recreated. Users and keys are kept.",
+    stepConnect = "Connect",
+    stepPullImage = "Pull image",
+    stepRecreate = "Recreate container",
+    stepSave = "Save",
 )
 
 val RuStrings = Strings(
@@ -543,6 +570,19 @@ val RuStrings = Strings(
     cascadeReady = "Каскад готов",
     doneAction = "Готово",
     back = "Назад",
+    version = "Версия",
+    updateAvailable = "Доступно обновление",
+    upToDate = "Актуальная версия",
+    upgradeServer = "Обновить сервер",
+    reapplyVersion = "Переустановить %1\$s",
+    upgradingTitle = "Обновление",
+    upgraded = "Обновлено до %1\$s",
+    upgradeFailed = "Не удалось обновить",
+    upgradeTunnelNote = "Туннель через этот сервер ненадолго прервётся, пока контейнер пересоздаётся. Пользователи и ключи сохранятся.",
+    stepConnect = "Подключение",
+    stepPullImage = "Загрузка образа",
+    stepRecreate = "Пересоздание контейнера",
+    stepSave = "Сохранение",
 )
 
 fun stringsFor(lang: Lang): Strings = if (lang == Lang.RU) RuStrings else EnStrings
