@@ -12,12 +12,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -28,8 +30,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.leshiy.data.AppPrefs
+import dev.leshiy.data.BatteryOptimization
+import dev.leshiy.data.shouldPromptBattery
 import dev.leshiy.ui.components.NavRow
 import dev.leshiy.ui.components.PanelCard
 import dev.leshiy.ui.components.ScreenFrame
@@ -41,6 +48,7 @@ import dev.leshiy.ui.i18n.LocalStrings
 import dev.leshiy.ui.icons.LeshiyIcons
 import dev.leshiy.ui.theme.Bg0
 import dev.leshiy.ui.theme.Dim
+import dev.leshiy.ui.theme.Moss
 import dev.leshiy.ui.theme.Warn
 import dev.leshiy.ui.theme.Wisp
 
@@ -57,6 +65,17 @@ fun SettingsScreen(
     val s = LocalStrings.current
     val context = LocalContext.current
     val lang by LangState.lang.collectAsStateWithLifecycle()
+
+    // Battery-exemption state, refreshed on resume so the checkmark updates after the system dialog.
+    var batteryOk by remember { mutableStateOf(BatteryOptimization.isUnrestricted(context)) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val obs = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) batteryOk = BatteryOptimization.isUnrestricted(context)
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
 
     ScreenFrame(s.settings, onBack = onBack) {
         Column(
@@ -108,13 +127,38 @@ fun SettingsScreen(
                     Spacer(Modifier.size(12.dp))
                     Switch(
                         checked = sleepKa,
-                        onCheckedChange = { sleepKa = it; AppPrefs.setSleepKeepalive(context, it) },
+                        onCheckedChange = {
+                            sleepKa = it
+                            AppPrefs.setSleepKeepalive(context, it)
+                            // Keepalive is near-useless under Doze restriction — prompt for the
+                            // exemption the moment it starts to matter.
+                            if (shouldPromptBattery(it, BatteryOptimization.isUnrestricted(context))) {
+                                BatteryOptimization.request(context)
+                            }
+                        },
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = Bg0,
                             checkedTrackColor = Wisp,
                             uncheckedTrackColor = MaterialTheme.colorScheme.surface,
                             uncheckedBorderColor = MaterialTheme.colorScheme.outline,
                         ),
+                    )
+                }
+            }
+
+            Spacer(Modifier.size(6.dp))
+            PanelCard(onClick = if (batteryOk) null else ({ BatteryOptimization.request(context) })) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(s.batteryTitle, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onBackground)
+                        Text(s.batterySub, style = MaterialTheme.typography.labelSmall, color = Dim)
+                    }
+                    Spacer(Modifier.size(12.dp))
+                    Icon(
+                        if (batteryOk) LeshiyIcons.Check else LeshiyIcons.ChevronRight,
+                        contentDescription = null,
+                        tint = if (batteryOk) Moss else Wisp,
+                        modifier = Modifier.size(20.dp),
                     )
                 }
             }

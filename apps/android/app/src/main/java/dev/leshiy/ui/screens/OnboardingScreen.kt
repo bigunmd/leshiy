@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
-import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -48,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import dev.leshiy.data.BatteryOptimization
 import dev.leshiy.ui.components.OutlineButton
 import dev.leshiy.ui.components.PrimaryButton
 import dev.leshiy.ui.i18n.LocalStrings
@@ -122,12 +122,7 @@ fun OnboardingScreen(
                             }
                         }
                         ActionRow(s.obBattery, done = batteryOk) {
-                            runCatching {
-                                context.startActivity(
-                                    Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                                )
-                            }
+                            BatteryOptimization.request(context)
                         }
                         ActionRow(s.obAlwaysOn, done = false) {
                             runCatching {
@@ -220,4 +215,4 @@ private fun notificationsGranted(context: android.content.Context): Boolean =
         context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
 
 private fun batteryUnrestricted(context: android.content.Context): Boolean =
-    (context.getSystemService(PowerManager::class.java))?.isIgnoringBatteryOptimizations(context.packageName) ?: false
+    BatteryOptimization.isUnrestricted(context)

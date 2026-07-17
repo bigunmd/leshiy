@@ -15,6 +15,10 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <!-- Reconnect the active profile after a reboot (BootReceiver), gated on a user toggle. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- One-tap "allow background activity" dialog so the sleep-keepalive alarm (ADR-0031) can
+         wake the CPU under Doze. Distributed via GitHub APK, so Play's restriction on this
+         permission doesn't apply. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
