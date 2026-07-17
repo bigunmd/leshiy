@@ -1867,7 +1867,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "leshiy"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -1905,7 +1905,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-client"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1930,7 +1930,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-core"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "bytes",
  "proptest",
@@ -1943,7 +1943,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-helper"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1963,7 +1963,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-mobile"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "leshiy-client",
  "leshiy-provision",
@@ -1978,7 +1978,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-provision"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "argon2 0.5.3",
  "async-trait",
@@ -1997,7 +1997,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-quic"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2022,7 +2022,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-reality"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "async-trait",
@@ -2054,7 +2054,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-tls"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "chacha20poly1305",
@@ -2075,7 +2075,7 @@ dependencies = [
 
 [[package]]
 name = "leshiy-tun"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "async-trait",
  "bytes",
