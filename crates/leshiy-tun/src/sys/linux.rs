@@ -184,13 +184,17 @@ impl RouteController for LinuxController {
             tracing::debug!(cidr = %c, "split-tunnel: no gateway for this family; bypass rides the tunnel");
             return Ok(());
         };
-        self.handle
-            .add(&Route::new(c.addr, c.prefix).with_gateway(gw))
-            .await?;
+        // Record BEFORE the OS call: if this task is aborted mid-syscall the kernel may already
+        // have installed the route, so teardown must know to remove it — otherwise a bypass route
+        // pointing at the original gateway leaks and survives disconnect (H7). A failed add leaves
+        // a spurious entry, which teardown's best-effort delete simply no-ops.
         self.installed_bypass
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(c.clone());
+        self.handle
+            .add(&Route::new(c.addr, c.prefix).with_gateway(gw))
+            .await?;
         Ok(())
     }
     async fn remove_bypass(&self, c: &Cidr) -> std::io::Result<()> {
@@ -267,10 +271,12 @@ impl Drop for LinuxTeardown {
         // Best-effort; teardown must never panic. `Drop` is synchronous, so batch the deletes
         // through one `ip -batch` process (sync) rather than thousands of `ip route del` spawns.
         // The bypass route deletes and the policy-rule deletes share the one batch.
+        // Poison-tolerant lock (matching the windows/macos teardowns): a panic elsewhere must not
+        // make this teardown panic and skip the DNS/IPv6 kill-switch restore below (M11).
         let mut batch: String = self
             .installed_bypass
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .map(|c| format!("route del {c}\n"))
             .collect();

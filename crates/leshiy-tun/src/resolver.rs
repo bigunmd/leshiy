@@ -24,6 +24,11 @@ pub(crate) const REFRESH: Duration = Duration::from_secs(1800);
 /// subscription list. Excess is dropped (with a warning), never silently.
 pub(crate) const MAX_DOMAINS: usize = 50_000;
 
+/// Above this many resolved routes in one direction, warn about routing-table bloat. The engine's
+/// static-plan `ROUTE_WARN_THRESHOLD` can't see these runtime, domain-driven routes (each domain
+/// can fan out to many A/AAAA records), so the visibility has to live here (M12).
+pub(crate) const RESOLVED_ROUTE_WARN_THRESHOLD: usize = 5000;
+
 /// How many `getaddrinfo` lookups run concurrently (bounds the blocking-pool pressure while
 /// still resolving thousands of domains in seconds rather than minutes).
 const RESOLVE_CONCURRENCY: usize = 64;
@@ -64,6 +69,19 @@ pub async fn apply_resolution(
     state: &mut ResolverState,
     resolved: BTreeSet<Cidr>,
 ) {
+    // Domain resolution can fan a modest domain list into a large route set; surface that here,
+    // since the engine's static-plan route-count warning can't account for these routes (M12).
+    if resolved.len() > RESOLVED_ROUTE_WARN_THRESHOLD {
+        let dir = match mode {
+            SplitMode::Include => "include",
+            SplitMode::Exclude => "exclude",
+        };
+        tracing::warn!(
+            count = resolved.len(),
+            direction = dir,
+            "split-tunnel: domain resolution produced a large route set; routing-table bloat / slow install"
+        );
+    }
     let d = diff(&state.current, &resolved);
     for c in &d.added {
         let r = match mode {

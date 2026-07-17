@@ -316,13 +316,15 @@ impl RouteController for WindowsController {
             tracing::debug!(cidr = %c, "split-tunnel: no gateway for this family; bypass rides the tunnel");
             return Ok(());
         };
-        self.handle
-            .add(&gateway_route(c.addr, c.prefix, gw, self.orig_idx))
-            .await?;
+        // Record BEFORE the OS call so an abort mid-syscall can't leak an untracked bypass route
+        // that survives disconnect (H7). A failed add leaves a spurious entry that teardown no-ops.
         self.installed_bypass
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(c.clone());
+        self.handle
+            .add(&gateway_route(c.addr, c.prefix, gw, self.orig_idx))
+            .await?;
         Ok(())
     }
     async fn remove_bypass(&self, c: &Cidr) -> std::io::Result<()> {
