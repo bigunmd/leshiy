@@ -226,6 +226,19 @@ data class Strings(
     val notifConnected: String,
     val notifConnectedPlain: String,
     val notifDisconnect: String,
+    // App update (in-app updater)
+    val updSection: String,
+    val updNewVersionFmt: String,
+    val updDownload: String,
+    val updLater: String,
+    val updCheck: String,
+    val updChecking: String,
+    val updUpToDate: String,
+    val updDownloading: String,
+    val updVerifying: String,
+    val updInstall: String,
+    val updFailed: String,
+    val updCurrentFmt: String,
 ) {
     /** Localized role name for a wire role string. */
     fun roleName(role: String): String = when (role) {
@@ -440,6 +453,18 @@ val EnStrings = Strings(
     notifConnected = "Connected — %1\$s",
     notifConnectedPlain = "Connected",
     notifDisconnect = "Disconnect",
+    updSection = "App update",
+    updNewVersionFmt = "New version %s available",
+    updDownload = "Download",
+    updLater = "Later",
+    updCheck = "Check for updates",
+    updChecking = "Checking…",
+    updUpToDate = "Up to date",
+    updDownloading = "Downloading…",
+    updVerifying = "Verifying…",
+    updInstall = "Install",
+    updFailed = "Couldn't reach GitHub",
+    updCurrentFmt = "Current version %s",
 )
 
 val RuStrings = Strings(
@@ -644,6 +669,18 @@ val RuStrings = Strings(
     notifConnected = "Подключено — %1\$s",
     notifConnectedPlain = "Подключено",
     notifDisconnect = "Отключить",
+    updSection = "Обновление приложения",
+    updNewVersionFmt = "Доступна новая версия %s",
+    updDownload = "Скачать",
+    updLater = "Позже",
+    updCheck = "Проверить обновления",
+    updChecking = "Проверка…",
+    updUpToDate = "Установлена последняя версия",
+    updDownloading = "Загрузка…",
+    updVerifying = "Проверка файла…",
+    updInstall = "Установить",
+    updFailed = "Не удалось связаться с GitHub",
+    updCurrentFmt = "Текущая версия %s",
 )
 
 fun stringsFor(lang: Lang): Strings = if (lang == Lang.RU) RuStrings else EnStrings

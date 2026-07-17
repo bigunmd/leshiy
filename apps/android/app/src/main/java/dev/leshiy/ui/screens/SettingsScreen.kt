@@ -32,6 +32,7 @@ import dev.leshiy.ui.components.NavRow
 import dev.leshiy.ui.components.PanelCard
 import dev.leshiy.ui.components.ScreenFrame
 import dev.leshiy.ui.components.SectionLabel
+import dev.leshiy.ui.components.UpdateSettingsSection
 import dev.leshiy.ui.i18n.Lang
 import dev.leshiy.ui.i18n.LangState
 import dev.leshiy.ui.i18n.LocalStrings
@@ -124,6 +125,8 @@ fun SettingsScreen(
                     LangSeg("Русский", lang == Lang.RU, Modifier.weight(1f)) { LangState.set(context, Lang.RU) }
                 }
             }
+
+            UpdateSettingsSection()
         }
     }
 }

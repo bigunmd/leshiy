@@ -45,6 +45,7 @@ import dev.leshiy.ui.screens.SplitScreen
 import dev.leshiy.ui.screens.UpgradeScreen
 import dev.leshiy.ui.screens.VaultBackupScreen
 import dev.leshiy.ui.theme.LeshiyTheme
+import dev.leshiy.update.UpdateManager
 
 class MainActivity : ComponentActivity() {
 
@@ -59,6 +60,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         LangState.init(this)
+        UpdateManager.autoCheck(this)
         enableEdgeToEdge()
         setContent {
             val lang by LangState.lang.collectAsStateWithLifecycle()
