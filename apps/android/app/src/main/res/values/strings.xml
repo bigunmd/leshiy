@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Launcher/widget labels. These are rendered by the system (shortcuts, widget picker), so they
+     use resource localization by device locale — independent of the in-app EN/RU toggle, which
+     only affects the Compose UI (see Strings.kt). -->
+<resources>
+    <string name="scut_connect">Connect</string>
+    <string name="scut_disconnect">Disconnect</string>
+    <string name="widget_label">Leshiy VPN</string>
+    <string name="widget_state_on">Connected</string>
+    <string name="widget_state_off">Tap to connect</string>
+</resources>

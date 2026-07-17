@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="scut_connect">Подключить</string>
+    <string name="scut_disconnect">Отключить</string>
+    <string name="widget_label">Leshiy VPN</string>
+    <string name="widget_state_on">Подключено</string>
+    <string name="widget_state_off">Нажмите для подключения</string>
+</resources>

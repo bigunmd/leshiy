@@ -98,6 +98,7 @@ class LeshiyVpnService : VpnService() {
         })
         TunnelRepository.setRunning(true)
         LeshiyTileService.requestUpdate(applicationContext)
+        LeshiyWidgetProvider.requestUpdate(applicationContext)
         startDomainRefresh()
         startNetworkWatch()
         scheduleKeepaliveAlarm(applicationContext)
@@ -269,6 +270,7 @@ class LeshiyVpnService : VpnService() {
         bridge.stop()
         TunnelRepository.setRunning(false)
         LeshiyTileService.requestUpdate(applicationContext)
+        LeshiyWidgetProvider.requestUpdate(applicationContext)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -349,6 +351,7 @@ class LeshiyVpnService : VpnService() {
         bridge.stop()
         TunnelRepository.setRunning(false)
         LeshiyTileService.requestUpdate(applicationContext)
+        LeshiyWidgetProvider.requestUpdate(applicationContext)
         scope.cancel()
         super.onDestroy()
     }
