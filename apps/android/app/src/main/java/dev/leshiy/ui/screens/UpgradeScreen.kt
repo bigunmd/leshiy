@@ -84,6 +84,9 @@ fun UpgradeScreen(
     }
 
     val names = listOf(s.stepConnect, s.stepPullImage, s.stepRecreate, s.stepSave)
+    require(names.size == UPGRADE_STEPS.size) {
+        "UPGRADE_STEPS has ${UPGRADE_STEPS.size} steps but `names` only labels ${names.size} — add a label"
+    }
     val states = stepStates(UPGRADE_STEPS.size, state.doneCount, state.activeIndex, state.failedIndex)
 
     val (headline, tint) = when {

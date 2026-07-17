@@ -39,6 +39,7 @@ class UpgradeViewModel : ViewModel() {
             label = label,
             from = shortVersion(fromRef),
             to = shortVersion(targetRef),
+            serverId = serverId,
         )
         viewModelScope.launch {
             val listener = object : ProvisionListener {

@@ -5,6 +5,7 @@ import dev.leshiy.ui.UPGRADE_STEPS
 import dev.leshiy.ui.UpgradeState
 import dev.leshiy.ui.applyError
 import dev.leshiy.ui.applyEvent
+import dev.leshiy.ui.canUpgrade
 import dev.leshiy.ui.formatElapsed
 import dev.leshiy.ui.shortVersion
 import dev.leshiy.ui.stepStates
@@ -126,5 +127,37 @@ class UpgradeTest {
         assertEquals(1, s.log.size)
         assertEquals(-1, s.activeIndex)
         assertEquals(0, s.doneCount)
+    }
+
+    @Test fun an_error_with_no_step_in_flight_pins_the_failure_to_the_next_unstarted_step() {
+        // engine::upgrade does real work (image ref validation, docker inspect, DNS, port parse)
+        // before its first event, so a failure there arrives with activeIndex == -1. The failure
+        // must not vanish — it belongs to the next step execution hadn't reached yet.
+        val s = UpgradeState(running = true)
+            .applyEvent("Connect", "Started", "", nowMs = 0)
+            .applyEvent("Connect", "Done", "", nowMs = 1_000)
+            .applyError("docker inspect: no such container")
+        assertFalse(s.running)
+        assertEquals(1, s.failedIndex)
+        assertEquals(
+            listOf(StepState.DONE, StepState.FAILED, StepState.PENDING, StepState.PENDING),
+            stepStates(n, s.doneCount, s.activeIndex, s.failedIndex),
+        )
+    }
+
+    @Test fun can_upgrade_is_true_for_any_server_when_idle() {
+        val s = UpgradeState()
+        assertTrue(canUpgrade(s, "berlin"))
+        assertTrue(canUpgrade(s, "oslo"))
+    }
+
+    @Test fun can_upgrade_is_true_for_the_server_whose_upgrade_is_running() {
+        val s = UpgradeState(running = true, serverId = "berlin")
+        assertTrue(canUpgrade(s, "berlin"))
+    }
+
+    @Test fun can_upgrade_is_false_for_a_different_server_while_one_is_running() {
+        val s = UpgradeState(running = true, serverId = "berlin")
+        assertFalse(canUpgrade(s, "oslo"))
     }
 }

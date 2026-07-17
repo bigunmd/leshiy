@@ -29,6 +29,8 @@ data class UpgradeState(
     val to: String = "",
     /** Server label, for the screen title. */
     val label: String = "",
+    /** Which server this run belongs to — see [canUpgrade]. */
+    val serverId: String = "",
     /** Finalised per-step durations in ms, keyed by step index. */
     val stepMs: Map<Int, Long> = emptyMap(),
     /**
@@ -69,14 +71,32 @@ fun UpgradeState.applyEvent(step: String, status: String, detail: String, nowMs:
  * Pin a thrown FFI error to whichever step was in flight.
  *
  * `engine::upgrade` returns `Err` without emitting a Failed event, so this is the only way the
- * timeline can show *where* an upgrade broke.
+ * timeline can show *where* an upgrade broke. When no step is in flight — `engine::upgrade` does
+ * real work (image ref validation, `docker inspect` for env, container-exists check, DNS
+ * inspection, port parsing) before its first event — the failure is pinned to [doneCount], the
+ * next un-started step, which is exactly where execution had reached. Guarded against
+ * [doneCount] having already reached [UPGRADE_STEPS] size (everything completed).
  */
 fun UpgradeState.applyError(message: String): UpgradeState = copy(
     running = false,
     error = message,
-    failedIndex = if (activeIndex >= 0) activeIndex else failedIndex,
+    failedIndex = when {
+        activeIndex >= 0 -> activeIndex
+        doneCount < UPGRADE_STEPS.size -> doneCount
+        else -> failedIndex
+    },
     activeIndex = -1,
 )
+
+/**
+ * Whether [serverId]'s upgrade button may be tapped.
+ *
+ * One [UpgradeViewModel] is shared by every server, so while an upgrade is in flight the only
+ * server that may enter the stepper is the one it belongs to — otherwise tapping Upgrade on a
+ * different server would silently show someone else's run marching to success.
+ */
+fun canUpgrade(state: UpgradeState, serverId: String): Boolean =
+    !state.running || state.serverId == serverId
 
 /** Per-step visual state. A step already counted done stays done. */
 fun stepStates(count: Int, doneCount: Int, activeIndex: Int, failedIndex: Int): List<StepState> =

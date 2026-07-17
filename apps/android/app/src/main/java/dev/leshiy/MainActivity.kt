@@ -248,7 +248,13 @@ private fun AppNav(onConnect: (String) -> Unit, onDisconnect: () -> Unit) {
                 // The vault record changed — without the refresh the Version card would come back
                 // showing the old image ref.
                 onDone = { manageVm.refreshServers(); nav.popBackStack() },
-                onBack = { nav.popBackStack() },
+                onBack = {
+                    // Leaving via the back arrow skips onDone — refresh here too, or a finished
+                    // run leaves the Version card showing the stale imageRef until the vault is
+                    // re-unlocked.
+                    if (upgradeVm.state.value.done) manageVm.refreshServers()
+                    nav.popBackStack()
+                },
             )
         }
         composable(Route.CREDENTIAL) {

@@ -24,6 +24,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.leshiy.ui.ManageViewModel
 import dev.leshiy.ui.ServerStatus
 import dev.leshiy.ui.UpgradeViewModel
+import dev.leshiy.ui.canUpgrade
 import dev.leshiy.ui.components.Field
 import dev.leshiy.ui.components.HelpField
 import dev.leshiy.ui.components.LoadingButton
@@ -60,6 +61,7 @@ fun ServerDetailScreen(
     val pending by vm.pending.collectAsStateWithLifecycle()
     val message by vm.message.collectAsStateWithLifecycle()
     val sudoPw by vm.sudo.collectAsStateWithLifecycle()
+    val upgradeState by upgradeVm.state.collectAsStateWithLifecycle()
 
     val server = servers.firstOrNull { it.id == selected }
     if (server == null) {
@@ -137,10 +139,10 @@ fun ServerDetailScreen(
                     )
                     // Never disabled when up to date: a re-run is how new container run-flags land
                     // (provision reuses a running container and would change nothing).
+                    val upgradeAllowed = canUpgrade(upgradeState, server.id)
                     PrimaryButton(
                         if (hasUpdate) s.upgradeServer else s.reapplyVersion.format(shortVersion(effective)),
                         onClick = {
-                            upgradeVm.reset()
                             upgradeVm.upgrade(
                                 serverId = server.id,
                                 label = server.label,
@@ -150,9 +152,13 @@ fun ServerDetailScreen(
                             )
                             onOpenUpgrade()
                         },
+                        enabled = upgradeAllowed,
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Text(s.upgradeTunnelNote, style = MaterialTheme.typography.labelSmall, color = Dim)
+                    if (!upgradeAllowed) {
+                        Text(s.upgradeBusyNote, style = MaterialTheme.typography.labelSmall, color = Dim)
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth().clickable { advOpen = !advOpen }.padding(vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
