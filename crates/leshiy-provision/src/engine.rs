@@ -407,6 +407,85 @@ pub async fn delete_user<T: Transport>(
     Ok(())
 }
 
+/// Pull `image_ref` and recreate the server container over its existing data volume.
+///
+/// `provision` cannot do this. It skips pull+run whenever the container is already **running** —
+/// idempotent re-runs are its whole purpose — so re-provisioning a healthy server silently
+/// changes nothing: every step reports Done and the binary stays exactly where it was. Without
+/// this verb there is no upgrade path for a `leshiy remote` server at all (the provisioner never
+/// installs `leshiyctl`, which is the install.sh path's day-2 tool).
+///
+/// Identity survives: config, keys and the user DB live on the `leshiy-data` volume, which
+/// `docker rm -f` does not touch. Only `teardown --purge` removes it. Client URIs keep working.
+///
+/// The live container's configuration is **preserved, not reconstructed** — see
+/// [`docker::inspect_env_cmd`] for why that isn't optional.
+pub async fn upgrade<T: Transport>(
+    t: &mut T,
+    rec: &mut ServerRecord,
+    image_ref: &str,
+    mut on_event: impl FnMut(ProgressEvent),
+) -> Result<()> {
+    if !valid_image_ref(image_ref) {
+        return Err(Error::Parse(format!("invalid image ref: {image_ref}")));
+    }
+
+    // Carry the running container's own env across. `boot` *requires* LESHIY_HOST/LESHIY_DEST and
+    // errors before it checks whether config generation is even needed, so a container recreated
+    // without them crash-loops under --restart=unless-stopped. `dest_sni` was never stored on the
+    // record, so this is the only place it exists.
+    let env_out = t.run(&docker::inspect_env_cmd(&rec.container)).await?;
+    let envs = docker::leshiy_envs(&docker::parse_json_string_list(&env_out.stdout));
+    if envs.is_empty() {
+        // No container, or one carrying no LESHIY_* env — nothing safe to preserve. Provision
+        // handles a missing container correctly (it recreates from scratch), so send them there
+        // rather than guess at a config.
+        return Err(Error::Parse(format!(
+            "no upgradable container `{}` on this host (inspect returned no LESHIY_* env) — \
+             run `leshiy remote provision` to recreate it",
+            rec.container
+        )));
+    }
+    // Preserve --dns too: an operator's explicit override must not be silently swapped for a
+    // re-detected default just because they upgraded.
+    let dns_out = t.run(&docker::inspect_dns_cmd(&rec.container)).await?;
+    let dns = docker::parse_json_string_list(&dns_out.stdout);
+    let dns_refs: Vec<&str> = dns.iter().map(String::as_str).collect();
+
+    // The listen port is only recoverable from `public_host` — `rec.port` is the SSH port.
+    let listen_port = docker::port_of(&rec.public_host).ok_or_else(|| {
+        Error::Parse(format!(
+            "cannot read the listen port from public_host `{}`",
+            rec.public_host
+        ))
+    })?;
+    let quic_port = rec.quic.as_ref().and_then(|q| docker::port_of(&q.addr));
+
+    on_event(ev(Step::PullImage, Status::Started, image_ref));
+    t.run(&docker::pull_cmd(image_ref)).await?.ok()?;
+    on_event(ev(Step::PullImage, Status::Done, ""));
+
+    // `run_container` force-removes the old container first and retries the port-bind race, which
+    // an upgrade hits harder than a fresh provision: the port is still held by the container we
+    // are replacing.
+    on_event(ev(Step::RunContainer, Status::Started, ""));
+    let run = docker::run_cmd(
+        &rec.container,
+        image_ref,
+        listen_port,
+        quic_port,
+        &dns_refs,
+        &envs,
+    );
+    run_container(t, &rec.container, &run).await?;
+    on_event(ev(Step::RunContainer, Status::Done, ""));
+
+    // Only after the new container is actually up — a failed upgrade must leave the record
+    // describing what is really running.
+    rec.image_ref = image_ref.to_string();
+    Ok(())
+}
+
 /// Whether the server container is currently running.
 pub async fn status<T: Transport>(t: &mut T, rec: &ServerRecord) -> Result<bool> {
     let names = docker::parse_ps_names(&t.run(docker::ps_names_cmd()).await?.stdout);
@@ -799,6 +878,214 @@ mod tests {
             runs, 2,
             "must retry the port-bind race exactly once then succeed"
         );
+    }
+
+    // --- upgrade -------------------------------------------------------------------
+
+    fn upgradable_rec() -> ServerRecord {
+        ServerRecord {
+            id: "srv1".into(),
+            label: "vps".into(),
+            host: "h".into(),
+            port: 22, // NB: the SSH port. The listen port lives in `public_host`.
+            ssh_user: "root".into(),
+            ssh_secret: SshSecret::Password("p".to_string().into()),
+            host_key_fp: "fp".into(),
+            public_host: "1.2.3.4:443".into(),
+            image_ref: "ghcr.io/o/r:v1.8.0".into(),
+            container: "leshiy".into(),
+            reality_public_b64: "QUJD".into(),
+            quic: Some(crate::vault::QuicInfo {
+                addr: "1.2.3.4:8443".into(),
+                sni: "a.com".into(),
+                cert_sha256: None,
+            }),
+            clients: vec![],
+            created_at: 0,
+            role: "single".into(),
+            connector_uri: None,
+            downstream: None,
+            sudo: false,
+        }
+    }
+
+    /// A live container's env, as `docker inspect --format '{{json .Config.Env}}'` prints it —
+    /// image-supplied vars included, because those must NOT be carried across.
+    fn inspect_env_json() -> String {
+        r#"["PATH=/usr/local/bin","LESHIY_HOST=1.2.3.4:443","LESHIY_DEST=www.microsoft.com:443","LESHIY_LISTEN=[::]:443"]"#.into()
+    }
+
+    fn ok(stdout: &str) -> CommandOutput {
+        CommandOutput {
+            code: 0,
+            stdout: stdout.into(),
+            stderr: String::new(),
+        }
+    }
+
+    fn upgrade_transport() -> FakeTransport {
+        let mut t = FakeTransport::new();
+        // Most-specific first: both inspects contain "docker inspect".
+        t.on("json .Config.Env", ok(&inspect_env_json()))
+            .on("json .HostConfig.Dns", ok(r#"["9.9.9.9"]"#))
+            .on("docker pull", ok(""))
+            .on("docker rm", ok(""))
+            .on("docker run", ok(""));
+        t
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn upgrade_pulls_recreates_and_records_the_new_image() {
+        let mut t = upgrade_transport();
+        let mut rec = upgradable_rec();
+        upgrade(&mut t, &mut rec, "ghcr.io/o/r:v1.9.0", |_| {})
+            .await
+            .unwrap();
+
+        let calls = t.calls();
+        let run = calls.iter().find(|c| c.contains("docker run")).unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.contains("docker pull ghcr.io/o/r:v1.9.0"))
+        );
+        assert!(run.contains("ghcr.io/o/r:v1.9.0"), "new image: {run}");
+        // The record must describe what is actually running now.
+        assert_eq!(rec.image_ref, "ghcr.io/o/r:v1.9.0");
+    }
+
+    /// The entire reason this verb exists: a pre-1.9.0 container has no sysctl, so ICMP is dead
+    /// until it is recreated with one.
+    #[tokio::test(start_paused = true)]
+    async fn upgrade_recreates_with_the_ping_group_range_sysctl() {
+        let mut t = upgrade_transport();
+        let mut rec = upgradable_rec();
+        upgrade(&mut t, &mut rec, "ghcr.io/o/r:v1.9.0", |_| {})
+            .await
+            .unwrap();
+        let calls = t.calls();
+        let run = calls.iter().find(|c| c.contains("docker run")).unwrap();
+        assert!(
+            run.contains("--sysctl 'net.ipv4.ping_group_range=0 2147483647'"),
+            "upgrade must recreate with the ICMP sysctl: {run}"
+        );
+    }
+
+    /// LESHIY_DEST is required by `boot` and was never stored on the record, so losing it here
+    /// crash-loops the upgraded container under --restart=unless-stopped. The image's own PATH
+    /// must NOT be carried across — it belongs to the old image.
+    #[tokio::test(start_paused = true)]
+    async fn upgrade_preserves_the_containers_leshiy_env_and_nothing_else() {
+        let mut t = upgrade_transport();
+        let mut rec = upgradable_rec();
+        upgrade(&mut t, &mut rec, "ghcr.io/o/r:v1.9.0", |_| {})
+            .await
+            .unwrap();
+        let calls = t.calls();
+        let run = calls.iter().find(|c| c.contains("docker run")).unwrap();
+        assert!(
+            run.contains("-e LESHIY_DEST='www.microsoft.com:443'"),
+            "{run}"
+        );
+        assert!(run.contains("-e LESHIY_HOST='1.2.3.4:443'"), "{run}");
+        assert!(run.contains("-e LESHIY_LISTEN='[::]:443'"), "{run}");
+        assert!(
+            !run.contains("PATH="),
+            "image env must not be carried: {run}"
+        );
+    }
+
+    /// An explicit `--dns` override must survive an upgrade rather than being silently swapped
+    /// for a re-detected default.
+    #[tokio::test(start_paused = true)]
+    async fn upgrade_preserves_the_dns_override() {
+        let mut t = upgrade_transport();
+        let mut rec = upgradable_rec();
+        upgrade(&mut t, &mut rec, "ghcr.io/o/r:v1.9.0", |_| {})
+            .await
+            .unwrap();
+        let calls = t.calls();
+        let run = calls.iter().find(|c| c.contains("docker run")).unwrap();
+        assert!(run.contains("--dns 9.9.9.9"), "{run}");
+    }
+
+    /// Ports are recovered from `public_host` / `quic.addr` — `rec.port` is the SSH port, and
+    /// publishing 22 would be both wrong and alarming.
+    #[tokio::test(start_paused = true)]
+    async fn upgrade_republishes_the_listen_and_quic_ports_not_the_ssh_port() {
+        let mut t = upgrade_transport();
+        let mut rec = upgradable_rec();
+        upgrade(&mut t, &mut rec, "ghcr.io/o/r:v1.9.0", |_| {})
+            .await
+            .unwrap();
+        let calls = t.calls();
+        let run = calls.iter().find(|c| c.contains("docker run")).unwrap();
+        assert!(run.contains("-p 443:443"), "{run}");
+        assert!(run.contains("-p 8443:8443/udp"), "{run}");
+        assert!(
+            !run.contains("-p 22:22"),
+            "must never publish the SSH port: {run}"
+        );
+    }
+
+    /// Nothing safe to preserve → refuse and point at the verb that handles it, rather than
+    /// invent a config and crash-loop the container.
+    #[tokio::test(start_paused = true)]
+    async fn upgrade_refuses_when_there_is_no_container_to_inspect() {
+        let mut t = FakeTransport::new();
+        t.on("docker inspect", ok("null")); // what inspect prints for a missing object
+        let mut rec = upgradable_rec();
+        let err = upgrade(&mut t, &mut rec, "ghcr.io/o/r:v1.9.0", |_| {})
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("provision"), "{err}");
+        // Must not have touched anything.
+        assert!(!t.calls().iter().any(|c| c.contains("docker run")));
+        assert_eq!(
+            rec.image_ref, "ghcr.io/o/r:v1.8.0",
+            "record must be unchanged"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn upgrade_rejects_a_bogus_image_ref_before_touching_the_host() {
+        let mut t = upgrade_transport();
+        let mut rec = upgradable_rec();
+        let err = upgrade(&mut t, &mut rec, "img; rm -rf /", |_| {})
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("invalid image ref"), "{err}");
+        assert!(
+            t.calls().is_empty(),
+            "must not run anything: {:?}",
+            t.calls()
+        );
+    }
+
+    /// A failed recreate must leave the record describing what is really running, or `status`
+    /// and a later upgrade would both lie about the deployed version.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_upgrade_leaves_the_recorded_image_alone() {
+        let mut t = FakeTransport::new();
+        t.on("json .Config.Env", ok(&inspect_env_json()))
+            .on("json .HostConfig.Dns", ok("null"))
+            .on("docker pull", ok(""))
+            .on("docker rm", ok(""))
+            .on(
+                "docker run",
+                CommandOutput {
+                    code: 125,
+                    stdout: String::new(),
+                    stderr: "docker: invalid reference format".into(),
+                },
+            );
+        let mut rec = upgradable_rec();
+        assert!(
+            upgrade(&mut t, &mut rec, "ghcr.io/o/r:v1.9.0", |_| {})
+                .await
+                .is_err()
+        );
+        assert_eq!(rec.image_ref, "ghcr.io/o/r:v1.8.0");
     }
 
     #[tokio::test(start_paused = true)]

@@ -408,6 +408,33 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
             crate::ui::eline(&crate::ui::field("running", &up.to_string()));
             Ok(())
         }
+        RemoteCmd::Upgrade { server, image } => {
+            let pass = prompt_passphrase(false)?;
+            let mut vault =
+                Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut rec = vault
+                .get(&server)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no server {server}"))?;
+            let from = rec.image_ref.clone();
+            let mut transport = connect_pinned(&rec).await?;
+            engine::upgrade(&mut transport, &mut rec, &image, |e| {
+                crate::ui::eline(&crate::ui::field(
+                    &format!("{:?}", e.step),
+                    &format!("{:?} {}", e.status, e.detail),
+                ));
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            // Persist only after the container is actually up — `engine::upgrade` leaves the
+            // record alone on failure, so this can't record a version that isn't running.
+            vault.upsert(rec);
+            vault
+                .save(&vault_path(), &pass)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            crate::ui::ok(&format!("server {server} upgraded: {from} -> {image}"));
+            Ok(())
+        }
         RemoteCmd::Backup {
             server,
             connection_only,
