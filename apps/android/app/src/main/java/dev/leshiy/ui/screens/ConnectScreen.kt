@@ -58,6 +58,7 @@ fun ConnectScreen(
     val history by connectVm.history.collectAsStateWithLifecycle()
     val profiles by profilesVm.profiles.collectAsStateWithLifecycle()
     val active = profiles.firstOrNull { it.isActive }
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
 
     Column(
         modifier = Modifier
@@ -94,6 +95,8 @@ fun ConnectScreen(
                 state = ui.state,
                 enabled = active != null || ui.running,
                 onToggle = {
+                    // Tactile confirmation that the connect/disconnect tap registered.
+                    haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
                     if (ui.running) onDisconnect() else active?.let { onConnect(it.uri) }
                 },
             )
