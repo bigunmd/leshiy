@@ -83,6 +83,9 @@ interface Strings {
     val lockPrompt: String
     val lockUnlock: String
     val lockCancel: String
+    val statLatency: String
+    val statDown: String
+    val statUp: String
     // Servers
     val savedServers: String
     val noServers: String
@@ -359,6 +362,9 @@ val EnStrings: Strings = object : Strings {
     override val lockPrompt = "Confirm it's you to open the app."
     override val lockUnlock = "Unlock"
     override val lockCancel = "Cancel"
+    override val statLatency = "Latency"
+    override val statDown = "Download rate"
+    override val statUp = "Upload rate"
     override val savedServers = "Saved servers"
     override val noServers = "No servers yet. Paste a leshiy:// link or scan a QR code below."
     override val active = "active"
@@ -615,6 +621,9 @@ val RuStrings: Strings = object : Strings {
     override val lockPrompt = "Подтвердите, что это вы, чтобы открыть приложение."
     override val lockUnlock = "Разблокировать"
     override val lockCancel = "Отмена"
+    override val statLatency = "Задержка"
+    override val statDown = "Скорость загрузки"
+    override val statUp = "Скорость отдачи"
     override val savedServers = "Сохранённые серверы"
     override val noServers = "Пока нет серверов. Вставьте ссылку leshiy:// или отсканируйте QR-код ниже."
     override val active = "активный"
