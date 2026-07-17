@@ -4,7 +4,10 @@
 //! pinned — MITM-checked, as the CLI's `connect_pinned`), runs the engine op, and persists the
 //! mutated record. The SSH secret never crosses the FFI boundary; it lives only in the vault.
 use crate::error::BridgeError;
-use crate::provision::{ProvisionConfig, ProvisionListener, provision_record};
+use crate::provision::{
+    ProvisionConfig, ProvisionListener, ProvisionUpdate, provision_record, resolve_image_ref,
+    status_str, step_str,
+};
 use leshiy_provision::RusshTransport;
 use leshiy_provision::engine;
 use leshiy_provision::ssh::{SshTarget, Transport};
@@ -28,6 +31,9 @@ pub struct ServerInfo {
     pub downstream: Option<String>,
     /// True when this node exposes a connector credential (exit/middle) usable as a downstream.
     pub has_connector: bool,
+    /// The image ref currently running, so the UI can show `current → target` and whether an
+    /// upgrade would change anything.
+    pub image_ref: String,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -53,6 +59,15 @@ fn err(e: impl std::fmt::Display) -> BridgeError {
     BridgeError::Provision {
         reason: e.to_string(),
     }
+}
+
+/// Push one progress line the engine doesn't emit (it starts at PullImage; persistence is ours).
+fn emit(listener: &dyn ProvisionListener, step: &str, status: &str, detail: &str) {
+    listener.on_update(ProvisionUpdate {
+        step: step.to_string(),
+        status: status.to_string(),
+        detail: detail.to_string(),
+    });
 }
 
 impl ServerManager {
@@ -136,6 +151,7 @@ impl ServerManager {
                 role: r.role.clone(),
                 downstream: r.downstream.clone(),
                 has_connector: r.connector_uri.is_some(),
+                image_ref: r.image_ref.clone(),
             })
             .collect()
     }
@@ -239,6 +255,45 @@ impl ServerManager {
             let mut t = Self::connect(&rec, sudo_password).await?;
             engine::status(&mut t, &rec).await.map_err(err)
         })
+    }
+
+    /// Pull a new image and recreate the container. Users, keys and client URIs survive — they
+    /// live on the data volume, which only `teardown(purge: true)` removes. Returns the image
+    /// ref now running.
+    ///
+    /// This is not the same as re-provisioning: `engine::provision` reuses an already-running
+    /// container by design, so it reports every step Done and changes nothing. Upgrade is the
+    /// only route to a new image *or* to new container run-flags.
+    pub fn upgrade(
+        &self,
+        server_id: String,
+        image_ref: Option<String>,
+        sudo_password: Option<String>,
+        listener: Box<dyn ProvisionListener>,
+    ) -> Result<String, BridgeError> {
+        let mut rec = self.record(&server_id)?;
+        let image = resolve_image_ref(image_ref.as_deref());
+        let rt = Self::rt()?;
+        rt.block_on(async {
+            emit(&*listener, "Connect", "Started", &rec.host);
+            let mut t = Self::connect(&rec, sudo_password).await?;
+            emit(&*listener, "Connect", "Done", "");
+            engine::upgrade(&mut t, &mut rec, &image, |e| {
+                listener.on_update(ProvisionUpdate {
+                    step: step_str(e.step),
+                    status: status_str(e.status),
+                    detail: e.detail.clone(),
+                });
+            })
+            .await
+            .map_err(err)
+        })?;
+        // Only reached when the new container is actually up: `engine::upgrade` leaves the record
+        // untouched on failure, so the vault can never name a version that isn't running.
+        emit(&*listener, "Persist", "Started", "");
+        self.persist(rec)?;
+        emit(&*listener, "Persist", "Done", "");
+        Ok(image)
     }
 
     /// Stop + remove the server (optionally purge its data volume), then drop it from the vault.
@@ -379,5 +434,32 @@ mod tests {
         v.upsert(rec("berlin"));
         v.save(std::path::Path::new(&path), "right").unwrap();
         assert!(ServerManager::open(path, "wrong".into()).is_err());
+    }
+
+    #[test]
+    fn servers_expose_the_running_image_ref() {
+        let path = tmp();
+        let mut v = Vault::new();
+        v.upsert(rec("berlin")); // rec() sets image_ref: "img"
+        v.save(std::path::Path::new(&path), "pass").unwrap();
+
+        let sm = ServerManager::open(path, "pass".into()).unwrap();
+        assert_eq!(sm.servers()[0].image_ref, "img");
+    }
+
+    struct NullListener;
+    impl ProvisionListener for NullListener {
+        fn on_update(&self, _update: ProvisionUpdate) {}
+    }
+
+    /// The record lookup must come first: an unknown id is a local error, and dialling SSH to
+    /// discover that would be both slow and wrong.
+    #[test]
+    fn upgrade_an_unknown_server_fails_before_it_dials_anything() {
+        let sm = ServerManager::open(tmp(), "pass".into()).unwrap();
+        let e = sm
+            .upgrade("nope".into(), None, None, Box::new(NullListener))
+            .unwrap_err();
+        assert!(matches!(e, BridgeError::NoSuchProfile));
     }
 }

@@ -13,7 +13,9 @@ mod status;
 pub use bridge::{LeshiyBridge, StatusListener};
 pub use error::BridgeError;
 pub use profiles::{ProfileInfo, ProfileManager};
-pub use provision::{ProvisionConfig, ProvisionListener, ProvisionUpdate, Provisioner};
+pub use provision::{
+    ProvisionConfig, ProvisionListener, ProvisionUpdate, Provisioner, default_image_ref,
+};
 pub use server::{RemoteUserInfo, ServerInfo, ServerManager};
 pub use status::{ConnState, Status};
 
