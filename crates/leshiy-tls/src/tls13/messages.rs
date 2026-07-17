@@ -208,19 +208,31 @@ pub fn parse_certificate(msg: &[u8]) -> Result<Vec<u8>> {
             have: body.len(),
         });
     }
-    p += 3; // cert_list length
-    if p + 3 > body.len() {
+    // certificate_list length (u24): validate it fits the body rather than skipping it,
+    // so a lying outer length is rejected instead of silently ignored (M5).
+    let list_len =
+        ((body[p] as usize) << 16) | ((body[p + 1] as usize) << 8) | body[p + 2] as usize;
+    p += 3;
+    let list_end = p + list_len;
+    if list_end > body.len() {
+        return Err(TlsError::Truncated {
+            need: list_end,
+            have: body.len(),
+        });
+    }
+    // First CertificateEntry: cert_data length (u24), bounded to the list, not the whole body.
+    if p + 3 > list_end {
         return Err(TlsError::Truncated {
             need: p + 3,
-            have: body.len(),
+            have: list_end,
         });
     }
     let cl = ((body[p] as usize) << 16) | ((body[p + 1] as usize) << 8) | body[p + 2] as usize;
     p += 3;
-    if p + cl > body.len() {
-        return Err(TlsError::Truncated {
-            need: p + cl,
-            have: body.len(),
+    if p + cl > list_end {
+        return Err(TlsError::Malformed {
+            what: "certificate",
+            detail: "cert entry overruns certificate_list".into(),
         });
     }
     Ok(body[p..p + cl].to_vec())
@@ -326,5 +338,40 @@ mod tests {
         let fin = build_finished(&[7u8; 32]);
         assert_eq!(fin[0], 0x14);
         assert_eq!(parse_finished(&fin).unwrap(), vec![7u8; 32]);
+    }
+
+    /// A Certificate message whose outer `certificate_list` length overruns the
+    /// message body must be rejected, not silently ignored (M5). Previously the
+    /// outer u24 length was skipped without validation.
+    #[test]
+    fn parse_certificate_rejects_overlong_list_length() {
+        // ctx(0) + list_len(0xFFFFFF, huge) + one entry { cert_len=3 + der + ext(0) }
+        let mut body = vec![0x00];
+        body.extend_from_slice(&[0xFF, 0xFF, 0xFF]); // certificate_list length: lies
+        body.extend_from_slice(&[0x00, 0x00, 0x03]); // cert_data length = 3
+        body.extend_from_slice(&[0xAA, 0xBB, 0xCC]); // der
+        body.extend_from_slice(&[0x00, 0x00]); // entry extensions: empty
+        let msg = hs_msg(0x0b, &body);
+        assert!(
+            parse_certificate(&msg).is_err(),
+            "parse_certificate must reject a certificate_list length overrunning the body"
+        );
+    }
+
+    /// A cert entry whose declared length overruns the (honest) certificate_list
+    /// block must be rejected.
+    #[test]
+    fn parse_certificate_rejects_entry_overrunning_list() {
+        // list_len = 2 (too small to hold even the entry's 3-byte length field).
+        let mut body = vec![0x00];
+        body.extend_from_slice(&[0x00, 0x00, 0x02]); // certificate_list length = 2
+        body.extend_from_slice(&[0x00, 0x00, 0x03]); // cert_data length = 3 (overruns)
+        body.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+        body.extend_from_slice(&[0x00, 0x00]);
+        let msg = hs_msg(0x0b, &body);
+        assert!(
+            parse_certificate(&msg).is_err(),
+            "parse_certificate must reject a cert entry overrunning certificate_list"
+        );
     }
 }

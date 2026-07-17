@@ -37,6 +37,12 @@ impl ClientHelloView {
         let sid = p.u8()? as usize;
         p.skip(sid)?; // legacy_session_id
         let cs_len = p.u16()? as usize;
+        if !cs_len.is_multiple_of(2) {
+            return Err(TlsError::Malformed {
+                what: "clienthello",
+                detail: format!("odd cipher_suites length {cs_len}"),
+            });
+        }
         let mut cipher_suites = Vec::new();
         for _ in 0..cs_len / 2 {
             cipher_suites.push(p.u16()?);
@@ -54,9 +60,27 @@ impl ClientHelloView {
         if p.remaining() >= 2 {
             let ext_total = p.u16()? as usize;
             let end = p.pos + ext_total;
+            if end > p.buf.len() {
+                return Err(TlsError::Truncated {
+                    need: end,
+                    have: p.buf.len(),
+                });
+            }
             while p.pos < end {
+                if end - p.pos < 4 {
+                    return Err(TlsError::Malformed {
+                        what: "clienthello",
+                        detail: "extension header overruns extensions block".into(),
+                    });
+                }
                 let etype = p.u16()?;
                 let elen = p.u16()? as usize;
+                if p.pos + elen > end {
+                    return Err(TlsError::Malformed {
+                        what: "clienthello",
+                        detail: "extension body overruns extensions block".into(),
+                    });
+                }
                 let ebody = p.take(elen)?;
                 extensions.push(etype);
                 match etype {
@@ -304,9 +328,27 @@ pub fn extract_client_hello_fields(msg: &[u8]) -> Result<ClientHelloFields> {
     if p.remaining() >= 2 {
         let ext_total = p.u16()? as usize;
         let end = p.pos + ext_total;
+        if end > p.buf.len() {
+            return Err(TlsError::Truncated {
+                need: end,
+                have: p.buf.len(),
+            });
+        }
         while p.pos < end {
+            if end - p.pos < 4 {
+                return Err(TlsError::Malformed {
+                    what: "clienthello",
+                    detail: "extension header overruns extensions block".into(),
+                });
+            }
             let etype = p.u16()?;
             let elen = p.u16()? as usize;
+            if p.pos + elen > end {
+                return Err(TlsError::Malformed {
+                    what: "clienthello",
+                    detail: "extension body overruns extensions block".into(),
+                });
+            }
             let ebody = p.take(elen)?;
             match etype {
                 0x0000 => {
@@ -678,5 +720,81 @@ mod tests {
         assert!(!is_grease(0x1301));
         assert!(!is_grease(0x0000));
         assert!(!is_grease(0x44cd));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Malformed-input hardening (H3, M4): both ClientHello parsers must reject a
+    // ClientHello whose declared structure doesn't hold, rather than silently
+    // reading out-of-block bytes or misparsing. See docs/reviews.
+    // ---------------------------------------------------------------------------
+
+    /// Build a minimal ClientHello handshake message with a caller-supplied
+    /// cipher_suites blob and a single, caller-controlled extension header whose
+    /// declared body length may deliberately overrun the extensions block.
+    fn craft_client_hello(
+        cs: &[u8],
+        ext_total: u16,
+        etype: u16,
+        elen: u16,
+        ebody: &[u8],
+    ) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]); // legacy_version
+        body.extend_from_slice(&[0u8; 32]); // random
+        body.push(0); // session_id length
+        body.extend_from_slice(&(cs.len() as u16).to_be_bytes());
+        body.extend_from_slice(cs);
+        body.push(1); // compression methods length
+        body.push(0); // null compression
+        body.extend_from_slice(&ext_total.to_be_bytes());
+        body.extend_from_slice(&etype.to_be_bytes());
+        body.extend_from_slice(&elen.to_be_bytes());
+        body.extend_from_slice(ebody);
+        let mut msg = vec![0x01];
+        msg.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]); // u24 length
+        msg.extend_from_slice(&body);
+        msg
+    }
+
+    /// An extension whose declared length reaches past the ClientHello's own
+    /// declared `extensions` block must be rejected by both parsers — a
+    /// conformant TLS stack rejects it, so accepting it is a DPI-distinguishable
+    /// parser differential and (via `extract_client_hello_fields`) lets fields be
+    /// read from bytes outside the extensions block.
+    #[test]
+    fn extension_overrunning_ext_total_is_rejected() {
+        // ext_total = 4 (room for exactly one extension header, zero body), but the
+        // extension declares a 40-byte body backed by trailing out-of-block bytes.
+        let trailing = vec![0x00u8; 40];
+        let ch = craft_client_hello(&[0x13, 0x01], 4, 0x0000, 40, &trailing);
+        assert!(
+            ClientHelloView::parse(&ch).is_err(),
+            "ClientHelloView::parse must reject an extension overrunning ext_total"
+        );
+        assert!(
+            extract_client_hello_fields(&ch).is_err(),
+            "extract_client_hello_fields must reject an extension overrunning ext_total"
+        );
+    }
+
+    /// A well-formed extension that exactly fills its declared block still parses.
+    #[test]
+    fn extension_exactly_filling_ext_total_is_accepted() {
+        // ext_total = 4 + 3 = 7: one extension header + a 3-byte body.
+        let ch = craft_client_hello(&[0x13, 0x01], 7, 0x002a, 3, &[1, 2, 3]);
+        assert!(ClientHelloView::parse(&ch).is_ok());
+        assert!(extract_client_hello_fields(&ch).is_ok());
+    }
+
+    /// An odd cipher_suites length is malformed (each suite is 2 bytes); accepting
+    /// it silently drops the trailing byte and shifts every later field's offset.
+    #[test]
+    fn odd_cipher_suites_length_is_rejected() {
+        // cs_len = 3 (odd) with 3 bytes of cipher data, then a valid empty ext block.
+        let ch = craft_client_hello(&[0x13, 0x01, 0x02], 0, 0, 0, &[]);
+        assert!(
+            ClientHelloView::parse(&ch).is_err(),
+            "ClientHelloView::parse must reject an odd cipher_suites length"
+        );
     }
 }
