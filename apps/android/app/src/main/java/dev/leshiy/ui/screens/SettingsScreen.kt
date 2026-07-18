@@ -244,6 +244,29 @@ fun SettingsScreen(
             }
 
             Spacer(Modifier.size(6.dp))
+            SectionLabel(s.secInterface)
+            var liveStats by remember { mutableStateOf(AppPrefs.liveStats(context)) }
+            PanelCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(s.liveStatsTitle, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onBackground)
+                        Text(s.liveStatsSub, style = MaterialTheme.typography.labelSmall, color = Dim)
+                    }
+                    Spacer(Modifier.size(12.dp))
+                    Switch(
+                        checked = liveStats,
+                        onCheckedChange = { liveStats = it; AppPrefs.setLiveStats(context, it) },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Bg0,
+                            checkedTrackColor = Wisp,
+                            uncheckedTrackColor = MaterialTheme.colorScheme.surface,
+                            uncheckedBorderColor = MaterialTheme.colorScheme.outline,
+                        ),
+                    )
+                }
+            }
+
+            Spacer(Modifier.size(6.dp))
             SectionLabel(s.language)
             Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
                 Row(Modifier.padding(3.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {

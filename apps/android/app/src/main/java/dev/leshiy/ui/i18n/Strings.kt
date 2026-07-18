@@ -83,6 +83,9 @@ interface Strings {
     val lockPrompt: String
     val lockUnlock: String
     val lockCancel: String
+    val secInterface: String
+    val liveStatsTitle: String
+    val liveStatsSub: String
     val statLatency: String
     val statDown: String
     val statUp: String
@@ -366,6 +369,9 @@ val EnStrings: Strings = object : Strings {
     override val lockPrompt = "Confirm it's you to open the app."
     override val lockUnlock = "Unlock"
     override val lockCancel = "Cancel"
+    override val secInterface = "Interface"
+    override val liveStatsTitle = "Live connection graphs"
+    override val liveStatsSub = "Show a one-minute latency and throughput trend on the Connect screen while connected."
     override val statLatency = "Latency"
     override val statDown = "Download rate"
     override val statUp = "Upload rate"
@@ -629,6 +635,9 @@ val RuStrings: Strings = object : Strings {
     override val lockPrompt = "Подтвердите, что это вы, чтобы открыть приложение."
     override val lockUnlock = "Разблокировать"
     override val lockCancel = "Отмена"
+    override val secInterface = "Интерфейс"
+    override val liveStatsTitle = "Графики подключения"
+    override val liveStatsSub = "Показывать минутный график задержки и скорости на экране подключения, пока туннель активен."
     override val statLatency = "Задержка"
     override val statDown = "Скорость загрузки"
     override val statUp = "Скорость отдачи"

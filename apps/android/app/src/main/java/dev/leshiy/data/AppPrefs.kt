@@ -1,6 +1,9 @@
 package dev.leshiy.data
 
 import android.content.Context
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /** Misc app-level preferences (SharedPreferences, synchronous for the VpnService). */
 object AppPrefs {
@@ -65,6 +68,30 @@ object AppPrefs {
 
     fun setAppLockEnabled(context: Context, value: Boolean) =
         prefs(context).edit().putBoolean("app_lock", value).apply()
+
+    /**
+     * Show the live latency/throughput graphs on the Connect screen. Off by default: the hero
+     * screen stays quiet unless the user asks for the detail. While off, [ConnectViewModel] skips
+     * sampling entirely, so the window costs nothing.
+     */
+    fun liveStats(context: Context): Boolean = prefs(context).getBoolean("live_stats", false)
+
+    fun setLiveStats(context: Context, value: Boolean) {
+        prefs(context).edit().putBoolean("live_stats", value).apply()
+        _liveStats.value = value
+    }
+
+    private val _liveStats = MutableStateFlow(false)
+
+    /**
+     * Live view of [liveStats], so the Connect screen picks the flip up the moment it happens in
+     * Settings rather than on the next activity resume. Seeded by [initLiveStats].
+     */
+    val liveStatsFlow: StateFlow<Boolean> = _liveStats.asStateFlow()
+
+    fun initLiveStats(context: Context) {
+        _liveStats.value = liveStats(context)
+    }
 
     /** Epoch ms of the last GitHub release check (launch checks are throttled to 24h). */
     fun lastUpdateCheck(context: Context): Long = prefs(context).getLong("last_update_check", 0L)
