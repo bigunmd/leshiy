@@ -1,6 +1,9 @@
 name: android-ci
 on:
+  # tags-ignore: GitHub ignores `paths` filters on tag pushes, so without this every release tag
+  # (including v* and desktop-v*) re-ran this whole workflow on an unchanged tree.
   push:
+    tags-ignore: ["**"]
     paths:
       - "apps/android/**"
       - "crates/**"
@@ -14,6 +17,12 @@ on:
       - ".github/workflows/android-ci.yml"
 permissions:
   contents: read
+
+# One run per ref: a follow-up push cancels the run it superseded.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Native Kotlin/Compose app: cross-compile the leshiy-mobile bridge, generate the Kotlin
   # bindings, run the Kotlin unit tests, and assemble the debug APK. (The Rust side of
@@ -31,13 +40,21 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # rust-cache restores ~/.cargo/bin, so this is a no-op on a cache hit — only a cold cache
+      # pays the ~2min source build.
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked
+        run: command -v cargo-ndk >/dev/null || cargo install cargo-ndk --locked
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
+
+      # Caches the Gradle distribution + dependency jars across runs (AGP/Compose pull ~hundreds of
+      # MB otherwise, on every run).
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          build-root-directory: apps/android
 
       - name: Accept Android SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
