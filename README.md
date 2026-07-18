@@ -7,12 +7,20 @@ designed to resist modern Deep Packet Inspection (DPI) — with Russia / TSPU as
 primary target threat model. You run your own server(s); clients connect with a
 single `leshiy://` URI.
 
-> **Maturity: beta.** The protocol and the **Linux, Windows, and Android** clients
-> work reliably in day-to-day use; the apps may still have occasional edge-case bugs.
-> Leshiy has **not yet had an independent security audit** and hasn't been formally
-> field-tested against a live censor — so for genuinely high-stakes situations, prefer
-> tools that have been audited and battle-proven. The design follows published,
-> peer-reviewed anti-censorship research.
+> **Maturity: beta, and hardening well.** The protocol is stable and the **Linux,
+> Windows, and Android** clients work reliably in day-to-day use. The five core
+> protocol/crypto/transport crates (~16k LOC) went through a full line-by-line
+> adversarial review in July 2026: every **Critical, High, and Medium** finding is
+> fixed, most with regression tests. The suite is ~590 tests, and CI gates every push
+> on `cargo fmt`, `clippy -D warnings`, the full test suite, and a RustSec advisory
+> check.
+>
+> That said, Leshiy has **not had an independent security audit**, and has not been
+> systematically field-tested against a live censor. Internal review is not the same
+> thing as either. For genuinely high-stakes situations — where being identified as a
+> circumvention user carries real consequences — prefer tools that have been audited
+> and battle-proven. The design follows published, peer-reviewed anti-censorship
+> research.
 
 ---
 
@@ -21,6 +29,7 @@ single `leshiy://` URI.
 - [What it does](#what-it-does)
 - [Features](#features)
 - [Desktop and mobile apps](#desktop-and-mobile-apps)
+- [Android app](#android-app)
 - [How it compares](#how-it-compares)
 - [Quick start (self-host a server)](#quick-start)
   - [One-command install](#0-one-command-install-recommended)
@@ -114,8 +123,72 @@ camera on Android, or from an image file), or reading it from the clipboard.
 **Live status:** connection state, real-time throughput, and round-trip latency to
 your server.
 
+The Android client goes further than the desktop apps — QS tile, widget, per-app rules,
+on-device server provisioning and management. See [Android app](#android-app) below.
+
 > The apps are clients — you still need a server to connect to. Self-host one with the
 > [Quick start](#quick-start) below, then share its `leshiy://` URI (or QR) with the app.
+
+## Android app
+
+The Android client is a **native Kotlin + Jetpack Compose** app — not a web view or a
+cross-platform wrapper. The tunnel itself is the same Rust core, cross-compiled for
+`arm64-v8a`, `armeabi-v7a` and `x86_64` and called over a UniFFI bridge, so the phone
+runs exactly the protocol implementation the servers and desktop clients do.
+
+Grab `leshiy_vX.Y.Z.apk` from the
+[Releases page](https://github.com/bigunmd/leshiy/releases). Minimum Android 8.0.
+
+**Connecting**
+
+- **Full-device VPN** via Android's `VpnService` — every app on the phone goes through
+  the tunnel. Keeps running in the background once you leave the app.
+- **Add a server** by scanning a QR with the live camera, pasting a `leshiy://` link, or
+  reading it from the clipboard.
+- **Latency ping + "use fastest"** — measures round-trip time to each saved server and
+  picks the quickest.
+- **Always-on VPN** and **auto-reconnect after reboot** (both opt-in).
+
+**Controls without opening the app**
+
+- **Quick Settings tile** — toggle the tunnel straight from the notification shade.
+- **Home-screen widget** and **launcher shortcuts** (long-press the icon).
+- **Ongoing notification** with live throughput, session duration, the active profile
+  name, and a one-tap disconnect.
+
+**Split tunnel**
+
+- Include or exclude specific **domains and IP ranges** (CIDRs), IPv4 and IPv6.
+- **Per-app rules** — tunnel only the apps you pick, or everything except them.
+- **Community rule lists** — subscribe to curated presets; they refresh automatically.
+
+**Managing your servers from the phone**
+
+The app is not just a client — it can stand up and run your infrastructure:
+
+- **Provision a fresh VPS** into a leshiy server over SSH, with live progress.
+- **Build an Entry ▶ Exit cascade** from the phone, including multi-hop chains.
+- **Day-2 management** — server status, add/list/revoke client users, in-place server
+  upgrades, teardown.
+- Server credentials live in an **encrypted on-device vault** (Argon2id +
+  XChaCha20-Poly1305), with **encrypted backup and restore** so you can move to a new
+  phone.
+
+**Privacy and polish**
+
+- **Biometric app lock** — fingerprint or screen lock to open the app; the tunnel keeps
+  running while locked.
+- **Battery/Doze exemption prompt**, surfaced exactly when keep-alive needs it.
+- **In-app updates** — checks GitHub releases, downloads, **verifies the signature**, and
+  installs.
+- First-run **onboarding**, app-wide error recovery, haptic feedback, and an optional
+  live latency/throughput graph on the Connect screen (off by default).
+- Full **English and Russian** localization.
+
+> **Runtime caveat:** the Android app is exercised in day-to-day use and its logic is
+> unit-tested in CI (which also builds the APK on every push), but it does not yet have a
+> systematic on-device test matrix across vendors and Android versions. OEM battery
+> managers in particular vary a lot in how aggressively they kill background VPNs.
 
 ## How it compares
 
@@ -356,8 +429,9 @@ leshiy remote provision --role entry --host root@ENTRY_IP --dest www.microsoft.c
 
 Add `--role middle --downstream <prev>` nodes for extra hops. `leshiy remote ls` shows each server's role and downstream.
 
-**Prerequisite:** a published server image (default `ghcr.io/leshiy/leshiy:1.5.0`);
-override with `--image`.
+**Prerequisite:** a published server image. Defaults to
+`ghcr.io/bigunmd/leshiy:v<CLI version>` — the tag CI publishes for the release you're
+running — so it tracks your client automatically; override with `--image`.
 
 ---
 
