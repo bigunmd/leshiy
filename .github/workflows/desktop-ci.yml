@@ -1,9 +1,10 @@
 name: desktop-ci
 on:
-  # tags-ignore: GitHub ignores `paths` filters on tag pushes, so without this every release tag
-  # (including v* and android-v*) re-ran this whole workflow on an unchanged tree.
+  # branches (and NOT tags): GitHub ignores `paths` filters on tag pushes, so without this every
+  # release tag (including v* and android-v*) re-ran this whole workflow on an unchanged tree.
+  # Listing `branches` is what excludes tags — a lone `tags-ignore` would disable branch pushes.
   push:
-    tags-ignore: ["**"]
+    branches: ["**"]
     paths: ["apps/gui/**", "crates/leshiy-client/**", ".github/workflows/desktop-ci.yml"]
   pull_request:
     paths: ["apps/gui/**", "crates/leshiy-client/**", ".github/workflows/desktop-ci.yml"]

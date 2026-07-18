@@ -1,11 +1,14 @@
 name: ci
 on:
-  # tags-ignore: a release round pushes v*, android-v* and desktop-v* at the same tree, and each
-  # tag push would otherwise re-run this workflow on code master already tested. Tag pushes are
-  # covered by the release workflows; `paths` filters can't help here because GitHub ignores them
-  # on tag pushes.
+  # branches (and NOT tags): a release round pushes v*, android-v* and desktop-v* at the same
+  # tree, and each tag push would otherwise re-run this workflow on code master already tested.
+  # Tag pushes are the release workflows' job.
+  #
+  # `branches: ["**"]` is what excludes tags, and it must be spelled this way round: GitHub skips
+  # a workflow for whichever ref type the filters leave undefined, so a lone `tags-ignore` would
+  # disable branch pushes instead — silently turning CI off.
   push:
-    tags-ignore: ["**"]
+    branches: ["**"]
   pull_request:
 
 # One run per ref: a follow-up push cancels the run it superseded.
