@@ -3,6 +3,7 @@ package dev.leshiy.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import dev.leshiy.data.AppPrefs
 import dev.leshiy.data.TunnelRepository
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -41,9 +42,13 @@ class ConnectViewModel(app: Application) : AndroidViewModel(app) {
     /** Rolling one-minute window of live stats for the Connect-screen sparklines. */
     val history: StateFlow<List<Sample>> = _history.asStateFlow()
 
+    /** User opt-in for the Connect-screen graphs (off by default). */
+    val liveStats: StateFlow<Boolean> = AppPrefs.liveStatsFlow
+
     init {
         // Sample on a fixed 1s tick so throughput is a clean per-second rate and the sparkline has
-        // an even time axis; drop the whole window whenever the tunnel isn't connected.
+        // an even time axis; drop the whole window whenever we're not sampling (opted out, or the
+        // tunnel isn't connected).
         viewModelScope.launch {
             var prevUp = 0uL
             var prevDown = 0uL
@@ -51,7 +56,7 @@ class ConnectViewModel(app: Application) : AndroidViewModel(app) {
             while (true) {
                 delay(SAMPLE_MS)
                 val st = TunnelRepository.status.value
-                if (!TunnelRepository.running.value || st == null || st.state != ConnState.CONNECTED) {
+                if (st == null || !shouldSample(liveStats.value, TunnelRepository.running.value, st.state)) {
                     if (_history.value.isNotEmpty()) _history.value = emptyList()
                     haveBaseline = false
                     continue

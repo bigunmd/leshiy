@@ -99,6 +99,7 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         LangState.init(this)
+        AppPrefs.initLiveStats(this)
         UpdateManager.autoCheck(this)
         // Cold start: lock immediately if the feature is on (before any UI is shown).
         locked.value = AppPrefs.appLockEnabled(this)

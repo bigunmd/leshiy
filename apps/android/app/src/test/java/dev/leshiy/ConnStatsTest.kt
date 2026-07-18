@@ -2,9 +2,13 @@ package dev.leshiy
 
 import dev.leshiy.ui.Sample
 import dev.leshiy.ui.appendSample
+import dev.leshiy.ui.shouldSample
 import dev.leshiy.ui.throughputRate
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import uniffi.leshiy_mobile.ConnState
 
 class ConnStatsTest {
 
@@ -25,6 +29,21 @@ class ConnStatsTest {
     @Test
     fun non_positive_dt_is_zero() {
         assertEquals(0L, throughputRate(prev = 0u, curr = 1000u, dtMillis = 0))
+    }
+
+    @Test
+    fun sampling_is_off_unless_the_user_opted_in() {
+        // The graphs are opt-in: with the preference off we do no sampling, however live the
+        // tunnel is.
+        assertFalse(shouldSample(enabled = false, running = true, state = ConnState.CONNECTED))
+    }
+
+    @Test
+    fun sampling_needs_a_connected_tunnel() {
+        assertTrue(shouldSample(enabled = true, running = true, state = ConnState.CONNECTED))
+        assertFalse(shouldSample(enabled = true, running = true, state = ConnState.CONNECTING))
+        assertFalse(shouldSample(enabled = true, running = true, state = ConnState.DISCONNECTED))
+        assertFalse(shouldSample(enabled = true, running = false, state = ConnState.CONNECTED))
     }
 
     @Test

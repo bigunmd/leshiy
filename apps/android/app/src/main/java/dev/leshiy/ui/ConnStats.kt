@@ -1,5 +1,7 @@
 package dev.leshiy.ui
 
+import uniffi.leshiy_mobile.ConnState
+
 /** One sampled point of live connection stats. Rates are bytes/second over the sample interval. */
 data class Sample(val rtt: Int, val upRate: Long, val downRate: Long)
 
@@ -16,6 +18,14 @@ fun throughputRate(prev: ULong, curr: ULong, dtMillis: Long): Long {
     if (dtMillis <= 0 || curr < prev) return 0
     return ((curr - prev).toLong() * 1000) / dtMillis
 }
+
+/**
+ * Whether the rolling window should collect a sample this tick. [enabled] is the user's opt-in
+ * (graphs are off by default), so when it's false we do no sampling at all rather than collecting
+ * a window nothing renders.
+ */
+fun shouldSample(enabled: Boolean, running: Boolean, state: ConnState): Boolean =
+    enabled && running && state == ConnState.CONNECTED
 
 /** Append [sample] to the rolling window, keeping at most [max] most-recent samples. */
 fun appendSample(history: List<Sample>, sample: Sample, max: Int): List<Sample> =

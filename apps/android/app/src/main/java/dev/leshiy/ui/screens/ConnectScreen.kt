@@ -56,6 +56,7 @@ fun ConnectScreen(
 ) {
     val ui by connectVm.uiState.collectAsStateWithLifecycle()
     val history by connectVm.history.collectAsStateWithLifecycle()
+    val showLiveStats by connectVm.liveStats.collectAsStateWithLifecycle()
     val profiles by profilesVm.profiles.collectAsStateWithLifecycle()
     val active = profiles.firstOrNull { it.isActive }
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
@@ -104,7 +105,7 @@ fun ConnectScreen(
             Spacer(Modifier.size(28.dp))
             StatusReadout(ui.state, ui.upBytes, ui.downBytes, ui.rttMs)
 
-            if (ui.state == ConnState.CONNECTED && history.isNotEmpty()) {
+            if (showLiveStats && ui.state == ConnState.CONNECTED && history.isNotEmpty()) {
                 Spacer(Modifier.size(18.dp))
                 LiveStats(history)
             }
