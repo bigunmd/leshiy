@@ -109,8 +109,13 @@ public_ip() { curl -fsSL https://api.ipify.org || curl -fsSL https://ifconfig.me
 # existing container first).
 run_server_container() {  # $1 = image ref
   docker rm -f leshiy >/dev/null 2>&1 || true
+  # --ulimit nofile: the default 1024 is below what MAX_TOTAL_CONNS (4096, >=2 fds each) needs,
+  # so accept() would fail with EMFILE under load. --log-opt caps the json log, which is otherwise
+  # unbounded and has filled a host disk.
   docker run -d --name leshiy --restart unless-stopped \
     --user 0:0 --network host \
+    --ulimit nofile=65535:65535 \
+    --log-opt max-size=50m --log-opt max-file=3 \
     -v "$CFGDIR":/etc/leshiy \
     "$1" server --config /etc/leshiy/server.toml
 }
@@ -177,6 +182,12 @@ write_unit_and_start() {
 Description=Leshiy stealth tunnel
 After=network-online.target
 Wants=network-online.target
+# Give up after 5 failed starts in 5 minutes instead of restarting forever. A permanent startup
+# failure (e.g. the sqlite open failing on a full disk) otherwise loops indefinitely, and each
+# attempt writes log lines to the very disk that is full — the loop feeds itself and pins the CPU
+# in rsyslogd/journald. Failing loudly and stopping is the recoverable outcome.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 User=leshiy
@@ -194,8 +205,12 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 # surfaces as a clear "config not found" from the binary instead of a cryptic namespace error.
 ConfigurationDirectory=leshiy
 ConfigurationDirectoryMode=0700
+# systemd's default soft limit is 1024, but the server admits up to MAX_TOTAL_CONNS (4096)
+# connections and each costs >=2 descriptors. Without this the FD ceiling is reached first and
+# accept() starts failing with EMFILE while the connection cap still reads as far from full.
+LimitNOFILE=65535
 Restart=on-failure
-RestartSec=2
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

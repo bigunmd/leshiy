@@ -72,9 +72,15 @@ pub fn run_cmd(
     // made to emit arbitrary ICMP. Namespaced per-netns, so it changes nothing on the host.
     // Without it the socket fails EACCES, the association is declined, and the client falls back
     // to dropping ICMP — the pre-ADR-0030 behaviour.
+    // --ulimit nofile: Docker's default (1024 soft) sits below what MAX_TOTAL_CONNS (4096
+    // connections, >=2 descriptors each) requires, so the FD ceiling is reached before the
+    // connection cap and accept() begins failing with EMFILE.
+    // --log-opt: the json-file driver is unbounded by default; an unthrottled warn-loop has
+    // filled a host disk this way, which then crash-loops the container.
     let mut s = format!(
         "sudo docker run -d --name {container} --restart=unless-stopped \
          --user 0:0 --cap-add=NET_ADMIN --sysctl 'net.ipv4.ping_group_range=0 2147483647' \
+         --ulimit nofile=65535:65535 --log-opt max-size=50m --log-opt max-file=3 \
          -v {DATA_VOLUME}:/etc/leshiy"
     );
     // Publish with a BARE `-p P:P` (empty host-ip). On a host with IPv6, Docker auto-publishes it
@@ -265,6 +271,14 @@ mod tests {
         assert!(run.contains("--restart=unless-stopped"));
         assert!(run.contains("--user 0:0"));
         assert!(run.contains("--cap-add=NET_ADMIN"));
+        // The FD limit must be raised above MAX_TOTAL_CONNS*2, and the json log bounded —
+        // without these a loaded server hits EMFILE and its log flood fills the host disk.
+        assert!(
+            run.contains("--ulimit nofile=65535:65535"),
+            "fd limit: {run}"
+        );
+        assert!(run.contains("--log-opt max-size=50m"), "log cap: {run}");
+        assert!(run.contains("--log-opt max-file=3"), "log rotation: {run}");
         // Bare `-p P:P` publishes; Docker auto-dual-stacks it at runtime (both 0.0.0.0 and [::]).
         // We must NOT emit an explicit `-p '[::]:…'` — that binds a second dual-stack socket that
         // collides with the v4 bind ("address already in use").

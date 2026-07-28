@@ -26,6 +26,8 @@ run_server_container() {  # (re)create the leshiy container from the recorded im
   docker rm -f "$DOCKER_NAME" >/dev/null 2>&1 || true
   docker run -d --name "$DOCKER_NAME" --restart unless-stopped \
     --user 0:0 --network host \
+    --ulimit nofile=65535:65535 \
+    --log-opt max-size=50m --log-opt max-file=3 \
     -v "$CFGDIR":/etc/leshiy \
     "$img" server --config /etc/leshiy/server.toml
 }
