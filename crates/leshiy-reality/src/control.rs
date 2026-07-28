@@ -122,14 +122,22 @@ pub async fn serve_control(
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
+    let mut backoff = crate::acceptloop::AcceptBackoff::new();
     loop {
         // A transient accept() error must not terminate the control listener and tear down the
-        // whole server (C1) — log and continue, like the REALITY accept loop.
+        // whole server (C1) — back off and continue, like the REALITY accept loop. The backoff is
+        // what keeps a *persistent* error (FD exhaustion) from spinning and flooding the log.
         let (conn, _) = match listener.accept().await {
-            Ok(x) => x,
+            Ok(x) => {
+                backoff.record_success();
+                x
+            }
             Err(e) => {
-                tracing::warn!(error = %e, "control accept failed; continuing");
-                tokio::task::yield_now().await;
+                let f = backoff.record_failure(std::time::Instant::now());
+                if let Some(suppressed) = f.log_suppressed {
+                    tracing::warn!(error = %e, suppressed, "control accept failed; backing off");
+                }
+                tokio::time::sleep(f.delay).await;
                 continue;
             }
         };

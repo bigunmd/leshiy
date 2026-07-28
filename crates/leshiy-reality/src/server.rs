@@ -533,17 +533,29 @@ pub async fn run_reality_server(
     // connections so an unauthenticated flood can neither exhaust the server
     // nor reflect onto dest.
     let limiter = crate::connlimit::ConnLimiter::new(MAX_TOTAL_CONNS, MAX_CONNS_PER_IP);
+    let mut backoff = crate::acceptloop::AcceptBackoff::new();
     loop {
         // A per-connection accept() error (EMFILE/ENFILE under FD pressure, or a peer that
         // RSTs while still in the accept queue) must never terminate the listener: propagating
         // it here would exit run_reality_server and, with no supervisor above, kill the whole
-        // daemon for every current and future user (C1). Log and carry on. A brief yield avoids
-        // a tight spin if the condition (e.g. FD exhaustion) persists.
+        // daemon for every current and future user (C1).
+        //
+        // But "log and continue" is not enough on its own. Under EMFILE the listener stays
+        // readable and accept() re-fails immediately, so an unthrottled retry is a busy loop —
+        // and a `warn!` per iteration is a log flood that fills the disk. Both have been observed
+        // in production; see `acceptloop` for the incident. Back off exponentially and log at most
+        // once per window, carrying the suppressed count.
         let (sock, peer) = match listener.accept().await {
-            Ok(x) => x,
+            Ok(x) => {
+                backoff.record_success();
+                x
+            }
             Err(e) => {
-                tracing::warn!(error = %e, "accept failed; continuing");
-                tokio::task::yield_now().await;
+                let f = backoff.record_failure(std::time::Instant::now());
+                if let Some(suppressed) = f.log_suppressed {
+                    tracing::warn!(error = %e, suppressed, "accept failed; backing off");
+                }
+                tokio::time::sleep(f.delay).await;
                 continue;
             }
         };
@@ -554,6 +566,16 @@ pub async fn run_reality_server(
             continue;
         };
         sock.set_nodelay(true).ok();
+        // OS-level TCP keepalive as the backstop against permanently-leaked FDs. The mux's own
+        // keepalive only engages when the peer advertises CAP_KEEPALIVE; against a peer that does
+        // not, the reader blocks on a plain read with no timeout, so a silently blackholed link
+        // (TSPU drop, mobile NAT rebind — neither sends FIN/RST) pins one FD and one ConnLimiter
+        // slot *forever*. That is how a server reaches EMFILE. Probes are ordinary empty ACKs that
+        // every mainstream TLS server emits, so this is not a DPI signal.
+        let ka = socket2::TcpKeepalive::new()
+            .with_time(KEEPALIVE_IDLE)
+            .with_interval(KEEPALIVE_INTERVAL);
+        socket2::SockRef::from(&sock).set_tcp_keepalive(&ka).ok();
         let (c, st, eg, ce, rp) = (
             cfg.clone(),
             store.clone(),
@@ -572,7 +594,19 @@ pub async fn run_reality_server(
     }
 }
 
+/// Idle time before the kernel starts probing an accepted connection.
+const KEEPALIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(120);
+/// Gap between keepalive probes once probing starts. With the default retry count a dead peer is
+/// reaped in a few minutes, which is what returns its FD and its admission slot.
+const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Total concurrent connections the listener will service at once (H3).
+///
+/// NOTE: this bounds *connections*, not file descriptors, and each connection costs at least two
+/// (the client socket plus the dest/egress socket). It is therefore only meaningful if the process
+/// FD limit is comfortably above `2 * MAX_TOTAL_CONNS`; under systemd's 1024 default the FD
+/// ceiling is hit first and `accept()` fails with EMFILE long before this cap engages. The shipped
+/// unit sets `LimitNOFILE=65535` for exactly this reason.
 const MAX_TOTAL_CONNS: usize = 4096;
 /// Concurrent connections allowed from a single source IP (H3).
 const MAX_CONNS_PER_IP: usize = 64;
