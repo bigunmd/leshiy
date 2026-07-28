@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -36,6 +37,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import dev.leshiy.ui.ProvisionViewModel
+import dev.leshiy.ui.deployCollision
 import dev.leshiy.ui.components.Field
 import dev.leshiy.ui.components.HelpField
 import dev.leshiy.ui.components.PanelCard
@@ -102,6 +104,34 @@ fun DeployScreen(
     var image by remember { mutableStateOf("") }
     var userLabel by remember { mutableStateOf("") }
     var dns by remember { mutableStateOf("") }
+    // Non-null while the overwrite confirmation is up.
+    var collision by remember { mutableStateOf<dev.leshiy.ui.DeployCollision?>(null) }
+
+    // Hoisted out of the Column so the overwrite dialog (rendered outside the frame) can call it.
+    val startProvision: () -> Unit = {
+        val cfg = ProvisionConfig(
+            host = host.trim(),
+            sshPort = sshPort.trim().toUShortOrNull() ?: 22u,
+            sshUser = user.trim().ifBlank { "root" },
+            sshPassword = if (useKey) null else password.ifBlank { null },
+            sshPrivateKey = if (useKey) pem.ifBlank { null } else null,
+            sshKeyPassphrase = if (useKey) keyPass.ifBlank { null } else null,
+            dest = dest.trim(),
+            listenPort = (port.trim().toIntOrNull() ?: 443).toUShort(),
+            label = label.trim().ifBlank { null },
+            sudoPassword = sudoPass.ifBlank { null },
+            quicPort = quicPort.trim().toUShortOrNull(),
+            imageRef = image.trim().ifBlank { null },
+            userLabel = userLabel.trim().ifBlank { null },
+            dnsOverride = dns.trim().ifBlank { null },
+            role = preset?.role ?: "single",
+            downstream = preset?.downstreamId,
+            connector = preset?.connector,
+        )
+        val serverName = label.trim().ifBlank { host.trim() }
+        vm.provision(cfg, serverName)
+        onStarted()
+    }
 
     ScreenFrame(s.deploy, onBack = onBack) {
         Column(
@@ -190,41 +220,53 @@ fun DeployScreen(
             }
 
             Spacer(Modifier.size(2.dp))
+
             PrimaryButton(
                 text = if (state.running) s.provisioning else s.provision,
                 onClick = {
-                    // If a vault passphrase was given, unlock first so the server is saved for management.
+                    // If a vault passphrase was given, unlock first so the server is saved for
+                    // management — and so the collision check below has records to read.
                     if (!dev.leshiy.data.VaultHolder.unlocked && vaultPass.isNotBlank()) {
                         dev.leshiy.data.VaultHolder.unlock(context, vaultPass)
                     }
-                    val cfg = ProvisionConfig(
-                        host = host.trim(),
-                        sshPort = sshPort.trim().toUShortOrNull() ?: 22u,
-                        sshUser = user.trim().ifBlank { "root" },
-                        sshPassword = if (useKey) null else password.ifBlank { null },
-                        sshPrivateKey = if (useKey) pem.ifBlank { null } else null,
-                        sshKeyPassphrase = if (useKey) keyPass.ifBlank { null } else null,
-                        dest = dest.trim(),
-                        listenPort = (port.trim().toIntOrNull() ?: 443).toUShort(),
-                        label = label.trim().ifBlank { null },
-                        sudoPassword = sudoPass.ifBlank { null },
-                        quicPort = quicPort.trim().toUShortOrNull(),
-                        imageRef = image.trim().ifBlank { null },
-                        userLabel = userLabel.trim().ifBlank { null },
-                        dnsOverride = dns.trim().ifBlank { null },
-                        role = preset?.role ?: "single",
-                        downstream = preset?.downstreamId,
-                        connector = preset?.connector,
-                    )
-                    val serverName = label.trim().ifBlank { host.trim() }
-                    vm.provision(cfg, serverName)
-                    onStarted()
+                    val saved = dev.leshiy.data.VaultHolder.get()?.servers() ?: emptyList()
+                    val hit = deployCollision(saved, host.trim(), sshPort.trim().toIntOrNull() ?: 22)
+                    if (hit != null) collision = hit else startProvision()
                 },
                 enabled = !state.running && host.isNotBlank() &&
                     (if (useKey) pem.isNotBlank() else password.isNotBlank()),
                 modifier = Modifier.fillMaxWidth(),
             )
         }
+    }
+
+    collision?.let { hit ->
+        AlertDialog(
+            onDismissRequest = { collision = null },
+            title = { Text(s.deployOverwriteTitle) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(s.deployOverwriteBody.format(hit.existingLabel, s.roleName(hit.existingRole)))
+                    if (hit.breaksCascade) {
+                        Text(
+                            s.deployOverwriteChain.format(hit.chainedFrom.joinToString(", ")),
+                            color = Warn,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    collision = null
+                    startProvision()
+                }) { Text(s.deployOverwriteConfirm, color = Warn) }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { collision = null }) {
+                    Text(s.deployOverwriteCancel, color = Dim)
+                }
+            },
+        )
     }
 }
 

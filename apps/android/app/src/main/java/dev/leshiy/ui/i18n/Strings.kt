@@ -239,6 +239,11 @@ interface Strings {
     val cascadeSubtitle: String
     val cascadeIntro: String
     val cascadeDeployBanner: String
+    val deployOverwriteTitle: String
+    val deployOverwriteBody: String
+    val deployOverwriteChain: String
+    val deployOverwriteConfirm: String
+    val deployOverwriteCancel: String
     val internet: String
     val roleEntry: String
     val roleMiddle: String
@@ -516,6 +521,11 @@ val EnStrings: Strings = object : Strings {
     override val cascadeSubtitle = "Chain servers into a multi-hop tunnel"
     override val cascadeIntro = "Chain your phone through several servers. Traffic hops entry → … → exit before reaching the internet. Deploy the exit first — each hop is wired to the next automatically."
     override val cascadeDeployBanner = "Deploying the %1\$s of your cascade → next hop: %2\$s"
+    override val deployOverwriteTitle = "This host already has a server"
+    override val deployOverwriteBody = "“%1\$s” (%2\$s) is already saved for this host. One host holds one leshiy server, so deploying here updates that server — it does not add a second one. Its saved record will be replaced."
+    override val deployOverwriteChain = "%1\$s chains to it. Replacing it as a standalone server leaves that cascade pointing at a server that no longer knows it is part of one."
+    override val deployOverwriteConfirm = "Replace it"
+    override val deployOverwriteCancel = "Cancel"
     override val internet = "the internet"
     override val roleEntry = "Entry"
     override val roleMiddle = "Middle"
@@ -780,6 +790,11 @@ val RuStrings: Strings = object : Strings {
     override val cascadeSubtitle = "Цепочка серверов в многоузловой туннель"
     override val cascadeIntro = "Пропустите трафик телефона через несколько серверов: вход → … → выход, и только потом в интернет. Сначала разверните выход — каждый узел подключается к следующему автоматически."
     override val cascadeDeployBanner = "Разворачивается %1\$s каскада → следующий узел: %2\$s"
+    override val deployOverwriteTitle = "На этом хосте уже есть сервер"
+    override val deployOverwriteBody = "«%1\$s» (%2\$s) уже сохранён для этого хоста. На одном хосте живёт один сервер leshiy, поэтому развёртывание обновит именно его, а не добавит второй. Сохранённая запись будет заменена."
+    override val deployOverwriteChain = "К нему подключён %1\$s. Если заменить его на отдельный сервер, каскад будет ссылаться на узел, который больше не считает себя его частью."
+    override val deployOverwriteConfirm = "Заменить"
+    override val deployOverwriteCancel = "Отмена"
     override val internet = "интернет"
     override val roleEntry = "Вход"
     override val roleMiddle = "Средний"
