@@ -150,6 +150,14 @@ pub async fn provision<T: Transport>(
     result
 }
 
+/// `443/tcp + 8443/udp` — for operator-facing messages about which ports are being published.
+fn fmt_ports(listen_port: u16, quic_port: Option<u16>) -> String {
+    match quic_port {
+        Some(q) => format!("{listen_port}/tcp + {q}/udp"),
+        None => format!("{listen_port}/tcp"),
+    }
+}
+
 async fn provision_inner<T: Transport>(
     t: &mut T,
     p: &ProvisionParams,
@@ -190,7 +198,46 @@ async fn provision_inner<T: Transport>(
     if !has_docker {
         t.run(docker::install_docker_cmd()).await?.ok()?;
     }
-    on_event(ev(Step::DockerReady, Status::Done, ""));
+
+    // 3a. Reconcile the requested ports against any config already persisted on the data volume.
+    // `boot` skips `init` whenever server.toml exists, so a redeploy over a surviving volume binds
+    // the PERSISTED ports and ignores LESHIY_LISTEN — the ports of an existing server cannot be
+    // changed without re-initialising it. Publishing the requested port anyway is what silently
+    // half-breaks such a server: the host port maps to nothing, the real REALITY listener ends up
+    // unpublished, and because the QUIC port normally didn't move the server keeps serving QUIC
+    // clients while refusing every REALITY/TCP one. So publish what will actually be bound, and
+    // tell the operator their requested ports were overridden.
+    let persisted = t
+        .run(&docker::cat_persisted_config_cmd())
+        .await
+        .map(|o| o.stdout)
+        .unwrap_or_default();
+    let (persisted_listen, persisted_quic) = docker::parse_persisted_ports(&persisted);
+    // A persisted config is the single source of truth for BOTH ports: a server provisioned
+    // without QUIC cannot gain it by redeploy either, so `None` here must win over a requested
+    // port rather than publish a UDP port nothing binds.
+    let (listen_port, quic_port) = match persisted_listen {
+        Some(l) => (l, persisted_quic),
+        None => (p.listen_port, p.quic_port),
+    };
+    let ports_pinned =
+        persisted_listen.is_some() && (listen_port != p.listen_port || quic_port != p.quic_port);
+    let ready_detail = if ports_pinned {
+        format!(
+            "ports pinned by the existing server.toml on the {} volume — publishing {}, not the requested {}; \
+             an existing server cannot change ports (`leshiy remote teardown --purge` first to re-init, \
+             which regenerates its keys and drops its users)",
+            docker::DATA_VOLUME,
+            fmt_ports(listen_port, quic_port),
+            fmt_ports(p.listen_port, p.quic_port),
+        )
+    } else {
+        String::new()
+    };
+    // Keep the advertised host in step with the port actually bound, so the record cannot hand a
+    // later `upgrade` (which recovers the publish port from `public_host`) a drifted port.
+    let public_host = docker::with_port(&p.public_host, listen_port);
+    on_event(ev(Step::DockerReady, Status::Done, ready_detail));
 
     // 3b. Firewall: open the listen port(s) when ufw is active. Best-effort and
     // idempotent — it runs on every provision (including idempotent re-runs, since
@@ -201,7 +248,7 @@ async fn provision_inner<T: Transport>(
     // starts listening.
     *current = Step::Firewall;
     on_event(ev(Step::Firewall, Status::Started, ""));
-    let fw_detail = firewall_step(t, p.listen_port, p.quic_port).await;
+    let fw_detail = firewall_step(t, listen_port, quic_port).await;
     on_event(ev(Step::Firewall, Status::Done, fw_detail));
 
     // 4. Detect existing container (idempotent re-run). Reuse only a genuinely RUNNING container
@@ -249,14 +296,14 @@ async fn provision_inner<T: Transport>(
         // `0.0.0.0` there.
         let listen_host = if host_has_ipv6 { "[::]" } else { "0.0.0.0" };
         let mut envs = vec![
-            ("LESHIY_HOST".to_string(), p.public_host.clone()),
+            ("LESHIY_HOST".to_string(), public_host.clone()),
             ("LESHIY_DEST".to_string(), p.dest_sni.clone()),
             (
                 "LESHIY_LISTEN".to_string(),
-                format!("{listen_host}:{}", p.listen_port),
+                format!("{listen_host}:{listen_port}"),
             ),
         ];
-        if let Some(q) = p.quic_port {
+        if let Some(q) = quic_port {
             envs.push((
                 "LESHIY_QUIC_LISTEN".to_string(),
                 format!("{listen_host}:{q}"),
@@ -268,8 +315,8 @@ async fn provision_inner<T: Transport>(
         let run = docker::run_cmd(
             &p.container,
             &p.image_ref,
-            p.listen_port,
-            p.quic_port,
+            listen_port,
+            quic_port,
             &dns_refs,
             &envs,
         );
@@ -316,7 +363,7 @@ async fn provision_inner<T: Transport>(
         ssh_user: p.target.user.clone(),
         ssh_secret: p.secret.clone(),
         host_key_fp,
-        public_host: p.public_host.clone(),
+        public_host,
         image_ref: p.image_ref.clone(),
         container: p.container.clone(),
         reality_public_b64,
@@ -452,14 +499,33 @@ pub async fn upgrade<T: Transport>(
     let dns = docker::parse_json_string_list(&dns_out.stdout);
     let dns_refs: Vec<&str> = dns.iter().map(String::as_str).collect();
 
-    // The listen port is only recoverable from `public_host` — `rec.port` is the SSH port.
-    let listen_port = docker::port_of(&rec.public_host).ok_or_else(|| {
-        Error::Parse(format!(
-            "cannot read the listen port from public_host `{}`",
-            rec.public_host
-        ))
-    })?;
-    let quic_port = rec.quic.as_ref().and_then(|q| docker::port_of(&q.addr));
+    // The ports to publish are the ones the server will actually bind — i.e. whatever the config
+    // persisted on the surviving volume says, since `boot` skips `init` and keeps that listener.
+    // The record is only the fallback: its `public_host` port can have drifted from the running
+    // config (a redeploy that requested new ports over a surviving volume does exactly that), and
+    // republishing the drifted port would leave the REALITY listener unpublished — silently
+    // killing TCP while QUIC kept working. Prefer the config, then self-heal the record below.
+    let persisted = t
+        .run(&docker::cat_persisted_config_cmd())
+        .await
+        .map(|o| o.stdout)
+        .unwrap_or_default();
+    let (persisted_listen, persisted_quic) = docker::parse_persisted_ports(&persisted);
+    // The listen port is otherwise only recoverable from `public_host` — `rec.port` is the SSH port.
+    let listen_port = match persisted_listen {
+        Some(l) => l,
+        None => docker::port_of(&rec.public_host).ok_or_else(|| {
+            Error::Parse(format!(
+                "cannot read the listen port from public_host `{}`",
+                rec.public_host
+            ))
+        })?,
+    };
+    let quic_port = if persisted_listen.is_some() {
+        persisted_quic
+    } else {
+        rec.quic.as_ref().and_then(|q| docker::port_of(&q.addr))
+    };
 
     on_event(ev(Step::PullImage, Status::Started, image_ref));
     t.run(&docker::pull_cmd(image_ref)).await?.ok()?;
@@ -483,6 +549,9 @@ pub async fn upgrade<T: Transport>(
     // Only after the new container is actually up — a failed upgrade must leave the record
     // describing what is really running.
     rec.image_ref = image_ref.to_string();
+    // Self-heal a `public_host` whose port drifted from the config the server actually binds, so
+    // the next upgrade starts from the truth even if the volume is later read-protected.
+    rec.public_host = docker::with_port(&rec.public_host, listen_port);
     Ok(())
 }
 
@@ -880,6 +949,142 @@ mod tests {
         );
     }
 
+    // --- redeploy over a surviving volume: publish what the server really binds ------
+
+    /// A `server.toml` already on the data volume, pinning REALITY to 12000 and QUIC to 12001.
+    fn persisted_12000() -> &'static str {
+        "listen = \"[::]:12000\"\ndest = \"www.microsoft.com:443\"\n\
+         host = \"203.0.113.5:12000\"\nquic_listen = \"[::]:12001\"\n"
+    }
+
+    /// Regression: redeploying onto *new* ports over a surviving volume used to publish the
+    /// requested port while `boot` — which skips `init` whenever server.toml exists — kept the
+    /// listener on the old one. The result was a server with NO host port mapped to its REALITY
+    /// listener: every CLI got `Connection refused` while phones, whose QUIC port hadn't moved,
+    /// stayed connected and made the server look healthy.
+    #[tokio::test]
+    async fn provision_publishes_the_persisted_ports_not_the_requested_ones() {
+        let mut t = FakeTransport::new();
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on("docker volume inspect", ok(persisted_12000()))
+        .on("ufw status", ok("active"))
+        .on("docker ps", ok(""))
+        .on("docker exec", ok(&format!("{}\n", issued_uri())));
+
+        // The operator asks for 13000/13001 — exactly the redeploy that broke the live server.
+        let mut p = params();
+        p.public_host = "203.0.113.5:13000".into();
+        p.listen_port = 13000;
+        p.quic_port = Some(13001);
+
+        let mut details = Vec::new();
+        let rec = provision(&mut t, &p, &mut |e| details.push(e.detail))
+            .await
+            .unwrap();
+
+        let calls = t.calls();
+        let run = calls.iter().find(|c| c.contains("docker run")).unwrap();
+        assert!(
+            run.contains("-p 12000:12000") && run.contains("-p 12001:12001/udp"),
+            "must publish the ports the server actually binds: {run}"
+        );
+        assert!(
+            !run.contains("13000") && !run.contains("13001"),
+            "must not publish a port nothing is listening on: {run}"
+        );
+        // The env must agree with the publish, so the two can't drift again. (The bind *host* is
+        // chosen by the separate host-IPv6 probe, so only the port is asserted here.)
+        assert!(run.contains("LESHIY_LISTEN='0.0.0.0:12000'"), "{run}");
+        assert!(run.contains("LESHIY_QUIC_LISTEN='0.0.0.0:12001'"), "{run}");
+        assert!(run.contains("-e LESHIY_HOST='203.0.113.5:12000'"), "{run}");
+        // ufw must open the port that is actually served.
+        assert!(
+            calls.iter().any(|c| c.contains("ufw allow 12000/tcp")),
+            "firewall must open the effective port: {calls:?}"
+        );
+        // The record must not hand a later upgrade the drifted port.
+        assert_eq!(rec.public_host, "203.0.113.5:12000");
+        // And the operator must be told, not left to discover it over the wire.
+        let note = details.concat();
+        assert!(
+            note.contains("12000/tcp + 12001/udp") && note.contains("13000/tcp + 13001/udp"),
+            "must report both the effective and the requested ports: {note}"
+        );
+        assert!(
+            note.contains("--purge"),
+            "must say how to actually change ports: {note}"
+        );
+    }
+
+    /// A first-ever provision has no persisted config, so the requested ports must be honoured
+    /// verbatim — the reconciliation must not pin every new server to some default.
+    #[tokio::test]
+    async fn provision_honours_requested_ports_when_no_config_is_persisted_yet() {
+        let mut t = FakeTransport::new();
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on("docker ps", ok(""))
+        .on("docker exec", ok(&format!("{}\n", issued_uri())));
+
+        let mut p = params();
+        p.public_host = "203.0.113.5:13000".into();
+        p.listen_port = 13000;
+        p.quic_port = Some(13001);
+
+        let rec = provision(&mut t, &p, &mut |_| {}).await.unwrap();
+        let calls = t.calls();
+        let run = calls.iter().find(|c| c.contains("docker run")).unwrap();
+        assert!(
+            run.contains("-p 13000:13000") && run.contains("-p 13001:13001/udp"),
+            "a fresh server must get the ports it asked for: {run}"
+        );
+        assert_eq!(rec.public_host, "203.0.113.5:13000");
+    }
+
+    /// A server whose persisted config has no QUIC listener cannot gain one by redeploy, so a
+    /// requested QUIC port must not be published against nothing.
+    #[tokio::test]
+    async fn provision_does_not_publish_quic_a_persisted_server_never_bound() {
+        let mut t = FakeTransport::new();
+        t.on(
+            super::super::docker::detect_docker_cmd(),
+            CommandOutput {
+                code: 0,
+                stdout: "yes".into(),
+                stderr: String::new(),
+            },
+        )
+        .on(
+            "docker volume inspect",
+            ok("listen = \"[::]:443\"\ndest = \"a.com:443\"\n"),
+        )
+        .on("docker ps", ok(""))
+        .on("docker exec", ok(&format!("{}\n", issued_uri())));
+
+        let mut p = params();
+        p.quic_port = Some(8443);
+        provision(&mut t, &p, &mut |_| {}).await.unwrap();
+        let calls = t.calls();
+        let run = calls.iter().find(|c| c.contains("docker run")).unwrap();
+        assert!(
+            !run.contains("/udp"),
+            "must not publish UDP for a server with no QUIC listener: {run}"
+        );
+    }
+
     // --- upgrade -------------------------------------------------------------------
 
     fn upgradable_rec() -> ServerRecord {
@@ -1026,6 +1231,57 @@ mod tests {
             !run.contains("-p 22:22"),
             "must never publish the SSH port: {run}"
         );
+    }
+
+    /// Regression: when the record's `public_host` port has drifted from the config the server
+    /// actually binds — which is what a redeploy onto new ports over a surviving volume leaves
+    /// behind — the upgrade must republish the *bound* port. Trusting the record here would
+    /// recreate the same half-broken server: REALITY unpublished, QUIC still fine.
+    #[tokio::test(start_paused = true)]
+    async fn upgrade_republishes_the_bound_port_not_the_records_drifted_one() {
+        let mut t = upgrade_transport();
+        // The volume still binds 12000/12001; the record was left claiming 13000/13001.
+        t.on("docker volume inspect", ok(persisted_12000()));
+        let mut rec = upgradable_rec();
+        rec.public_host = "1.2.3.4:13000".into();
+        rec.quic = Some(crate::vault::QuicInfo {
+            addr: "1.2.3.4:13001".into(),
+            sni: "a.com".into(),
+            cert_sha256: None,
+        });
+
+        upgrade(&mut t, &mut rec, "ghcr.io/o/r:v1.9.0", |_| {})
+            .await
+            .unwrap();
+
+        let calls = t.calls();
+        let run = calls.iter().find(|c| c.contains("docker run")).unwrap();
+        assert!(
+            run.contains("-p 12000:12000") && run.contains("-p 12001:12001/udp"),
+            "must publish the bound ports: {run}"
+        );
+        assert!(
+            !run.contains("13000") && !run.contains("13001"),
+            "must not republish the drifted port: {run}"
+        );
+        // The record self-heals, so the next upgrade starts from the truth.
+        assert_eq!(rec.public_host, "1.2.3.4:12000");
+    }
+
+    /// With no readable persisted config the record stays the fallback — an upgrade must still
+    /// work on a host where the volume can't be read.
+    #[tokio::test(start_paused = true)]
+    async fn upgrade_falls_back_to_the_record_when_no_config_is_readable() {
+        let mut t = upgrade_transport(); // no "server.toml" rule → empty stdout
+        let mut rec = upgradable_rec();
+        upgrade(&mut t, &mut rec, "ghcr.io/o/r:v1.9.0", |_| {})
+            .await
+            .unwrap();
+        let calls = t.calls();
+        let run = calls.iter().find(|c| c.contains("docker run")).unwrap();
+        assert!(run.contains("-p 443:443"), "{run}");
+        assert!(run.contains("-p 8443:8443/udp"), "{run}");
+        assert_eq!(rec.public_host, "1.2.3.4:443");
     }
 
     /// Nothing safe to preserve → refuse and point at the verb that handles it, rather than

@@ -171,6 +171,65 @@ pub fn port_of(host_port: &str) -> Option<u16> {
     host_port.trim().rsplit_once(':')?.1.parse().ok()
 }
 
+/// Print the server config already persisted on the data volume, or nothing when there is none
+/// (a first-ever provision, or a volume that was purged).
+///
+/// This is the only authoritative source for the ports a **re**-deployed server will bind.
+/// `boot` skips `init` whenever `server.toml` already exists on the surviving volume, so
+/// `LESHIY_LISTEN` is ignored on every deploy after the first: the listener stays wherever the
+/// persisted config put it. Publishing the *requested* port against such a config maps a host
+/// port to nothing while leaving the real listener unpublished — REALITY/TCP then refuses every
+/// connection while QUIC (whose port usually didn't move) keeps working, so the same server looks
+/// healthy from a phone and dead from a CLI. Callers publish what the server will actually bind.
+///
+/// Reads the volume through `docker volume inspect` rather than assuming
+/// `/var/lib/docker/volumes/...`, so a relocated data-root still resolves. Always exits 0 — an
+/// absent volume or file is a normal first provision, not an error.
+pub fn cat_persisted_config_cmd() -> String {
+    format!(
+        "sudo sh -c 'd=$(docker volume inspect --format \"{{{{.Mountpoint}}}}\" {DATA_VOLUME} \
+         2>/dev/null); [ -n \"$d\" ] && cat \"$d/server.toml\" 2>/dev/null; true'"
+    )
+}
+
+/// The `listen` / `quic_listen` ports from a persisted `server.toml`, as `(reality, quic)`.
+///
+/// Only the top-level keys count, so parsing stops at the first table header (`[dest_by_sni]`).
+/// A `None` reality port means "no persisted config" — the caller then honours what was
+/// requested, which is correct for a first provision.
+pub fn parse_persisted_ports(config_toml: &str) -> (Option<u16>, Option<u16>) {
+    let mut listen = None;
+    let mut quic = None;
+    for line in config_toml.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            break; // into a sub-table; the listen keys are top-level
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let v = v.trim().trim_matches('"');
+        match k.trim() {
+            "listen" => listen = port_of(v),
+            "quic_listen" => quic = port_of(v),
+            _ => {}
+        }
+    }
+    (listen, quic)
+}
+
+/// Replace the port in a `host:port` string, leaving an IPv6 literal's brackets intact.
+///
+/// Used to keep a record's `public_host` describing the port the server really binds, so a later
+/// `upgrade` (which recovers the publish port from it) cannot inherit a drifted one.
+pub fn with_port(host_port: &str, port: u16) -> String {
+    let h = host_port.trim();
+    match h.rsplit_once(':') {
+        Some((head, _)) => format!("{head}:{port}"),
+        None => format!("{h}:{port}"),
+    }
+}
+
 /// Print the host's first container-usable **IPv4** DNS server (or nothing).
 ///
 /// Prefers a non-loopback `nameserver` from `/etc/resolv.conf`; on
@@ -383,6 +442,86 @@ mod tests {
         assert_eq!(port_of(""), None);
         assert_eq!(port_of("1.2.3.4:notaport"), None);
         assert_eq!(port_of("1.2.3.4:99999"), None); // > u16
+    }
+
+    // --- persisted config: the ports a redeploy will really bind ---------------------
+
+    /// Shape of a real `server.toml` as written by `boot`'s `init`.
+    fn persisted_toml() -> &'static str {
+        r#"listen = "[::]:12000"
+dest = "www.microsoft.com:443"
+server_names = ["www.microsoft.com"]
+short_ids = []
+host = "194.154.24.132:12000"
+quic_listen = "[::]:12001"
+quic_domain = "www.microsoft.com"
+allow_private_egress = false
+
+[dest_by_sni]
+listen = "[::]:9999"
+"#
+    }
+
+    #[test]
+    fn cat_persisted_config_reads_server_toml_off_the_volume() {
+        let c = cat_persisted_config_cmd();
+        // Only a LEADING sudo gets the password fed on stdin (see install_docker_cmd).
+        assert!(c.starts_with("sudo sh -c "), "single-sudo wrapper: {c}");
+        // Must resolve the mountpoint rather than hardcode /var/lib/docker/volumes.
+        assert!(
+            c.contains("docker volume inspect") && c.contains("{{.Mountpoint}}"),
+            "must resolve the volume mountpoint: {c}"
+        );
+        assert!(c.contains(DATA_VOLUME), "{c}");
+        assert!(c.contains("server.toml"), "{c}");
+        // A first-ever provision has no volume; that must not read as a failure.
+        assert!(c.contains("true"), "must exit 0 when absent: {c}");
+    }
+
+    #[test]
+    fn parses_persisted_listen_and_quic_ports() {
+        assert_eq!(
+            parse_persisted_ports(persisted_toml()),
+            (Some(12000), Some(12001))
+        );
+    }
+
+    /// A sub-table key must never be mistaken for the top-level `listen` — `[dest_by_sni]` can
+    /// carry one, and honouring it would publish a port the server never binds.
+    #[test]
+    fn persisted_ports_ignore_sub_table_keys() {
+        let (listen, _) = parse_persisted_ports(persisted_toml());
+        assert_eq!(listen, Some(12000), "must stop at the first table header");
+    }
+
+    /// No persisted config → `None`, which tells the caller to honour what was requested. This is
+    /// the first-provision path, and it must not be confused with "persisted, but no QUIC".
+    #[test]
+    fn persisted_ports_absent_when_there_is_no_config() {
+        assert_eq!(parse_persisted_ports(""), (None, None));
+        assert_eq!(parse_persisted_ports("\n  \n"), (None, None));
+    }
+
+    /// A server initialised without QUIC reports `None` for it, and that must WIN over a requested
+    /// QUIC port: a redeploy can't add a QUIC listener, so publishing the UDP port would map it to
+    /// nothing.
+    #[test]
+    fn persisted_ports_report_no_quic_when_the_config_has_none() {
+        let toml = "listen = \"0.0.0.0:443\"\ndest = \"a.com:443\"\n";
+        assert_eq!(parse_persisted_ports(toml), (Some(443), None));
+    }
+
+    #[test]
+    fn with_port_replaces_the_port_keeping_v6_brackets() {
+        assert_eq!(with_port("1.2.3.4:443", 12000), "1.2.3.4:12000");
+        assert_eq!(with_port("[2001:db8::1]:443", 8443), "[2001:db8::1]:8443");
+        assert_eq!(
+            with_port("vps.example.com:443", 22000),
+            "vps.example.com:22000"
+        );
+        // No port at all → append one rather than lose the host.
+        assert_eq!(with_port("1.2.3.4", 443), "1.2.3.4:443");
+        assert_eq!(with_port(" 1.2.3.4:443 ", 443), "1.2.3.4:443");
     }
 
     #[test]
