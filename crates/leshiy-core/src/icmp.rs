@@ -94,11 +94,11 @@ pub fn set_id(msg: &mut [u8], id: u16) -> bool {
 /// inverted. A trailing odd byte is padded on the right with zero.
 pub fn checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
-    let mut chunks = data.chunks_exact(2);
-    for c in &mut chunks {
-        sum += u32::from(u16::from_be_bytes([c[0], c[1]]));
+    let (pairs, rest) = data.as_chunks::<2>();
+    for c in pairs {
+        sum += u32::from(u16::from_be_bytes(*c));
     }
-    if let [last] = chunks.remainder() {
+    if let [last] = rest {
         sum += u32::from(*last) << 8;
     }
     fold(sum)
@@ -134,8 +134,9 @@ pub fn set_v4_checksum(msg: &mut [u8]) -> bool {
 pub fn v6_checksum(msg: &[u8], src: &[u8; 16], dst: &[u8; 16]) -> u16 {
     let mut sum: u32 = 0;
     for addr in [src, dst] {
-        for c in addr.chunks_exact(2) {
-            sum += u32::from(u16::from_be_bytes([c[0], c[1]]));
+        // A 16-byte address is exactly eight pairs, so there is never a remainder.
+        for c in addr.as_chunks::<2>().0 {
+            sum += u32::from(u16::from_be_bytes(*c));
         }
     }
     // Upper-layer packet length as a 32-bit field, then three zero bytes and the next header.
@@ -146,14 +147,14 @@ pub fn v6_checksum(msg: &[u8], src: &[u8; 16], dst: &[u8; 16]) -> u16 {
 
     // The message itself, with the checksum field read as zero rather than mutating the caller's
     // buffer.
-    let mut chunks = msg.chunks_exact(2);
-    for (i, c) in (&mut chunks).enumerate() {
+    let (pairs, rest) = msg.as_chunks::<2>();
+    for (i, c) in pairs.iter().enumerate() {
         if i * 2 == OFF_CHECKSUM {
             continue; // checksum field counts as zero
         }
-        sum += u32::from(u16::from_be_bytes([c[0], c[1]]));
+        sum += u32::from(u16::from_be_bytes(*c));
     }
-    if let [last] = chunks.remainder() {
+    if let [last] = rest {
         sum += u32::from(*last) << 8;
     }
     fold(sum)
