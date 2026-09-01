@@ -602,9 +602,9 @@ dependencies = [
 
 [[package]]
 name = "chacha20"
-version = "0.10.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f8d983286843e49675a4b7a2d174efe136dc93a18d69130dd18198a6c167601"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cipher 0.5.2",
@@ -2954,7 +2954,7 @@ version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
 dependencies = [
- "chacha20 0.10.0",
+ "chacha20 0.10.2",
  "getrandom 0.4.2",
  "rand_core 0.10.1",
 ]
@@ -3771,7 +3771,7 @@ dependencies = [
  "aes 0.9.1",
  "aes-gcm 0.11.0-rc.4",
  "cbc",
- "chacha20 0.10.0",
+ "chacha20 0.10.2",
  "cipher 0.5.2",
  "ctr 0.10.1",
  "ctutils",
@@ -3858,7 +3858,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
