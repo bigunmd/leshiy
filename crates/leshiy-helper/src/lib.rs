@@ -25,6 +25,7 @@ pub mod server;
 pub mod transport;
 
 pub use client::HelperClient;
+pub use elevate::validate_elevation_target;
 pub use error::HelperError;
 pub use install::{default_endpoint, default_socket_path, is_installed};
 pub use proto::{Event, Request, Response, StartParams, Status};

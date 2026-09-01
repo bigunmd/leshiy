@@ -8,16 +8,19 @@
 //! real hardware — a USER TODO.
 use std::path::{Path, PathBuf};
 
-/// Validate the helper binary before running it with elevated privileges (H6).
+/// Validate a binary before running it with elevated privileges (H6).
 ///
-/// `bin` is chosen by the unprivileged GUI; if an attacker can influence which
-/// file we launch — a relative path resolved against a writable CWD, or a binary
-/// sitting in a directory another unprivileged user can write to — they get
-/// root/Admin code execution via binary planting. We canonicalize (resolving
-/// symlinks and requiring existence), require an absolute path, and on Unix
-/// refuse to elevate a binary whose file or parent directory is group/other
-/// writable.
-fn validate_helper_binary(bin: &Path) -> std::io::Result<PathBuf> {
+/// If an attacker can influence which file we launch — a relative path resolved
+/// against a writable CWD, or a binary sitting in a directory another
+/// unprivileged user can write to — they get root/Admin code execution via
+/// binary planting. We canonicalize (resolving symlinks and requiring
+/// existence), require an absolute path, and on Unix refuse to elevate a binary
+/// whose file or parent directory is group/other writable.
+///
+/// Shared with the CLI's `sudo` re-exec: this is a security control, so both
+/// elevation paths must apply exactly the same rules rather than keep copies
+/// that can drift apart.
+pub fn validate_elevation_target(bin: &Path) -> std::io::Result<PathBuf> {
     let canon = bin.canonicalize()?;
     if !canon.is_absolute() {
         return Err(std::io::Error::other(
@@ -27,21 +30,31 @@ fn validate_helper_binary(bin: &Path) -> std::io::Result<PathBuf> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let check = |p: &Path| -> std::io::Result<()> {
-            let mode = std::fs::metadata(p)?.permissions().mode();
-            if mode & 0o022 != 0 {
-                return Err(std::io::Error::other(format!(
-                    "refusing to elevate: {} is group/other-writable (mode {:o}) — \
-                     a non-owner could plant a malicious binary",
-                    p.display(),
-                    mode & 0o7777
-                )));
-            }
-            Ok(())
+        let mode_of = |p: &Path| -> std::io::Result<u32> {
+            Ok(std::fs::metadata(p)?.permissions().mode() & 0o7777)
         };
-        check(&canon)?;
-        if let Some(parent) = canon.parent() {
-            check(parent)?;
+        let plantable = |p: &Path, mode: u32| {
+            std::io::Error::other(format!(
+                "refusing to elevate: {} is group/other-writable (mode {mode:o}) — \
+                 a non-owner could plant a malicious binary",
+                p.display(),
+            ))
+        };
+
+        let mode = mode_of(&canon)?;
+        if mode & 0o022 != 0 {
+            return Err(plantable(&canon, mode));
+        }
+        // Every ancestor, not just the immediate parent: write permission on *any*
+        // directory in the chain lets an attacker rename that component aside and
+        // substitute their own subtree, so the binary we validated is not the one that
+        // ends up being executed. The sticky bit (as on /tmp, mode 1777) is an accepted
+        // mitigation — it restricts rename and delete to each entry's owner.
+        for dir in canon.ancestors().skip(1) {
+            let mode = mode_of(dir)?;
+            if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+                return Err(plantable(dir, mode));
+            }
         }
     }
     Ok(canon)
@@ -54,7 +67,7 @@ pub async fn ensure_running(bin: &Path) -> std::io::Result<()> {
         return Ok(());
     }
     // Validate the binary path BEFORE elevating it (H6).
-    let bin = validate_helper_binary(bin)?;
+    let bin = validate_elevation_target(bin)?;
     spawn_ephemeral_helper(&bin)?;
     for _ in 0..100 {
         if helper_responds().await {
@@ -270,7 +283,7 @@ mod tests {
     fn accepts_owner_only_writable_binary() {
         let dir = unique_dir("ok");
         let exe = write_exe(&dir, 0o755);
-        let got = validate_helper_binary(&exe).unwrap();
+        let got = validate_elevation_target(&exe).unwrap();
         assert!(got.is_absolute());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -279,7 +292,7 @@ mod tests {
     fn rejects_world_writable_binary() {
         let dir = unique_dir("ww");
         let exe = write_exe(&dir, 0o757); // other-writable → plantable
-        assert!(validate_helper_binary(&exe).is_err());
+        assert!(validate_elevation_target(&exe).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -288,13 +301,51 @@ mod tests {
         let dir = unique_dir("wwdir");
         let exe = write_exe(&dir, 0o755);
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert!(validate_helper_binary(&exe).is_err());
+        assert!(validate_elevation_target(&exe).is_err());
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn rejects_nonexistent_path() {
-        assert!(validate_helper_binary(Path::new("/nonexistent/leshiy-helper-xyz")).is_err());
+        assert!(validate_elevation_target(Path::new("/nonexistent/leshiy-helper-xyz")).is_err());
+    }
+
+    /// Checking only the immediate parent is not enough: write permission on a
+    /// grandparent lets an attacker rename the whole subdirectory aside and swap in
+    /// their own, so the validated path resolves to a different binary at exec time.
+    #[test]
+    fn rejects_world_writable_grandparent_dir() {
+        let dir = unique_dir("wwgp");
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let exe = write_exe(&sub, 0o755);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        let got = validate_elevation_target(&exe);
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).ok();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(got.is_err(), "a writable grandparent must block elevation");
+    }
+
+    /// The sticky bit restricts rename/delete to each entry's owner, so a shared
+    /// directory carrying it is not a planting vector. `/tmp` is mode 1777 and every
+    /// other test here lives under it — without this exemption they would all fail.
+    #[test]
+    fn accepts_sticky_shared_dir_such_as_tmp() {
+        let tmp = std::env::temp_dir();
+        let mode = std::fs::metadata(&tmp).unwrap().permissions().mode();
+        assert!(
+            mode & 0o1000 != 0,
+            "expected {} to be sticky",
+            tmp.display()
+        );
+
+        let dir = unique_dir("sticky");
+        let exe = write_exe(&dir, 0o755);
+        assert!(validate_elevation_target(&exe).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
