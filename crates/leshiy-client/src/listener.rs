@@ -17,6 +17,19 @@ pub async fn serve_metered(
     counters: Arc<ByteCounters>,
 ) -> Result<()> {
     let listener = TcpListener::bind(socks_addr).await?;
+    serve_metered_on(tunnel, listener, counters).await
+}
+
+/// As [`serve_metered`], but on a listener the caller already bound.
+///
+/// The combined TUN+SOCKS mode needs this ordering: binding must fail *before* the TUN
+/// device, routes and DNS are mutated, so an `EADDRINUSE` cannot leave the host
+/// half-reconfigured.
+pub async fn serve_metered_on(
+    tunnel: Arc<dyn Tunnel>,
+    listener: TcpListener,
+    counters: Arc<ByteCounters>,
+) -> Result<()> {
     loop {
         let (cli, _) = listener.accept().await?;
         cli.set_nodelay(true).ok();

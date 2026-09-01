@@ -168,9 +168,15 @@ pub async fn connect_quic_multi(
 /// Bind a SOCKS5 listener on `socks_addr` and forward every CONNECT request
 /// over the established QUIC connection.
 pub async fn serve_socks5(conn: QuicConn, socks_addr: SocketAddr) -> Result<()> {
+    let listener = TcpListener::bind(socks_addr).await?;
+    serve_socks5_on(conn, listener).await
+}
+
+/// As [`serve_socks5`], but on a listener the caller already bound, so bind failures
+/// surface before the caller announces readiness or mutates host state.
+pub async fn serve_socks5_on(conn: QuicConn, listener: TcpListener) -> Result<()> {
     let auth = hex::encode(conn.short_id);
     let send_req = conn.send_req;
-    let listener = TcpListener::bind(socks_addr).await?;
     loop {
         let (cli, _) = listener.accept().await?;
         cli.set_nodelay(true).ok();

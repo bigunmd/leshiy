@@ -346,10 +346,19 @@ pub async fn connect_reality(
 /// Bind a SOCKS5 listener on `socks_addr` and serve tunneled connections over `conn`.
 /// Handles both CONNECT (TCP streams) and UDP ASSOCIATE (datagram flows) over the mux.
 pub async fn serve_socks5(conn: RealityConn, socks_addr: &str) -> crate::Result<()> {
-    let mux = conn.mux;
     let listener = TcpListener::bind(socks_addr)
         .await
         .map_err(crate::RealityError::Io)?;
+    serve_socks5_on(conn, listener).await
+}
+
+/// As [`serve_socks5`], but on a listener the caller already bound.
+///
+/// Lets a caller order bind before the point of no return: a service must not announce
+/// readiness until the port is actually held, and the combined TUN+SOCKS mode must fail on
+/// `EADDRINUSE` before it starts mutating routes and DNS.
+pub async fn serve_socks5_on(conn: RealityConn, listener: TcpListener) -> crate::Result<()> {
+    let mux = conn.mux;
     loop {
         let (cli, _) = listener.accept().await.map_err(crate::RealityError::Io)?;
         cli.set_nodelay(true).ok();

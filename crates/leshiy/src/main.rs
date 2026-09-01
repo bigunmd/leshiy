@@ -1,11 +1,15 @@
 mod cli;
 mod client;
+mod elevate;
 mod host;
 mod lifecycle;
 mod quickstart;
 mod reality_config;
 mod remote_cli;
+mod sdnotify;
 mod server;
+mod service;
+mod signals;
 mod tun;
 mod ui;
 mod user_cli;
@@ -30,14 +34,16 @@ fn render_error(e: &anyhow::Error) -> String {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    if let Err(e) = run().await {
-        ui::eline(&render_error(&e));
-        return std::process::ExitCode::FAILURE;
+    match run().await {
+        Ok(code) => code,
+        Err(e) => {
+            ui::eline(&render_error(&e));
+            std::process::ExitCode::FAILURE
+        }
     }
-    std::process::ExitCode::SUCCESS
 }
 
-async fn run() -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<std::process::ExitCode> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -121,9 +127,13 @@ async fn run() -> anyhow::Result<()> {
         cli::Cmd::Server { config } => server::run(&config).await?,
         cli::Cmd::Client {
             uri,
+            uri_file,
             socks,
             transport,
-        } => client::run(&uri, &socks, transport).await?,
+        } => {
+            let uri = service::resolve_uri(uri.as_deref(), uri_file.as_deref())?;
+            client::run(&uri, &socks, transport).await?
+        }
         cli::Cmd::Connect {
             uri,
             socks,
@@ -131,12 +141,32 @@ async fn run() -> anyhow::Result<()> {
         } => client::run(&uri, &socks, transport).await?,
         cli::Cmd::Tun {
             uri,
+            uri_file,
             transport,
             mtu,
             tun_name,
             dns,
             ipv6,
-        } => tun::run(&uri, transport, mtu, &tun_name, &dns, ipv6).await?,
+            socks,
+            already_elevated,
+        } => {
+            let uri = service::resolve_uri(uri.as_deref(), uri_file.as_deref())?;
+            // Elevate before anything touches the network, so a password prompt cannot
+            // appear midway through bringing a tunnel up.
+            if let Some(code) = elevate::ensure_root(already_elevated).await? {
+                return Ok(code);
+            }
+            tun::run(
+                &uri,
+                transport,
+                mtu,
+                &tun_name,
+                &dns,
+                ipv6,
+                socks.as_deref(),
+            )
+            .await?
+        }
         cli::Cmd::Vpn {
             uri,
             transport,
@@ -160,10 +190,60 @@ async fn run() -> anyhow::Result<()> {
             };
             lifecycle::upgrade(&repo, &v, &host::RealHostOps)?
         }
+        cli::Cmd::Update {
+            repo,
+            version,
+            force,
+        } => {
+            let v = match version {
+                Some(v) => v,
+                None => lifecycle::latest_version(&repo)?,
+            };
+            let dest = lifecycle::self_path()?;
+            lifecycle::update(&repo, &v, &dest, force, &host::RealHostOps)?
+        }
         cli::Cmd::Remote { cmd } => remote_cli::run(cmd).await?,
+        cli::Cmd::Service { cmd } => match cmd {
+            cli::ServiceCmd::Start {
+                uri,
+                uri_file,
+                transport,
+                socks,
+                tun,
+                tun_name,
+                dns,
+                mtu,
+                ipv6,
+                no_socks,
+            } => {
+                let uri = service::resolve_uri(uri.as_deref(), uri_file.as_deref())?;
+                // A system unit writes to /etc and drives `systemctl` without --user, so it
+                // needs root just as the tunnel itself does.
+                if tun && let Some(code) = elevate::ensure_root(false).await? {
+                    return Ok(code);
+                }
+                service::start(&service::StartOpts {
+                    uri: &uri,
+                    transport: match transport {
+                        cli::Transport::Auto => "auto",
+                        cli::Transport::Quic => "quic",
+                        cli::Transport::Tcp => "tcp",
+                    },
+                    socks: (!no_socks).then_some(socks.as_str()),
+                    tun,
+                    tun_name: &tun_name,
+                    dns: &dns,
+                    mtu,
+                    ipv6,
+                })?
+            }
+            cli::ServiceCmd::Stop => service::stop()?,
+            cli::ServiceCmd::Status => service::status()?,
+            cli::ServiceCmd::Logs { follow } => service::logs(follow)?,
+        },
         cli::Cmd::Boot => server::boot().await?,
     }
-    Ok(())
+    Ok(std::process::ExitCode::SUCCESS)
 }
 
 #[cfg(test)]

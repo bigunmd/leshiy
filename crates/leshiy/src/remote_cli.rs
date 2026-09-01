@@ -408,7 +408,20 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
             crate::ui::eline(&crate::ui::field("running", &up.to_string()));
             Ok(())
         }
-        RemoteCmd::Upgrade { server, image } => {
+        RemoteCmd::Upgrade {
+            server,
+            image,
+            latest,
+        } => {
+            // Resolved before the vault passphrase prompt so a network failure doesn't
+            // strand the user having already typed it.
+            let image = if latest {
+                let repo = crate::lifecycle::DEFAULT_REPO;
+                let tag = crate::lifecycle::latest_version(repo)?;
+                format!("ghcr.io/{repo}:{tag}")
+            } else {
+                image
+            };
             let pass = prompt_passphrase(false)?;
             let mut vault =
                 Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;

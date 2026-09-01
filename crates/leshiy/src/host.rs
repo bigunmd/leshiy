@@ -73,18 +73,48 @@ impl HostOps for RealHostOps {
         };
         // All dynamic values are passed as positional args ($1..$5) so none is interpolated
         // into the shell program text — no command-injection surface.
+        //
+        // Two deliberate choices in the tail of this script:
+        //   * `awk '$2==f'` selects the checksum line by *exact filename field*. An
+        //     unanchored `grep` also matches sibling entries such as `<tarball>.minisig`,
+        //     which makes `sha256sum -c` check a nonexistent file and fail confusingly.
+        //   * The binary is staged inside the *destination* directory and moved with `mv`,
+        //     so the final step is a same-filesystem `rename(2)` — atomic, and safe over a
+        //     running executable. `install(1)` would unlink the destination first, leaving
+        //     a window in which there is no binary at all; staging under `/tmp` instead
+        //     would silently degrade `mv` to copy+unlink across filesystems and lose the
+        //     atomicity. Creating the staging file first also fails fast, before any
+        //     download, when the destination directory is not writable.
+        //   * All three assets are fetched in ONE curl invocation so DNS and the TLS
+        //     handshake are paid once, not three times. That is not micro-optimisation:
+        //     on a resolver answering in ~10s (observed under WSL2, whose DNS is the
+        //     Windows host) three separate calls added ~30s of pure lookup latency.
+        //     `--retry` matters for the same reason — the target users are on hostile
+        //     or degraded networks.
         const SCRIPT: &str = r#"set -eu
 repo="$1"; version="$2"; target="$3"; dest="$4"; pubkey="$5"
-tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+command -v minisign >/dev/null 2>&1 || {
+  echo "minisign is required to verify the release; install it and retry" >&2; exit 3; }
+destdir="$(dirname "$dest")"
+mkdir -p "$destdir"
+# Sweep staging files orphaned by a kill that outran the EXIT trap (SIGKILL is untrappable),
+# so a repeatedly-interrupted update cannot litter the install directory.
+find "$destdir" -maxdepth 1 -name '.leshiy.new.*' -type f -mmin +5 -delete 2>/dev/null || true
+tmp="$(mktemp -d)"
+new="$(mktemp "$destdir/.leshiy.new.XXXXXX")"
+trap 'rm -rf "$tmp"; rm -f "$new"' EXIT
 base="https://github.com/$repo/releases/download/$version"
 tarball="leshiy-$version-$target.tar.gz"
-curl -fsSL "$base/$tarball" -o "$tmp/$tarball"
-curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
-curl -fsSL "$base/SHA256SUMS.minisig" -o "$tmp/SHA256SUMS.minisig"
+curl -fsSL --retry 3 --retry-connrefused --connect-timeout 30 \
+  "$base/$tarball" -o "$tmp/$tarball" \
+  "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" \
+  "$base/SHA256SUMS.minisig" -o "$tmp/SHA256SUMS.minisig"
 minisign -Vm "$tmp/SHA256SUMS" -P "$pubkey" -x "$tmp/SHA256SUMS.minisig"
-( cd "$tmp" && grep "$tarball" SHA256SUMS | sha256sum -c - )
+( cd "$tmp" && awk -v f="$tarball" '$2==f' SHA256SUMS | sha256sum -c - )
 tar -C "$tmp" -xzf "$tmp/$tarball"
-install -Dm755 "$tmp/leshiy" "$dest"
+dd if="$tmp/leshiy" of="$new" bs=1M conv=fsync 2>/dev/null
+chmod 755 "$new"
+mv -f "$new" "$dest"
 "#;
         let st = std::process::Command::new("sh")
             .arg("-c")

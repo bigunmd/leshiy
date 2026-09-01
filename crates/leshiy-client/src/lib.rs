@@ -26,7 +26,7 @@ pub mod transport;
 
 pub use adapter::{QuicTunnel, RealTransport, RealityTunnel};
 pub use error::{ClientError, Result};
-pub use listener::serve_metered;
+pub use listener::{serve_metered, serve_metered_on};
 pub use profile::{Profile, ProfileStore};
 pub use pump::pump;
 pub use reconnect::{ReconnectParams, ReconnectingTunnel};

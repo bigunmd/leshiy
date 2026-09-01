@@ -1,14 +1,16 @@
 //! CLI subcommand definitions via clap derive.
 use clap::{Parser, Subcommand, ValueEnum};
 
-/// Shown after `leshiy tun --help`: how to make the binary reachable by sudo, since VPN
-/// mode needs root and `~/.local/bin` is usually absent from root's secure_path.
+/// Shown after `leshiy tun --help`. Elevation is automatic, so the only thing left to warn
+/// about is the shortcut users reach for when they want it to stop asking for a password.
 const SUDO_PATH_HELP: &str = "\
-VPN mode needs root. If `sudo leshiy …` reports \"command not found\", the binary is on your\n\
-user PATH but not root's secure_path. Symlink it into a root-PATH directory once:\n\
-\n    sudo ln -s \"$(command -v leshiy)\" /usr/local/bin/leshiy\n\n\
-then `sudo leshiy tun …` works. (Avoid adding ~/.local/bin to sudoers secure_path — a\n\
-user-writable dir in root's PATH is a privilege-escalation risk.)";
+VPN mode needs root. Run it normally — it re-executes itself through sudo using its own\n\
+absolute path, so no symlink or PATH change is required.\n\
+\n\
+If you want it passwordless, scope the sudoers rule to a root-owned path such as\n\
+/usr/local/bin/leshiy. Never point a NOPASSWD rule at a user-writable location like\n\
+~/.local/bin, and never add such a directory to sudoers secure_path: anything able to\n\
+write there could then replace the binary and obtain root.";
 
 #[derive(Parser)]
 #[command(
@@ -64,8 +66,12 @@ pub enum Cmd {
     },
     /// Run a local SOCKS5 proxy tunneling to the REALITY server URI.
     Client {
+        #[arg(long, conflicts_with = "uri_file")]
+        uri: Option<String>,
+        /// Read the `leshiy://` URI from a 0600 file instead of the command line, so the
+        /// credential is not exposed in `ps` output. Used by the generated systemd unit.
         #[arg(long)]
-        uri: String,
+        uri_file: Option<String>,
         #[arg(long, default_value = "127.0.0.1:1080")]
         socks: String,
         /// Transport to use: auto (default: prefer QUIC, fall back to REALITY/TCP), quic, or tcp.
@@ -88,8 +94,12 @@ pub enum Cmd {
     #[command(after_help = SUDO_PATH_HELP)]
     Tun {
         /// The leshiy:// server URI.
+        #[arg(long, conflicts_with = "uri_file")]
+        uri: Option<String>,
+        /// Read the `leshiy://` URI from a 0600 file instead of the command line, keeping
+        /// the credential out of `ps`. Used by the generated systemd unit.
         #[arg(long)]
-        uri: String,
+        uri_file: Option<String>,
         /// Transport: tcp (REALITY — required for UDP today, the default), quic, or auto.
         #[arg(long, default_value = "tcp")]
         transport: Transport,
@@ -106,6 +116,17 @@ pub enum Cmd {
         /// server has working outbound IPv6, else v6-preferred traffic blackholes.
         #[arg(long)]
         ipv6: bool,
+        /// Also run a local SOCKS5 proxy on this address, sharing the same tunnel.
+        ///
+        /// For apps that need an explicit proxy endpoint while the whole device is already
+        /// tunneled. Loopback only. TCP CONNECT only — UDP needs no proxy here, because
+        /// the full tunnel already carries it.
+        #[arg(long)]
+        socks: Option<String>,
+        /// Set on the sudo re-exec so the elevated process never elevates again. An argv
+        /// flag rather than an env var: sudo's default `env_reset` would drop the latter.
+        #[arg(long = "already-elevated", hide = true)]
+        already_elevated: bool,
     },
     /// Run a full-tunnel VPN via the privileged `leshiy-helper` daemon (this process
     /// stays unprivileged). Requires `leshiy-helper` to be installed + running.
@@ -186,6 +207,9 @@ pub enum Cmd {
         cmd: UserCmd,
     },
     /// Download + verify the latest (or --version) release binary and restart the service.
+    ///
+    /// This is the *server* path: it replaces /usr/local/bin/leshiy and restarts the
+    /// `leshiy` systemd unit. To update the client you are running, use `leshiy update`.
     Upgrade {
         /// GitHub repo to pull from.
         #[arg(long, default_value = "bigunmd/leshiy")]
@@ -194,13 +218,85 @@ pub enum Cmd {
         #[arg(long)]
         version: Option<String>,
     },
+    /// Update this client: verify the release signature and replace the running binary.
+    ///
+    /// Works for a user-local install (`~/.local/bin/leshiy`) without root. The swap is an
+    /// atomic rename, so the running process keeps the old build until it is restarted.
+    /// Requires `minisign` on PATH, the same as the client installer.
+    Update {
+        /// GitHub repo to pull from.
+        #[arg(long, default_value = "bigunmd/leshiy")]
+        repo: String,
+        /// Release tag to install (e.g. v1.11.3). Defaults to the latest release.
+        #[arg(long)]
+        version: Option<String>,
+        /// Install an older release than the one running. Refused by default: a valid
+        /// signature cannot distinguish a legitimate rollback from a forced downgrade.
+        #[arg(long)]
+        force: bool,
+    },
     /// Provision and manage remote leshiy servers.
     Remote {
         #[command(subcommand)]
         cmd: RemoteCmd,
     },
+    /// Run the client in the background as a systemd service that survives logout.
+    Service {
+        #[command(subcommand)]
+        cmd: ServiceCmd,
+    },
     /// Container entrypoint: build config from LESHIY_* env vars on first boot, then run.
     Boot,
+}
+
+#[derive(Subcommand)]
+pub enum ServiceCmd {
+    /// Connect, verify the tunnel actually works, then hand it to systemd and report how
+    /// to check or stop it. Proxy mode installs a user unit (no root); `--tun` installs a
+    /// system unit, since a full tunnel must change routes and DNS.
+    Start {
+        /// The leshiy:// server URI.
+        #[arg(long, conflicts_with = "uri_file")]
+        uri: Option<String>,
+        /// Read the URI from a 0600 file instead.
+        #[arg(long)]
+        uri_file: Option<String>,
+        /// Transport: auto (default), quic, or tcp.
+        #[arg(long, default_value = "auto")]
+        transport: Transport,
+        /// Local SOCKS5 listen address. With --tun this adds a proxy alongside the tunnel.
+        #[arg(long, default_value = "127.0.0.1:1080")]
+        socks: String,
+        /// Run a full-device tunnel instead of only a local proxy. Needs root.
+        #[arg(long)]
+        tun: bool,
+        /// TUN interface name (--tun only).
+        #[arg(long, default_value = "leshiy0")]
+        tun_name: String,
+        /// DNS resolver forced through the tunnel (--tun only).
+        #[arg(long, default_value = "1.1.1.1")]
+        dns: String,
+        /// TUN MTU (--tun only).
+        #[arg(long, default_value_t = 1400)]
+        mtu: u16,
+        /// Carry IPv6 through the tunnel (--tun only).
+        #[arg(long)]
+        ipv6: bool,
+        /// Do not expose a SOCKS5 proxy at all (--tun only): tunnel everything, listen
+        /// nowhere.
+        #[arg(long, conflicts_with = "socks")]
+        no_socks: bool,
+    },
+    /// Stop the service and disable it at boot.
+    Stop,
+    /// Show whether the tunnel is running.
+    Status,
+    /// Show the service's log.
+    Logs {
+        /// Follow the log instead of printing the last lines.
+        #[arg(short, long)]
+        follow: bool,
+    },
 }
 
 /// Connector role for `quickstart`.
@@ -443,6 +539,10 @@ pub enum RemoteCmd {
         /// (`ghcr.io/bigunmd/leshiy:v<CLI version>`), the tag CI publishes.
         #[arg(long, default_value = concat!("ghcr.io/bigunmd/leshiy:v", env!("CARGO_PKG_VERSION")))]
         image: String,
+        /// Resolve the newest published release instead of the tag matching this CLI.
+        /// Conflicts with an explicit --image.
+        #[arg(long, conflicts_with = "image")]
+        latest: bool,
     },
     /// Export an encrypted backup of a saved server.
     Backup {
@@ -499,7 +599,10 @@ mod tests {
                 ipv6,
                 ..
             } => {
-                assert_eq!(uri, "leshiy://abc@1.2.3.4:443?sni=x&sid=0102030400000000");
+                assert_eq!(
+                    uri.as_deref(),
+                    Some("leshiy://abc@1.2.3.4:443?sni=x&sid=0102030400000000")
+                );
                 assert!(matches!(transport, Transport::Tcp));
                 assert_eq!(mtu, 1400);
                 assert_eq!(tun_name, "leshiy0");
