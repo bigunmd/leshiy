@@ -348,6 +348,11 @@ fn build_route_batch(plan: &RoutePlan, tun_name: &str, carry_v6: bool) -> RouteB
     let exc = &plan.server_exception;
     if exc.dest.addr.is_ipv4() || carry_v6 {
         install.push_str(&format!("route add {} via {}\n", exc.dest, exc.gateway));
+        // Track it for teardown like any other main-table route: it points at the original
+        // gateway, so it does NOT auto-clear with the TUN. Leaving it behind survives the
+        // session, and after the gateway changes (dock, VPN, WiFi->LAN) the stale entry
+        // sends the tunnel's own packets at a gateway that can no longer reach the server.
+        bypass.push(exc.dest.clone());
     }
 
     // Partition `via_tun` into the default-override halves (→ private-table default, below) and
@@ -438,14 +443,24 @@ async fn ip_batch(script: &str) -> std::io::Result<()> {
         // `stdin` is dropped at the end of this block → `ip` sees EOF and runs the batch.
     }
     let out = child.wait_with_output().await?;
-    let errors = out
-        .stderr
-        .split(|&b| b == b'\n')
-        .filter(|l| !l.is_empty())
-        .count();
-    if errors > 0 {
+    // Report WHICH lines failed, not just how many. `ip -batch` prefixes each diagnostic with
+    // the failing line number ("Command failed -:3"), so pairing stderr against the script
+    // recovers the exact command -- without that, a bare count says a route is missing but
+    // not which, and the server-exception route failing looks identical to a stray include.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let failed: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
+    if !failed.is_empty() {
+        let lines: Vec<&str> = script.lines().collect();
+        for msg in &failed {
+            let cmd = msg
+                .rsplit_once("-:")
+                .and_then(|(_, n)| n.trim().parse::<usize>().ok())
+                .and_then(|n| lines.get(n.saturating_sub(1)).copied())
+                .unwrap_or("<unknown>");
+            tracing::warn!(command = %format!("ip {cmd}"), error = %msg.trim(), "route install failed");
+        }
         tracing::warn!(
-            failures = errors,
+            failures = failed.len(),
             "some routes failed to install (ip -batch); matching traffic may not be routed as planned"
         );
     }
@@ -502,6 +517,22 @@ mod tests {
         .unwrap()
     }
 
+    /// The exception points at the ORIGINAL gateway, so unlike the `dev tun` routes it does
+    /// not disappear with the TUN. Untracked, it outlived the session: the next connect hit
+    /// "RTNETLINK answers: File exists", and once the gateway changed the stale entry aimed
+    /// the tunnel's own packets at a gateway that could no longer reach the server.
+    #[test]
+    fn the_server_exception_is_torn_down_with_the_session() {
+        let b = build_route_batch(&v4_full_tunnel(), "leshiy0", false);
+        assert!(
+            b.bypass
+                .iter()
+                .any(|c| c.to_string().contains("203.0.113.7")),
+            "server exception must be tracked for teardown, got {:?}",
+            b.bypass
+        );
+    }
+
     #[test]
     fn full_tunnel_keeps_main_table_clear_of_the_override() {
         let b = build_route_batch(&v4_full_tunnel(), "leshiy0", false);
@@ -549,7 +580,12 @@ mod tests {
             b.teardown_rules
                 .contains("rule del priority 32765 table 51821")
         );
-        assert!(b.bypass.is_empty());
+        // The server exception is the one main-table route a full tunnel installs, so it is
+        // also the one thing teardown has to remove.
+        assert_eq!(
+            b.bypass.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+            ["203.0.113.7/32"]
+        );
     }
 
     #[test]
@@ -625,8 +661,11 @@ mod tests {
             b.install
                 .contains("route add 198.51.100.0/24 via 192.168.1.1")
         );
-        assert_eq!(b.bypass.len(), 1);
-        assert_eq!(b.bypass[0].to_string(), "198.51.100.0/24");
+        // Both main-table routes are tracked: the exclude AND the server exception.
+        assert_eq!(
+            b.bypass.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+            ["203.0.113.7/32", "198.51.100.0/24"]
+        );
         // The default override still applies under an Exclude base.
         assert!(
             b.install

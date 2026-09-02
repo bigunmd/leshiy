@@ -218,6 +218,13 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 no_socks,
             } => {
                 let uri = service::resolve_uri(uri.as_deref(), uri_file.as_deref())?;
+                let transport = cli::Transport::for_service(transport, tun);
+                if tun && transport != cli::Transport::Tcp {
+                    crate::ui::warn(
+                        "a full tunnel needs UDP and ICMP, which only --transport tcp \
+                         carries today; DNS and ping will not work inside the tunnel",
+                    );
+                }
                 // A system unit writes to /etc and drives `systemctl` without --user, so it
                 // needs root just as the tunnel itself does.
                 if tun && let Some(code) = elevate::ensure_root(already_elevated).await? {
@@ -225,11 +232,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 }
                 service::start(&service::StartOpts {
                     uri: &uri,
-                    transport: match transport {
-                        cli::Transport::Auto => "auto",
-                        cli::Transport::Quic => "quic",
-                        cli::Transport::Tcp => "tcp",
-                    },
+                    transport: transport.as_flag(),
                     socks: (!no_socks).then_some(socks.as_str()),
                     tun,
                     tun_name: &tun_name,

@@ -273,9 +273,10 @@ pub enum ServiceCmd {
         /// Read the URI from a 0600 file instead.
         #[arg(long)]
         uri_file: Option<String>,
-        /// Transport: auto (default), quic, or tcp.
-        #[arg(long, default_value = "auto")]
-        transport: Transport,
+        /// Transport. Defaults to `auto` for proxy mode and `tcp` for `--tun`, because a
+        /// full tunnel needs UDP and ICMP, which only REALITY/TCP carries today.
+        #[arg(long)]
+        transport: Option<Transport>,
         /// Local SOCKS5 listen address. With --tun this adds a proxy alongside the tunnel.
         #[arg(long, default_value = "127.0.0.1:1080")]
         socks: String,
@@ -323,7 +324,7 @@ pub enum Role {
 }
 
 /// Transport selection for the client subcommand.
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Transport {
     /// Prefer QUIC where the URI has a `quic=` endpoint and UDP is open; fall back
     /// to REALITY/TCP when QUIC is blocked or absent.
@@ -332,6 +333,31 @@ pub enum Transport {
     Quic,
     /// Use REALITY (TCP) transport.
     Tcp,
+}
+
+impl Transport {
+    pub fn as_flag(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Quic => "quic",
+            Self::Tcp => "tcp",
+        }
+    }
+
+    /// Pick the transport a generated unit should run with.
+    ///
+    /// A full tunnel carries DNS (UDP) and ping (ICMP), and only REALITY/TCP carries both
+    /// today — `QuicTunnel` doesn't implement `open_icmp` at all. So `auto` picking QUIC
+    /// leaves TCP streams working while DNS and ping die inside the tunnel, which presents
+    /// as a totally dead network on a service that reports itself healthy. `leshiy tun`
+    /// already defaults to tcp for this reason; the unit must not silently differ.
+    pub fn for_service(explicit: Option<Self>, tun: bool) -> Self {
+        match (explicit, tun) {
+            (Some(t), _) => t,
+            (None, true) => Self::Tcp,
+            (None, false) => Self::Auto,
+        }
+    }
 }
 
 /// Default server config path (same default as `server --config`).
@@ -590,6 +616,26 @@ pub enum RemoteUserCmd {
 
 #[cfg(test)]
 mod tests {
+    /// The generated unit used to hardcode `auto`, which picks QUIC whenever the URI carries
+    /// a `quic=` endpoint. QUIC declines `open_icmp` and did not carry DNS either, so the
+    /// tunnel came up, reported healthy, served TCP over SOCKS -- and dropped every ping and
+    /// DNS query inside the tunnel. Indistinguishable from a blackholed network.
+    #[test]
+    fn a_full_tunnel_defaults_to_tcp_because_only_reality_carries_udp_and_icmp() {
+        use super::Transport;
+        assert_eq!(Transport::for_service(None, true), Transport::Tcp);
+        assert_eq!(Transport::for_service(None, false), Transport::Auto);
+        // An explicit choice is still honored in both modes, warning or not.
+        assert_eq!(
+            Transport::for_service(Some(Transport::Quic), true),
+            Transport::Quic
+        );
+        assert_eq!(
+            Transport::for_service(Some(Transport::Tcp), false),
+            Transport::Tcp
+        );
+    }
+
     use super::*;
     use clap::Parser;
 
