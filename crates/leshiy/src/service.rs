@@ -224,25 +224,10 @@ fn read_write_paths() -> String {
 
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 
-/// True on WSL2, where the kernel is Microsoft's.
-///
-/// Worth special-casing twice over: a tunnel there covers WSL traffic only and leaves
-/// Windows untouched, and full-tunnel mode under the service unit is known-broken (see the
-/// note on `--tun`).
+/// True on WSL2, where the kernel is Microsoft's. A tunnel there covers WSL's own traffic
+/// and leaves Windows applications untouched, which is worth saying out loud.
 pub fn running_under_wsl() -> bool {
     std::fs::read_to_string("/proc/version").is_ok_and(|v| v.to_lowercase().contains("microsoft"))
-}
-
-/// Say so before the sudo prompt, not after: the failure mode is a total loss of
-/// connectivity, so the warning is only useful while the user can still decline.
-pub fn warn_if_wsl_tun(tun: bool) {
-    if tun && running_under_wsl() {
-        crate::ui::warn(
-            "WSL2 detected: --tun as a service is known to blackhole traffic here — the unit \
-             reports itself connected while nothing routes. Use proxy mode (omit --tun), or \
-             run `sudo leshiy tun …` in the foreground, which works.",
-        );
-    }
 }
 
 fn render_unit(exe: &Path, uri_file: &Path, o: &StartOpts<'_>, scope: Scope) -> String {
@@ -367,6 +352,21 @@ pub fn start(o: &StartOpts<'_>) -> Result<()> {
         }
     }
 
+    // Retire any unit in the other scope first: two same-named units would then disagree,
+    // and `status`/`stop` could act on the idle one while the other kept the machine
+    // tunneled. One installed unit at a time is the invariant.
+    let other = if scope == Scope::System {
+        Scope::User
+    } else {
+        Scope::System
+    };
+    if other.unit_path()?.exists() {
+        let _ = systemctl(other, &["disable", "--now", UNIT]);
+        let _ = std::fs::remove_file(other.unit_path()?);
+        let _ = systemctl(other, &["daemon-reload"]);
+        crate::ui::hint(&format!("removed the previous {other:?}-scope unit"));
+    }
+
     write_credential(&uri_path, o.uri)?;
     let unit = render_unit(&exe, &uri_path, o, scope);
     if let Some(dir) = unit_path.parent() {
@@ -392,40 +392,72 @@ pub fn start(o: &StartOpts<'_>) -> Result<()> {
 
 /// Look in whichever scope actually has a unit installed, so `stop`/`status`/`logs` need no
 /// flag to mirror whatever `start` chose.
-fn installed_scope() -> Result<Scope> {
-    for scope in [Scope::User, Scope::System] {
+/// Every scope that currently has a unit installed.
+///
+/// Both can exist at once — proxy mode writes a user unit and `--tun` a system one, under
+/// the same name. Picking the first that merely *exists* is what made `status` report an
+/// idle user unit while the system tunnel was running, and made `stop` claim success after
+/// stopping the wrong one, leaving the machine tunneled with no obvious way back.
+fn installed_scopes() -> Result<Vec<Scope>> {
+    let mut found = Vec::new();
+    for scope in [Scope::System, Scope::User] {
         if scope.unit_path()?.exists() {
-            return Ok(scope);
+            found.push(scope);
         }
     }
-    anyhow::bail!("no {UNIT} installed; run `leshiy service start` first")
+    if found.is_empty() {
+        anyhow::bail!("no {UNIT} installed; run `leshiy service start` first");
+    }
+    Ok(found)
 }
 
-/// Whether managing the installed unit needs root.
+fn is_active(scope: Scope) -> bool {
+    systemctl(scope, &["is-active", "--quiet", UNIT]).is_ok_and(|o| o.status.success())
+}
+
+/// Choose which installed unit a read command should describe: the running one wins.
 ///
-/// A system unit cannot be stopped without it: `systemctl disable --now` goes through
-/// polkit, which fails with "Interactive authentication required" in a plain shell. `status`
-/// and `logs` stay unprivileged, so only the mutating command escalates.
+/// Split out from the I/O so the selection itself is testable — reporting on an idle unit
+/// while another is live is the whole bug this guards against.
+fn pick_scope(installed: &[Scope], active: impl Fn(Scope) -> bool) -> Option<Scope> {
+    installed
+        .iter()
+        .copied()
+        .find(|s| active(*s))
+        .or_else(|| installed.first().copied())
+}
+
+/// The scope to report on: whichever is actually running, else the only one installed.
+fn managing_scope() -> Result<Scope> {
+    let scopes = installed_scopes()?;
+    pick_scope(&scopes, is_active).ok_or_else(|| anyhow::anyhow!("no {UNIT} installed"))
+}
+
+/// Whether stopping needs root — true when *any* installed unit is system-scoped, since
+/// `stop` tears down every scope rather than guessing which one the user meant.
 pub fn stop_needs_root() -> Result<bool> {
-    Ok(installed_scope()? == Scope::System)
+    Ok(installed_scopes()?.contains(&Scope::System))
 }
 
 pub fn stop() -> Result<()> {
-    let scope = installed_scope()?;
-    systemctl_ok(scope, &["disable", "--now", UNIT])?;
-    crate::ui::ok(&format!("{UNIT} stopped"));
+    // Tear down every installed scope, not just one. A user unit and a system unit can both
+    // exist, and stopping only the one we guessed at is how a tunnel survived "stop".
+    for scope in installed_scopes()? {
+        systemctl_ok(scope, &["disable", "--now", UNIT])?;
+        crate::ui::ok(&format!("{UNIT} stopped ({scope:?} scope)"));
+    }
     Ok(())
 }
 
 pub fn status() -> Result<()> {
-    let scope = installed_scope()?;
+    let scope = managing_scope()?;
     let out = systemctl(scope, &["status", "--no-pager", UNIT])?;
     print!("{}", String::from_utf8_lossy(&out.stdout));
     Ok(())
 }
 
 pub fn logs(follow: bool) -> Result<()> {
-    let scope = installed_scope()?;
+    let scope = managing_scope()?;
     let mut cmd = std::process::Command::new("journalctl");
     if scope == Scope::User {
         cmd.arg("--user");
@@ -473,6 +505,28 @@ mod tests {
             );
             assert!(unit.contains("--uri-file /etc/leshiy/client.uri"), "{unit}");
         }
+    }
+
+    /// Proxy mode installs a user unit and `--tun` a system one, under the same name, so
+    /// both can be on disk. Choosing by mere existence reported the idle user unit while
+    /// the system tunnel was live — and `stop` then "succeeded" against the wrong unit,
+    /// leaving the machine tunneled with no working way back.
+    #[test]
+    fn a_running_unit_wins_over_a_merely_installed_one() {
+        let both = [Scope::System, Scope::User];
+        assert_eq!(
+            pick_scope(&both, |s| s == Scope::System),
+            Some(Scope::System)
+        );
+        assert_eq!(pick_scope(&both, |s| s == Scope::User), Some(Scope::User));
+        // Neither running: fall back deterministically rather than at random.
+        assert_eq!(pick_scope(&both, |_| false), Some(Scope::System));
+        assert_eq!(pick_scope(&[], |_| true), None);
+        assert_eq!(
+            pick_scope(&[Scope::User], |_| false),
+            Some(Scope::User),
+            "a lone unit is reported even when stopped"
+        );
     }
 
     #[test]
