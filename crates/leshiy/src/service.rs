@@ -243,18 +243,30 @@ Environment=RUST_LOG=leshiy=warn
 ";
 
     let hardening = if o.tun {
-        // PrivateDevices=yes would hide /dev/net/tun, and ProtectHome=yes would hide a
-        // home-directory credential — which is why the system scope keeps it in /etc.
-        "\
+        // PrivateDevices=yes would hide /dev/net/tun, so it is deliberately absent.
+        //
+        // ProtectHome=yes makes /home appear empty, which means systemd cannot exec a
+        // binary installed there at all -- it fails with 203/EXEC. install-client.sh puts
+        // it in ~/.local/bin, so that is the normal case, not an edge one. Downgrade to
+        // read-only only when the binary actually lives under a home directory; the
+        // credential is in /etc, so a readable home does not expose it.
+        let protect_home = if exe.starts_with("/home") || exe.starts_with("/root") {
+            "ProtectHome=read-only"
+        } else {
+            "ProtectHome=yes"
+        };
+        format!(
+            "\
 AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
 DeviceAllow=/dev/net/tun rw
 ProtectSystem=strict
-ProtectHome=yes
+{protect_home}
 ReadWritePaths=/etc
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 TimeoutStopSec=30
 "
+        )
     } else {
         // A SOCKS proxy touches no devices or routes, so it can be locked down hard.
         "\
@@ -273,6 +285,7 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 UMask=0077
 "
+        .to_string()
     };
 
     let (after, wanted_by) = match scope {
@@ -425,6 +438,31 @@ mod tests {
             Scope::System,
         );
         assert!(unit.contains("--already-elevated"), "{unit}");
+    }
+
+    /// ProtectHome=yes makes /home appear empty to the service, so systemd cannot exec a
+    /// binary there and the unit dies with 203/EXEC. install-client.sh installs to
+    /// ~/.local/bin, so this is the default layout, not a corner case.
+    #[test]
+    fn vpn_unit_can_exec_a_binary_installed_under_home() {
+        let o = opts(true, None);
+        let home = render_unit(
+            Path::new("/home/someone/.local/bin/leshiy"),
+            Path::new("/etc/leshiy/client.uri"),
+            &o,
+            Scope::System,
+        );
+        assert!(home.contains("ProtectHome=read-only"), "{home}");
+        assert!(!home.contains("ProtectHome=yes"), "{home}");
+
+        // A system-wide install needs no such concession, so keep the stronger setting.
+        let sys = render_unit(
+            Path::new("/usr/local/bin/leshiy"),
+            Path::new("/etc/leshiy/client.uri"),
+            &o,
+            Scope::System,
+        );
+        assert!(sys.contains("ProtectHome=yes"), "{sys}");
     }
 
     /// PrivateDevices=yes hides /dev/net/tun; the failure looks like a permissions bug.

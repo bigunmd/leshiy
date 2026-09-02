@@ -21,6 +21,14 @@ write there could then replace the binary and obtain root.";
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: Cmd,
+    /// Set on the sudo re-exec so the elevated process never elevates again.
+    ///
+    /// Global, because `ensure_root` appends it to whatever argv it re-runs: any
+    /// subcommand that can elevate must accept it, or the elevated process dies on an
+    /// "unexpected argument" from clap. An argv flag rather than an env var, since sudo's
+    /// default `env_reset` would drop the latter.
+    #[arg(long = "already-elevated", hide = true, global = true)]
+    pub already_elevated: bool,
 }
 
 #[derive(Subcommand)]
@@ -123,10 +131,6 @@ pub enum Cmd {
         /// the full tunnel already carries it.
         #[arg(long)]
         socks: Option<String>,
-        /// Set on the sudo re-exec so the elevated process never elevates again. An argv
-        /// flag rather than an env var: sudo's default `env_reset` would drop the latter.
-        #[arg(long = "already-elevated", hide = true)]
-        already_elevated: bool,
     },
     /// Run a full-tunnel VPN via the privileged `leshiy-helper` daemon (this process
     /// stays unprivileged). Requires `leshiy-helper` to be installed + running.
@@ -655,6 +659,44 @@ mod tests {
             }
             _ => panic!("expected Vpn"),
         }
+    }
+
+    /// `ensure_root` appends `--already-elevated` to whatever argv it re-runs, so every
+    /// subcommand that can elevate must accept it. Shipping it on `tun` alone made
+    /// `service start --tun` die on "unexpected argument" the moment it re-execed.
+    #[test]
+    fn every_elevating_subcommand_accepts_the_guard_flag() {
+        let uri = "leshiy://abc@1.2.3.4:443?sni=x&sid=00";
+        for argv in [
+            vec!["leshiy", "tun", "--uri", uri, "--already-elevated"],
+            vec![
+                "leshiy",
+                "service",
+                "start",
+                "--tun",
+                "--uri",
+                uri,
+                "--already-elevated",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("{argv:?} must parse, got: {e}"));
+            assert!(cli.already_elevated, "{argv:?} lost the guard flag");
+        }
+    }
+
+    /// The flag is global, so it must also parse before the subcommand.
+    #[test]
+    fn guard_flag_is_accepted_ahead_of_the_subcommand() {
+        let cli = Cli::try_parse_from([
+            "leshiy",
+            "--already-elevated",
+            "tun",
+            "--uri",
+            "leshiy://abc@1.2.3.4:443?sni=x&sid=00",
+        ])
+        .expect("global flag should parse before the subcommand");
+        assert!(cli.already_elevated);
     }
 
     #[test]

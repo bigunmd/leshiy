@@ -50,7 +50,9 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 .unwrap_or_else(|_| "leshiy=info".into()),
         )
         .init();
-    match cli::Cli::parse().cmd {
+    let cli = cli::Cli::parse();
+    let already_elevated = cli.already_elevated;
+    match cli.cmd {
         cli::Cmd::Keygen => {
             use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
             use std::io::IsTerminal;
@@ -148,7 +150,6 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             dns,
             ipv6,
             socks,
-            already_elevated,
         } => {
             let uri = service::resolve_uri(uri.as_deref(), uri_file.as_deref())?;
             // Elevate before anything touches the network, so a password prompt cannot
@@ -219,7 +220,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 let uri = service::resolve_uri(uri.as_deref(), uri_file.as_deref())?;
                 // A system unit writes to /etc and drives `systemctl` without --user, so it
                 // needs root just as the tunnel itself does.
-                if tun && let Some(code) = elevate::ensure_root(false).await? {
+                if tun && let Some(code) = elevate::ensure_root(already_elevated).await? {
                     return Ok(code);
                 }
                 service::start(&service::StartOpts {
