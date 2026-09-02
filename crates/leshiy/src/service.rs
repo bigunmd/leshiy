@@ -224,6 +224,27 @@ fn read_write_paths() -> String {
 
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 
+/// True on WSL2, where the kernel is Microsoft's.
+///
+/// Worth special-casing twice over: a tunnel there covers WSL traffic only and leaves
+/// Windows untouched, and full-tunnel mode under the service unit is known-broken (see the
+/// note on `--tun`).
+pub fn running_under_wsl() -> bool {
+    std::fs::read_to_string("/proc/version").is_ok_and(|v| v.to_lowercase().contains("microsoft"))
+}
+
+/// Say so before the sudo prompt, not after: the failure mode is a total loss of
+/// connectivity, so the warning is only useful while the user can still decline.
+pub fn warn_if_wsl_tun(tun: bool) {
+    if tun && running_under_wsl() {
+        crate::ui::warn(
+            "WSL2 detected: --tun as a service is known to blackhole traffic here — the unit \
+             reports itself connected while nothing routes. Use proxy mode (omit --tun), or \
+             run `sudo leshiy tun …` in the foreground, which works.",
+        );
+    }
+}
+
 fn render_unit(exe: &Path, uri_file: &Path, o: &StartOpts<'_>, scope: Scope) -> String {
     let mut exec = format!(
         "{} {} --uri-file {} --transport {}",

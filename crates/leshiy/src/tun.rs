@@ -30,10 +30,7 @@ async fn bind_local_socks(addr: &str) -> Result<tokio::net::TcpListener> {
 
 /// Report a usable tunnel once the dial has succeeded and the SOCKS port (if any) is held.
 fn announce(tun_name: &str, socks: Option<&str>) {
-    let scope = if cfg!(target_os = "linux")
-        && std::fs::read_to_string("/proc/version")
-            .is_ok_and(|v| v.to_lowercase().contains("microsoft"))
-    {
+    let scope = if crate::service::running_under_wsl() {
         " (WSL2: this tunnels WSL traffic only — Windows apps are unaffected)"
     } else {
         ""

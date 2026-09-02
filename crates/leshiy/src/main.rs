@@ -218,6 +218,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 no_socks,
             } => {
                 let uri = service::resolve_uri(uri.as_deref(), uri_file.as_deref())?;
+                service::warn_if_wsl_tun(tun);
                 // A system unit writes to /etc and drives `systemctl` without --user, so it
                 // needs root just as the tunnel itself does.
                 if tun && let Some(code) = elevate::ensure_root(already_elevated).await? {

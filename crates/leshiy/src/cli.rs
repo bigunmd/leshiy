@@ -12,6 +12,21 @@ If you want it passwordless, scope the sudoers rule to a root-owned path such as
 ~/.local/bin, and never add such a directory to sudoers secure_path: anything able to\n\
 write there could then replace the binary and obtain root.";
 
+/// Shown after `leshiy service start --help`. Full-tunnel mode as a systemd unit blackholes
+/// traffic on WSL2 even though the same tunnel works when run in the foreground; proxy mode
+/// is unaffected, so point users at it rather than let them discover this by losing network.
+const WSL_SERVICE_HELP: &str = "\
+On WSL2, use proxy mode (omit --tun).\n\
+\n\
+`--tun` as a service is known to blackhole traffic there: the unit reports itself connected,\n\
+but nothing routes. Proxy mode works normally, and most WSL2 users want it anyway — a tunnel\n\
+inside WSL only carries WSL's own traffic, never the Windows applications alongside it.\n\
+\n\
+If you do need a full tunnel under WSL2, run it in the foreground instead, which works:\n\
+\n    sudo leshiy tun --uri '<leshiy://…>'\n\
+\n\
+Elsewhere (a normal Linux host or a VPS) `--tun` as a service is fine.";
+
 #[derive(Parser)]
 #[command(
     name = "leshiy",
@@ -258,6 +273,7 @@ pub enum ServiceCmd {
     /// Connect, verify the tunnel actually works, then hand it to systemd and report how
     /// to check or stop it. Proxy mode installs a user unit (no root); `--tun` installs a
     /// system unit, since a full tunnel must change routes and DNS.
+    #[command(after_help = WSL_SERVICE_HELP)]
     Start {
         /// The leshiy:// server URI.
         #[arg(long, conflicts_with = "uri_file")]
@@ -272,6 +288,8 @@ pub enum ServiceCmd {
         #[arg(long, default_value = "127.0.0.1:1080")]
         socks: String,
         /// Run a full-device tunnel instead of only a local proxy. Needs root.
+        ///
+        /// Not supported on WSL2 — see the note below. Use proxy mode there.
         #[arg(long)]
         tun: bool,
         /// TUN interface name (--tun only).
