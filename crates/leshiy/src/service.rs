@@ -380,6 +380,15 @@ fn installed_scope() -> Result<Scope> {
     anyhow::bail!("no {UNIT} installed; run `leshiy service start` first")
 }
 
+/// Whether managing the installed unit needs root.
+///
+/// A system unit cannot be stopped without it: `systemctl disable --now` goes through
+/// polkit, which fails with "Interactive authentication required" in a plain shell. `status`
+/// and `logs` stay unprivileged, so only the mutating command escalates.
+pub fn stop_needs_root() -> Result<bool> {
+    Ok(installed_scope()? == Scope::System)
+}
+
 pub fn stop() -> Result<()> {
     let scope = installed_scope()?;
     systemctl_ok(scope, &["disable", "--now", UNIT])?;

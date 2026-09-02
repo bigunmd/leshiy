@@ -238,7 +238,16 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                     ipv6,
                 })?
             }
-            cli::ServiceCmd::Stop => service::stop()?,
+            cli::ServiceCmd::Stop => {
+                // Stopping a system unit is polkit-gated, so escalate first rather than
+                // let systemctl fail with "Interactive authentication required".
+                if service::stop_needs_root()?
+                    && let Some(code) = elevate::ensure_root(already_elevated).await?
+                {
+                    return Ok(code);
+                }
+                service::stop()?
+            }
             cli::ServiceCmd::Status => service::status()?,
             cli::ServiceCmd::Logs { follow } => service::logs(follow)?,
         },
