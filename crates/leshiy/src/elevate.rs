@@ -70,6 +70,25 @@ pub fn have_privileges() -> bool {
 /// a failure to actually gain privileges surfaces as the real underlying error instead of
 /// an infinite sudo loop.
 pub async fn ensure_root(already_elevated: bool) -> Result<Option<std::process::ExitCode>> {
+    // `args_os` preserves arguments that are not valid UTF-8.
+    ensure_root_with_args(already_elevated, std::env::args_os().skip(1)).await
+}
+
+/// Like [`ensure_root`], but re-executing with `args` instead of this process's own argv.
+///
+/// `-i` needs this: the wizard has already run and its answers live in memory, so replaying
+/// the original argv would re-open the wizard as root after the sudo prompt. The caller
+/// passes the resolved flags instead — and, because the `leshiy://` URI is a bearer
+/// credential that must not appear in `ps`, hands it over as `--uri-file` rather than
+/// `--uri`.
+pub async fn ensure_root_with_args<I, S>(
+    already_elevated: bool,
+    args: I,
+) -> Result<Option<std::process::ExitCode>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
     if have_privileges() || already_elevated {
         return Ok(None);
     }
@@ -93,12 +112,11 @@ pub async fn ensure_root(already_elevated: bool) -> Result<Option<std::process::
     // the prompt returning while root is still mid-teardown.
     let _absorbs_signals_for_child = crate::signals::install().ok();
 
-    // `--` stops sudo parsing a path that begins with `-` as its own option. `args_os`
-    // preserves arguments that are not valid UTF-8.
+    // `--` stops sudo parsing a path that begins with `-` as its own option.
     let status = tokio::process::Command::new("sudo")
         .arg("--")
         .arg(&exe)
-        .args(std::env::args_os().skip(1))
+        .args(args)
         .arg(GUARD_FLAG)
         .status()
         .await

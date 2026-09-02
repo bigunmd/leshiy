@@ -43,13 +43,18 @@ pub enum Cmd {
     /// Print a fresh x25519 keypair (base64url).
     Keygen,
     /// Generate a REALITY server key + config + print the client leshiy:// URI.
+    ///
+    /// Required without `-i`: --host and --dest. With `-i`, anything omitted is asked for.
     ServerInit {
         /// Public host:port clients dial (goes in the URI).
         #[arg(long)]
-        host: String,
+        host: Option<String>,
         /// Borrowed TLS site to camouflage as, host:port (the dest).
         #[arg(long)]
-        dest: String,
+        dest: Option<String>,
+        /// Ask for whatever was not passed as a flag, probing the camouflage site first.
+        #[arg(short = 'i', long)]
+        interactive: bool,
         /// Bind address (default: 0.0.0.0:<host's port>).
         #[arg(long)]
         listen: Option<String>,
@@ -87,23 +92,32 @@ pub enum Cmd {
         /// credential is not exposed in `ps` output. Used by the generated systemd unit.
         #[arg(long)]
         uri_file: Option<String>,
-        #[arg(long, default_value = "127.0.0.1:1080")]
-        socks: String,
+        /// Local SOCKS5 listen address [default: 127.0.0.1:1080].
+        #[arg(long)]
+        socks: Option<String>,
         /// Transport to use: auto (default: prefer QUIC, fall back to REALITY/TCP), quic, or tcp.
-        #[arg(long, default_value = "auto")]
-        transport: Transport,
+        #[arg(long)]
+        transport: Option<Transport>,
+        /// Ask for whatever was not passed as a flag, including which saved server to use.
+        #[arg(short = 'i', long)]
+        interactive: bool,
     },
     /// Connect a client: shorthand for `client` with friendly defaults (local SOCKS5 on
     /// 127.0.0.1:1080, transport auto). Just pass the leshiy:// URI your server printed.
+    ///
+    /// With `-i` the URI can be picked from the servers you provisioned instead of pasted.
     Connect {
         /// The leshiy:// share URI from your server.
-        uri: String,
-        /// Local SOCKS5 listen address.
-        #[arg(long, default_value = "127.0.0.1:1080")]
-        socks: String,
+        uri: Option<String>,
+        /// Local SOCKS5 listen address [default: 127.0.0.1:1080].
+        #[arg(long)]
+        socks: Option<String>,
         /// Transport: auto (default, prefer QUIC), quic, or tcp.
-        #[arg(long, default_value = "auto")]
-        transport: Transport,
+        #[arg(long)]
+        transport: Option<Transport>,
+        /// Ask for whatever was not passed as a flag, including which saved server to use.
+        #[arg(short = 'i', long)]
+        interactive: bool,
     },
     /// Run as a full-tunnel VPN via a TUN device (all traffic). Requires root / CAP_NET_ADMIN.
     #[command(after_help = SUDO_PATH_HELP)]
@@ -116,17 +130,17 @@ pub enum Cmd {
         #[arg(long)]
         uri_file: Option<String>,
         /// Transport: tcp (REALITY — required for UDP today, the default), quic, or auto.
-        #[arg(long, default_value = "tcp")]
-        transport: Transport,
-        /// TUN MTU (kept below the transport's to absorb TLS + mux framing).
-        #[arg(long, default_value_t = 1400)]
-        mtu: u16,
-        /// TUN interface name.
-        #[arg(long, default_value = "leshiy0")]
-        tun_name: String,
-        /// DNS resolver forced through the tunnel.
-        #[arg(long, default_value = "1.1.1.1")]
-        dns: String,
+        #[arg(long)]
+        transport: Option<Transport>,
+        /// TUN MTU (kept below the transport's to absorb TLS + mux framing) [default: 1400].
+        #[arg(long)]
+        mtu: Option<u16>,
+        /// TUN interface name [default: leshiy0].
+        #[arg(long)]
+        tun_name: Option<String>,
+        /// DNS resolver forced through the tunnel [default: 1.1.1.1].
+        #[arg(long)]
+        dns: Option<String>,
         /// Carry IPv6 through the tunnel (dual-stack). Off by default: only enable when the
         /// server has working outbound IPv6, else v6-preferred traffic blackholes.
         #[arg(long)]
@@ -138,44 +152,56 @@ pub enum Cmd {
         /// the full tunnel already carries it.
         #[arg(long)]
         socks: Option<String>,
+        /// Ask for whatever was not passed as a flag. Everything is resolved before the
+        /// sudo prompt, so the elevated process runs without re-asking.
+        #[arg(short = 'i', long)]
+        interactive: bool,
     },
     /// Run a full-tunnel VPN via the privileged `leshiy-helper` daemon (this process
     /// stays unprivileged). Requires `leshiy-helper` to be installed + running.
     Vpn {
         /// The leshiy:// server URI.
         #[arg(long)]
-        uri: String,
+        uri: Option<String>,
         /// Transport: tcp (REALITY — required for UDP today, the default), quic, or auto.
-        #[arg(long, default_value = "tcp")]
-        transport: Transport,
-        /// TUN MTU.
-        #[arg(long, default_value_t = 1400)]
-        mtu: u16,
-        /// TUN interface name.
-        #[arg(long, default_value = "leshiy0")]
-        tun_name: String,
-        /// DNS resolver forced through the tunnel.
-        #[arg(long, default_value = "1.1.1.1")]
-        dns: String,
-        /// Path to the helper's control socket.
-        #[arg(long, default_value = "/run/leshiy/helper.sock")]
-        socket: String,
+        #[arg(long)]
+        transport: Option<Transport>,
+        /// TUN MTU [default: 1400].
+        #[arg(long)]
+        mtu: Option<u16>,
+        /// TUN interface name [default: leshiy0].
+        #[arg(long)]
+        tun_name: Option<String>,
+        /// DNS resolver forced through the tunnel [default: 1.1.1.1].
+        #[arg(long)]
+        dns: Option<String>,
+        /// Path to the helper's control socket [default: /run/leshiy/helper.sock].
+        #[arg(long)]
+        socket: Option<String>,
         /// Carry IPv6 through the tunnel (dual-stack). Off by default: only enable when the
         /// server has working outbound IPv6, else v6-preferred traffic blackholes.
         #[arg(long)]
         ipv6: bool,
+        /// Ask for whatever was not passed as a flag.
+        #[arg(short = 'i', long)]
+        interactive: bool,
     },
-    /// Interactive (or flag-driven) single-server setup: probe dest, init, print URI + QR.
+    /// Interactive (`-i`) or flag-driven single-server setup: probe dest, init, print
+    /// URI + QR.
     Quickstart {
         /// Public host:port clients dial.
         #[arg(long)]
-        host: String,
+        host: Option<String>,
         /// Borrowed TLS site to camouflage as, host:port.
         #[arg(long)]
-        dest: String,
-        /// Output config path.
-        #[arg(long, default_value = "leshiy-server.toml")]
-        out: String,
+        dest: Option<String>,
+        /// Ask for whatever was not passed as a flag, detecting this host's public address
+        /// and probing the camouflage site.
+        #[arg(short = 'i', long, conflicts_with = "summary_json")]
+        interactive: bool,
+        /// Output config path [default: leshiy-server.toml].
+        #[arg(long)]
+        out: Option<String>,
         /// Bind address (default 0.0.0.0:<host port>).
         #[arg(long)]
         listen: Option<String>,
@@ -193,8 +219,8 @@ pub enum Cmd {
         #[arg(long)]
         summary_json: bool,
         /// Connector role: single (default), entry, or exit.
-        #[arg(long, default_value = "single")]
-        role: Role,
+        #[arg(long)]
+        role: Option<Role>,
         /// Exit node's `leshiy://` URI (the connector credential) — required for --role entry.
         #[arg(long)]
         exit_uri: Option<String>,
@@ -250,11 +276,21 @@ pub enum Cmd {
     Remote {
         #[command(subcommand)]
         cmd: RemoteCmd,
+        /// Fill in whatever was not passed as a flag by asking for it, and pick saved
+        /// servers from a list instead of typing their id.
+        ///
+        /// Flags always win: `remote provision -i --dest www.apple.com:443` asks for
+        /// everything except the dest. Needs a terminal — in a script, pass flags.
+        #[arg(short = 'i', long, global = true)]
+        interactive: bool,
     },
     /// Run the client in the background as a systemd service that survives logout.
     Service {
         #[command(subcommand)]
         cmd: ServiceCmd,
+        /// Ask for whatever was not passed as a flag, including which saved server to use.
+        #[arg(short = 'i', long, global = true)]
+        interactive: bool,
     },
     /// Container entrypoint: build config from LESHIY_* env vars on first boot, then run.
     Boot,
@@ -277,21 +313,22 @@ pub enum ServiceCmd {
         /// full tunnel needs UDP and ICMP, which only REALITY/TCP carries today.
         #[arg(long)]
         transport: Option<Transport>,
-        /// Local SOCKS5 listen address. With --tun this adds a proxy alongside the tunnel.
-        #[arg(long, default_value = "127.0.0.1:1080")]
-        socks: String,
+        /// Local SOCKS5 listen address, added alongside the tunnel with --tun
+        /// [default: 127.0.0.1:1080].
+        #[arg(long)]
+        socks: Option<String>,
         /// Run a full-device tunnel instead of only a local proxy. Needs root.
         #[arg(long)]
         tun: bool,
-        /// TUN interface name (--tun only).
-        #[arg(long, default_value = "leshiy0")]
-        tun_name: String,
-        /// DNS resolver forced through the tunnel (--tun only).
-        #[arg(long, default_value = "1.1.1.1")]
-        dns: String,
-        /// TUN MTU (--tun only).
-        #[arg(long, default_value_t = 1400)]
-        mtu: u16,
+        /// TUN interface name (--tun only) [default: leshiy0].
+        #[arg(long)]
+        tun_name: Option<String>,
+        /// DNS resolver forced through the tunnel (--tun only) [default: 1.1.1.1].
+        #[arg(long)]
+        dns: Option<String>,
+        /// TUN MTU (--tun only) [default: 1400].
+        #[arg(long)]
+        mtu: Option<u16>,
         /// Carry IPv6 through the tunnel (--tun only).
         #[arg(long)]
         ipv6: bool,
@@ -313,7 +350,7 @@ pub enum ServiceCmd {
 }
 
 /// Connector role for `quickstart`.
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Role {
     /// Standalone server (default): clients connect, server egresses directly.
     Single,
@@ -321,6 +358,16 @@ pub enum Role {
     Entry,
     /// Clean-egress exit (requires QUIC); its share URI is the connector credential.
     Exit,
+}
+
+impl Role {
+    pub fn as_flag(self) -> &'static str {
+        match self {
+            Self::Single => "single",
+            Self::Entry => "entry",
+            Self::Exit => "exit",
+        }
+    }
 }
 
 /// Transport selection for the client subcommand.
@@ -362,6 +409,23 @@ impl Transport {
 
 /// Default server config path (same default as `server --config`).
 pub const DEFAULT_CONFIG: &str = "leshiy-server.toml";
+
+/// Defaults for `remote provision`. These live here rather than in `default_value`
+/// attributes because the fields are `Option`: `-i` has to distinguish "the operator
+/// chose 443" from "nobody has said anything about the port yet", and a clap default
+/// makes those two cases indistinguishable.
+pub const DEFAULT_LISTEN_PORT: u16 = 443;
+pub const DEFAULT_USER_LABEL: &str = "self";
+pub const DEFAULT_CLIENT_LABEL: &str = "client";
+pub const DEFAULT_ROLE: &str = "single";
+pub const DEFAULT_IMAGE: &str = concat!("ghcr.io/bigunmd/leshiy:v", env!("CARGO_PKG_VERSION"));
+
+/// Client-side defaults, `Option` for the same reason as the provisioning ones above.
+pub const DEFAULT_SOCKS: &str = "127.0.0.1:1080";
+pub const DEFAULT_MTU: u16 = 1400;
+pub const DEFAULT_TUN_NAME: &str = "leshiy0";
+pub const DEFAULT_DNS: &str = "1.1.1.1";
+pub const DEFAULT_HELPER_SOCKET: &str = "/run/leshiy/helper.sock";
 
 #[derive(Subcommand)]
 pub enum UserCmd {
@@ -504,19 +568,21 @@ pub enum UserCmd {
 #[derive(clap::Subcommand)]
 pub enum RemoteCmd {
     /// Provision a fresh VPS into a leshiy server over SSH.
+    ///
+    /// Required without `-i`: --host and --dest. With `-i`, anything omitted is asked for.
     Provision {
         /// SSH target as user@host[:port].
         #[arg(long)]
-        host: String,
+        host: Option<String>,
         /// Path to a private key file (PEM). If omitted, you'll be prompted for a password.
         #[arg(long)]
         key: Option<String>,
         /// Read the SSH password from stdin (first line).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "interactive")]
         password_stdin: bool,
         /// Read the private key's passphrase from stdin instead of prompting. Only
         /// meaningful with --key; ignored for an unencrypted key.
-        #[arg(long, conflicts_with_all = ["password_stdin", "sudo_password_stdin"])]
+        #[arg(long, conflicts_with_all = ["password_stdin", "sudo_password_stdin", "interactive"])]
         key_passphrase_stdin: bool,
         /// Connect as a non-root user and run privileged commands via sudo.
         /// Prompts for the sudo password unless --sudo-password-stdin is set.
@@ -524,35 +590,35 @@ pub enum RemoteCmd {
         sudo: bool,
         /// Read the sudo password from stdin instead of prompting (implies --sudo).
         /// Cannot be combined with --password-stdin.
-        #[arg(long, conflicts_with = "password_stdin")]
+        #[arg(long, conflicts_with_all = ["password_stdin", "interactive"])]
         sudo_password_stdin: bool,
         /// Borrowed TLS site for REALITY, host:port.
         #[arg(long)]
-        dest: String,
+        dest: Option<String>,
         /// Override the container's DNS resolver (a bare IPv4/IPv6 literal). By
         /// default the host's IPv4 upstream is detected and a public IPv4 fallback
         /// is added; set this only for split-horizon/private-resolver hosts.
         #[arg(long)]
         dns: Option<String>,
-        /// REALITY/TCP external listen port (default 443).
-        #[arg(long, default_value_t = 443)]
-        port: u16,
+        /// REALITY/TCP external listen port [default: 443].
+        #[arg(long)]
+        port: Option<u16>,
         /// Enable QUIC on this UDP port.
         #[arg(long)]
         quic: Option<u16>,
         /// Container image reference. Defaults to the release matching this CLI
         /// (`ghcr.io/bigunmd/leshiy:v<CLI version>`), the tag CI publishes.
-        #[arg(long, default_value = concat!("ghcr.io/bigunmd/leshiy:v", env!("CARGO_PKG_VERSION")))]
-        image: String,
+        #[arg(long)]
+        image: Option<String>,
         /// Friendly server label.
         #[arg(long)]
         label: Option<String>,
-        /// Label for the first (self) client config.
-        #[arg(long, default_value = "self")]
-        user_label: String,
+        /// Label for the first (self) client config [default: self].
+        #[arg(long)]
+        user_label: Option<String>,
         /// Connector role: single (default), exit, middle, or entry.
-        #[arg(long, default_value = "single")]
-        role: String,
+        #[arg(long)]
+        role: Option<String>,
         /// For entry/middle: the saved downstream server (id or label) to forward to.
         #[arg(long)]
         downstream: Option<String>,
@@ -565,18 +631,18 @@ pub enum RemoteCmd {
         cmd: RemoteUserCmd,
     },
     /// Show whether a saved server is running.
-    Status { server: String },
+    Status { server: Option<String> },
     /// Upgrade a saved server: pull a new image and recreate its container.
     ///
     /// Re-running `provision` does NOT do this — it reuses an already-running container by
     /// design, so it silently changes nothing. Users, keys and client URIs survive (they live on
     /// the data volume); only `teardown --purge` removes those.
     Upgrade {
-        server: String,
+        server: Option<String>,
         /// Image reference to upgrade to. Defaults to the release matching this CLI
         /// (`ghcr.io/bigunmd/leshiy:v<CLI version>`), the tag CI publishes.
-        #[arg(long, default_value = concat!("ghcr.io/bigunmd/leshiy:v", env!("CARGO_PKG_VERSION")))]
-        image: String,
+        #[arg(long)]
+        image: Option<String>,
         /// Resolve the newest published release instead of the tag matching this CLI.
         /// Conflicts with an explicit --image.
         #[arg(long, conflicts_with = "image")]
@@ -584,17 +650,18 @@ pub enum RemoteCmd {
     },
     /// Export an encrypted backup of a saved server.
     Backup {
-        server: String,
+        server: Option<String>,
         #[arg(long)]
         connection_only: bool,
+        /// Destination path for the encrypted blob.
         #[arg(long)]
-        out: String,
+        out: Option<String>,
     },
     /// Import a server backup blob into the vault.
-    Restore { file: String },
+    Restore { file: Option<String> },
     /// Remove the server container; optionally purge its config.
     Teardown {
-        server: String,
+        server: Option<String>,
         #[arg(long)]
         purge: bool,
     },
@@ -604,14 +671,18 @@ pub enum RemoteCmd {
 pub enum RemoteUserCmd {
     /// Add a client and print its config (URI to stdout, QR to stderr).
     Add {
-        server: String,
-        #[arg(long, default_value = "client")]
-        label: String,
+        server: Option<String>,
+        /// Friendly name for the issued client [default: client].
+        #[arg(long)]
+        label: Option<String>,
     },
     /// List the users currently on the server (live).
-    Ls { server: String },
+    Ls { server: Option<String> },
     /// Delete a user on the server by short_id.
-    Rm { server: String, short_id: String },
+    Rm {
+        server: Option<String>,
+        short_id: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -640,7 +711,7 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn tun_parses_uri_and_defaults() {
+    fn tun_parses_uri_and_leaves_omitted_options_unset() {
         let cli = Cli::try_parse_from([
             "leshiy",
             "tun",
@@ -654,6 +725,7 @@ mod tests {
                 transport,
                 mtu,
                 tun_name,
+                dns,
                 ipv6,
                 ..
             } => {
@@ -661,14 +733,32 @@ mod tests {
                     uri.as_deref(),
                     Some("leshiy://abc@1.2.3.4:443?sni=x&sid=0102030400000000")
                 );
-                assert!(matches!(transport, Transport::Tcp));
-                assert_eq!(mtu, 1400);
-                assert_eq!(tun_name, "leshiy0");
+                // The values these carried as clap defaults now live in DEFAULT_* and are
+                // applied by `client_wizard::plan_from_flags`, so `-i` can tell an omitted
+                // option from a deliberate one. Unset must stay unset here.
+                assert_eq!(transport, None);
+                assert_eq!(mtu, None);
+                assert_eq!(tun_name, None);
+                assert_eq!(dns, None);
                 // Dual-stack is opt-in: absent `--ipv6` means IPv4-only.
                 assert!(!ipv6);
             }
             _ => panic!("expected Tun"),
         }
+    }
+
+    /// The defaults themselves did not change when they moved out of clap.
+    #[test]
+    fn the_documented_defaults_kept_their_values() {
+        assert_eq!(DEFAULT_SOCKS, "127.0.0.1:1080");
+        assert_eq!(DEFAULT_MTU, 1400);
+        assert_eq!(DEFAULT_TUN_NAME, "leshiy0");
+        assert_eq!(DEFAULT_DNS, "1.1.1.1");
+        assert_eq!(DEFAULT_HELPER_SOCKET, "/run/leshiy/helper.sock");
+        assert_eq!(DEFAULT_LISTEN_PORT, 443);
+        assert_eq!(DEFAULT_USER_LABEL, "self");
+        assert_eq!(DEFAULT_CLIENT_LABEL, "client");
+        assert_eq!(DEFAULT_ROLE, "single");
     }
 
     #[test]
@@ -688,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn vpn_parses_uri_and_defaults() {
+    fn vpn_parses_uri_and_leaves_omitted_options_unset() {
         let cli = Cli::try_parse_from([
             "leshiy",
             "vpn",
@@ -705,14 +795,46 @@ mod tests {
                 socket,
                 ..
             } => {
-                assert_eq!(uri, "leshiy://abc@1.2.3.4:443?sni=x&sid=0102030400000000");
-                assert!(matches!(transport, Transport::Tcp));
-                assert_eq!(mtu, 1400);
-                assert_eq!(tun_name, "leshiy0");
-                assert_eq!(socket, "/run/leshiy/helper.sock");
+                assert_eq!(
+                    uri.as_deref(),
+                    Some("leshiy://abc@1.2.3.4:443?sni=x&sid=0102030400000000")
+                );
+                assert_eq!(transport, None);
+                assert_eq!(mtu, None);
+                assert_eq!(tun_name, None);
+                assert_eq!(socket, None);
             }
             _ => panic!("expected Vpn"),
         }
+    }
+
+    /// `-i` is per-command on the client side rather than global, so each entry point has
+    /// to actually carry it.
+    #[test]
+    fn every_client_subcommand_accepts_the_interactive_flag() {
+        for argv in [
+            vec!["leshiy", "connect", "-i"],
+            vec!["leshiy", "client", "-i"],
+            vec!["leshiy", "tun", "-i"],
+            vec!["leshiy", "vpn", "-i"],
+            vec!["leshiy", "service", "-i", "start"],
+            vec!["leshiy", "service", "start", "-i"],
+            vec!["leshiy", "service", "logs", "-i"],
+        ] {
+            Cli::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("{argv:?} must parse with -i, got: {e}"));
+        }
+    }
+
+    /// `connect`'s URI is positional and was required; `-i` can supply it instead, but the
+    /// positional form must keep working untouched.
+    #[test]
+    fn connect_takes_an_optional_positional_uri() {
+        let cli = Cli::try_parse_from(["leshiy", "connect"]).expect("connect -i form");
+        let Cmd::Connect { uri, .. } = cli.cmd else {
+            panic!("expected Connect")
+        };
+        assert_eq!(uri, None);
     }
 
     /// `ensure_root` appends `--already-elevated` to whatever argv it re-runs, so every
@@ -753,6 +875,203 @@ mod tests {
         assert!(cli.already_elevated);
     }
 
+    fn remote_interactive(argv: &[&str]) -> bool {
+        match Cli::try_parse_from(argv)
+            .unwrap_or_else(|e| panic!("{argv:?} must parse, got: {e}"))
+            .cmd
+        {
+            Cmd::Remote { interactive, .. } => interactive,
+            _ => panic!("expected Remote for {argv:?}"),
+        }
+    }
+
+    /// `-i` is global on `remote`, so it must be accepted wherever a user naturally types
+    /// it — before the subcommand, after it, and alongside the flags it complements.
+    #[test]
+    fn remote_accepts_the_interactive_flag_on_either_side_of_the_subcommand() {
+        assert!(remote_interactive(&["leshiy", "remote", "-i", "provision"]));
+        assert!(remote_interactive(&["leshiy", "remote", "provision", "-i"]));
+        assert!(remote_interactive(&[
+            "leshiy",
+            "remote",
+            "provision",
+            "--interactive",
+            "--host",
+            "root@1.2.3.4"
+        ]));
+        assert!(remote_interactive(&[
+            "leshiy", "remote", "-i", "user", "add"
+        ]));
+        assert!(remote_interactive(&["leshiy", "remote", "teardown", "-i"]));
+        assert!(!remote_interactive(&["leshiy", "remote", "provision"]));
+    }
+
+    /// Each `--*-stdin` flag consumes the very stdin the wizard needs for its prompts, so
+    /// the combination has to fail at parse time rather than deadlock on a read.
+    #[test]
+    fn interactive_conflicts_with_every_stdin_secret_flag() {
+        for flag in [
+            "--password-stdin",
+            "--key-passphrase-stdin",
+            "--sudo-password-stdin",
+        ] {
+            let argv = ["leshiy", "remote", "provision", "-i", flag];
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "{flag} must conflict with --interactive"
+            );
+            // Without -i the same flag is still perfectly valid.
+            assert!(
+                Cli::try_parse_from(["leshiy", "remote", "provision", flag]).is_ok(),
+                "{flag} must still parse on its own"
+            );
+        }
+    }
+
+    /// `--host` / `--dest` moved from clap-required to code-required so `-i` can supply
+    /// them. Parsing must therefore succeed while leaving them `None`.
+    #[test]
+    fn provision_leaves_omitted_options_unset_rather_than_defaulted() {
+        let cli = Cli::try_parse_from(["leshiy", "remote", "provision", "-i"])
+            .expect("provision -i should parse with no other flags");
+        let Cmd::Remote {
+            cmd:
+                RemoteCmd::Provision {
+                    host,
+                    dest,
+                    port,
+                    image,
+                    user_label,
+                    role,
+                    ..
+                },
+            ..
+        } = cli.cmd
+        else {
+            panic!("expected Remote::Provision")
+        };
+        // All `None` — a clap `default_value` here would make "unset" indistinguishable
+        // from an explicit choice, and the wizard would stop asking about them.
+        assert_eq!(host, None);
+        assert_eq!(dest, None);
+        assert_eq!(port, None);
+        assert_eq!(image, None);
+        assert_eq!(user_label, None);
+        assert_eq!(role, None);
+    }
+
+    #[test]
+    fn provision_still_captures_every_option_when_passed_as_flags() {
+        let cli = Cli::try_parse_from([
+            "leshiy",
+            "remote",
+            "provision",
+            "--host",
+            "deploy@1.2.3.4:2222",
+            "--dest",
+            "www.apple.com:443",
+            "--port",
+            "8443",
+            "--quic",
+            "8444",
+            "--role",
+            "entry",
+            "--downstream",
+            "exit-1",
+            "--label",
+            "paris",
+            "--user-label",
+            "phone",
+            "--dns",
+            "1.1.1.1",
+            "--image",
+            "ghcr.io/x/y:v9",
+            "--key",
+            "/k.pem",
+            "--sudo",
+        ])
+        .expect("full flag form should parse");
+        let Cmd::Remote {
+            cmd:
+                RemoteCmd::Provision {
+                    host,
+                    dest,
+                    port,
+                    quic,
+                    role,
+                    downstream,
+                    label,
+                    user_label,
+                    dns,
+                    image,
+                    key,
+                    sudo,
+                    ..
+                },
+            ..
+        } = cli.cmd
+        else {
+            panic!("expected Remote::Provision")
+        };
+        assert_eq!(host.as_deref(), Some("deploy@1.2.3.4:2222"));
+        assert_eq!(dest.as_deref(), Some("www.apple.com:443"));
+        assert_eq!(port, Some(8443));
+        assert_eq!(quic, Some(8444));
+        assert_eq!(role.as_deref(), Some("entry"));
+        assert_eq!(downstream.as_deref(), Some("exit-1"));
+        assert_eq!(label.as_deref(), Some("paris"));
+        assert_eq!(user_label.as_deref(), Some("phone"));
+        assert_eq!(dns.as_deref(), Some("1.1.1.1"));
+        assert_eq!(image.as_deref(), Some("ghcr.io/x/y:v9"));
+        assert_eq!(key.as_deref(), Some("/k.pem"));
+        assert!(sudo);
+    }
+
+    /// Day-2 subcommands take their server positionally; `-i` picks it from the vault, so
+    /// the positional had to become optional without becoming meaningless.
+    #[test]
+    fn day_two_subcommands_take_an_optional_server_positional() {
+        for argv in [
+            vec!["leshiy", "remote", "status"],
+            vec!["leshiy", "remote", "upgrade"],
+            vec!["leshiy", "remote", "teardown"],
+            vec!["leshiy", "remote", "backup"],
+            vec!["leshiy", "remote", "restore"],
+            vec!["leshiy", "remote", "user", "ls"],
+            vec!["leshiy", "remote", "user", "rm"],
+        ] {
+            Cli::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("{argv:?} must parse without a server, got: {e}"));
+        }
+        // And the named form still works.
+        let cli = Cli::try_parse_from(["leshiy", "remote", "status", "paris"]).unwrap();
+        let Cmd::Remote {
+            cmd: RemoteCmd::Status { server },
+            ..
+        } = cli.cmd
+        else {
+            panic!("expected Remote::Status")
+        };
+        assert_eq!(server.as_deref(), Some("paris"));
+    }
+
+    /// `--image` lost its `default_value`, which is what `--latest` was declared to
+    /// conflict with; the conflict must survive that change.
+    #[test]
+    fn upgrade_latest_still_conflicts_with_an_explicit_image() {
+        assert!(
+            Cli::try_parse_from([
+                "leshiy", "remote", "upgrade", "srv", "--latest", "--image", "x:1"
+            ])
+            .is_err(),
+            "--latest and --image must conflict"
+        );
+        assert!(Cli::try_parse_from(["leshiy", "remote", "upgrade", "srv", "--latest"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["leshiy", "remote", "upgrade", "srv", "--image", "x:1"]).is_ok()
+        );
+    }
+
     #[test]
     fn connect_takes_positional_uri_with_defaults() {
         let cli =
@@ -763,10 +1082,15 @@ mod tests {
                 uri,
                 socks,
                 transport,
+                interactive,
             } => {
-                assert_eq!(uri, "leshiy://abc@1.2.3.4:443?sni=x&sid=00");
-                assert_eq!(socks, "127.0.0.1:1080");
-                assert!(matches!(transport, Transport::Auto));
+                assert_eq!(
+                    uri.as_deref(),
+                    Some("leshiy://abc@1.2.3.4:443?sni=x&sid=00")
+                );
+                assert_eq!(socks, None);
+                assert_eq!(transport, None);
+                assert!(!interactive);
             }
             _ => panic!("expected Connect"),
         }

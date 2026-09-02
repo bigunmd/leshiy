@@ -32,6 +32,111 @@ pub fn prompt_passphrase(confirm: bool) -> Result<zeroize::Zeroizing<String>> {
     prompt_passphrase_with("Vault passphrase: ", confirm)
 }
 
+/// Read a secret from the terminal. Interchangeable with [`crate::wizard::secret`], so a
+/// flow can prompt in whichever style `-i` selected without branching at every call site.
+fn tty_secret(prompt: &str) -> Result<Zeroizing<String>> {
+    Ok(Zeroizing::new(
+        rpassword::prompt_password(format!("{prompt}: ")).context("read secret")?,
+    ))
+}
+
+type SecretPrompt = fn(&str) -> Result<Zeroizing<String>>;
+
+fn secret_prompt(interactive: bool) -> SecretPrompt {
+    if interactive {
+        crate::wizard::secret
+    } else {
+        tty_secret
+    }
+}
+
+/// Slurp stdin for a `--*-stdin` flag. Callers apply their own trimming, which differs
+/// per flag: `--password-stdin` strips all trailing whitespace, the others only the line
+/// ending, and a password may legitimately end in a space.
+fn read_stdin_secret() -> Result<Zeroizing<String>> {
+    let mut line = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut line)?;
+    Ok(Zeroizing::new(line))
+}
+
+/// Unlock the vault, prompting in the style `-i` implies.
+///
+/// `confirm` applies to the non-interactive path only. Interactively we know whether the
+/// file exists, so a passphrase is confirmed exactly when one is being *set* — asking a
+/// returning operator to type an existing passphrase twice teaches nothing.
+fn open_vault(interactive: bool, confirm: bool) -> Result<(Zeroizing<String>, Vault)> {
+    let path = vault_path();
+    let pass = if interactive {
+        if path.exists() {
+            crate::wizard::secret("Vault passphrase")?
+        } else {
+            crate::ui::hint(&format!(
+                "creating a new encrypted vault at {}",
+                path.display()
+            ));
+            crate::wizard::secret_confirmed("New vault passphrase")?
+        }
+    } else {
+        prompt_passphrase(confirm)?
+    };
+    let vault = Vault::load(&path, &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok((pass, vault))
+}
+
+/// The argument a subcommand cannot run without when `-i` is not there to ask for it.
+///
+/// These were clap-required until `-i` made them `Option`. Checking them up front keeps
+/// the old behaviour of failing *before* the vault passphrase prompt: a typo in the argv
+/// should not cost the operator a passphrase they then watch get thrown away.
+pub fn missing_required_arg(cmd: &crate::cli::RemoteCmd) -> Option<&'static str> {
+    use crate::cli::{RemoteCmd as R, RemoteUserCmd as U};
+    let server = Some("a server");
+    match cmd {
+        R::Provision { host: None, .. } => Some("--host"),
+        R::Provision { dest: None, .. } => Some("--dest"),
+        R::Status { server: None }
+        | R::Upgrade { server: None, .. }
+        | R::Teardown { server: None, .. }
+        | R::Backup { server: None, .. } => server,
+        R::Backup { out: None, .. } => Some("--out"),
+        R::Restore { file: None } => Some("a backup file"),
+        R::User {
+            cmd: U::Add { server: None, .. } | U::Ls { server: None } | U::Rm { server: None, .. },
+        } => server,
+        R::User {
+            cmd: U::Rm { short_id: None, .. },
+        } => Some("a user short_id"),
+        _ => None,
+    }
+}
+
+/// Resolve the server a day-2 subcommand acts on: the named one, a menu choice under
+/// `-i`, or an error that names the escape hatch.
+fn pick_server(
+    vault: &Vault,
+    given: Option<String>,
+    interactive: bool,
+    prompt: &str,
+) -> Result<String> {
+    if given.is_none() {
+        anyhow::ensure!(
+            interactive,
+            "a server is required (or pass -i to pick one from your vault)"
+        );
+    }
+    crate::remote_wizard::pick_server(vault, given, prompt)
+}
+
+/// Show the flag-only invocation for what the operator just picked from a menu.
+fn echo_equivalent(interactive: bool, cmd: &crate::wizard::CommandLine) {
+    if interactive {
+        crate::ui::eline(&crate::ui::label(&format!(
+            "  next time: {}",
+            cmd.render(78)
+        )));
+    }
+}
+
 pub fn parse_ssh_host(spec: &str) -> Result<(String, String, u16)> {
     let (user, rest) = spec
         .split_once('@')
@@ -143,12 +248,16 @@ pub fn parse_role(s: &str) -> Result<ProvisionRole> {
     }
 }
 
-pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
+pub async fn run(cmd: crate::cli::RemoteCmd, interactive: bool) -> Result<()> {
     use crate::cli::RemoteCmd;
+    if interactive {
+        crate::wizard::require_tty()?;
+    } else if let Some(what) = missing_required_arg(&cmd) {
+        anyhow::bail!("{what} is required — pass it, or add -i to be asked for it");
+    }
     match cmd {
         RemoteCmd::Ls => {
-            let pass = prompt_passphrase(false)?;
-            let vault = Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let (_pass, vault) = open_vault(interactive, false)?;
             for r in vault.list() {
                 println!("{}", r.id);
                 crate::ui::eline(&crate::ui::field("label", &crate::ui::value(&r.label)));
@@ -181,8 +290,40 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
             role,
             downstream,
         } => {
-            let (user, h, port) = parse_ssh_host(&host)?;
-            let secret = if let Some(keypath) = key {
+            let flags = crate::remote_wizard::ProvisionFlags {
+                host,
+                key,
+                sudo: sudo || sudo_password_stdin,
+                dest,
+                dns,
+                port: cli_port,
+                quic,
+                image,
+                label,
+                user_label,
+                role,
+                downstream,
+            };
+
+            // Interactively the vault comes first: the downstream picker reads it, the
+            // overwrite check reads it, and a mistyped passphrase should cost nothing but
+            // retyping it. Non-interactively the flags are validated first instead, so a
+            // bad argv never charges the operator a passphrase before rejecting it.
+            let (plan, pass, mut vault) = if interactive {
+                let (pass, vault) = open_vault(true, true)?;
+                let plan = crate::remote_wizard::plan_interactively(flags, &vault).await?;
+                (plan, pass, vault)
+            } else {
+                let plan = crate::remote_wizard::plan_from_flags(flags)?;
+                let (pass, vault) = open_vault(false, true)?;
+                (plan, pass, vault)
+            };
+
+            let (user, h, port) = parse_ssh_host(&plan.host)?;
+            let listen_port = resolve_listen_port(plan.port)?;
+            let id = format!("{h}-{port}");
+            let ask = secret_prompt(interactive);
+            let secret = if let Some(keypath) = plan.key.clone() {
                 let pem = Zeroizing::new(
                     std::fs::read_to_string(&keypath)
                         .with_context(|| format!("read key {keypath}"))?,
@@ -191,49 +332,42 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                 // (or read stdin) only when the key actually needs one.
                 let passphrase = if leshiy_provision::ssh::key_needs_passphrase(&pem) {
                     Some(if key_passphrase_stdin {
-                        let mut line = String::new();
-                        std::io::Read::read_to_string(&mut std::io::stdin(), &mut line)?;
-                        Zeroizing::new(line.trim_end_matches(['\n', '\r']).to_string())
+                        Zeroizing::new(
+                            read_stdin_secret()?
+                                .trim_end_matches(['\n', '\r'])
+                                .to_string(),
+                        )
                     } else {
-                        Zeroizing::new(rpassword::prompt_password("SSH key passphrase: ")?)
+                        ask("SSH key passphrase")?
                     })
                 } else {
                     None
                 };
                 SshSecret::PrivateKey { pem, passphrase }
             } else if password_stdin {
-                let mut line = String::new();
-                std::io::Read::read_to_string(&mut std::io::stdin(), &mut line)?;
-                let line = Zeroizing::new(line);
-                SshSecret::Password(Zeroizing::new(line.trim_end().to_string()))
+                SshSecret::Password(Zeroizing::new(read_stdin_secret()?.trim_end().to_string()))
             } else {
-                SshSecret::Password(Zeroizing::new(rpassword::prompt_password(
-                    "SSH password: ",
-                )?))
+                SshSecret::Password(ask("SSH password")?)
             };
 
             // --sudo-password-stdin implies --sudo. Gather the sudo password now
             // (stdin read, if any, happens before other prompts).
-            let use_sudo = sudo || sudo_password_stdin;
+            let use_sudo = plan.sudo;
             let sudo_password: Option<Zeroizing<String>> = if use_sudo {
                 if sudo_password_stdin {
-                    let mut line = String::new();
-                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut line)?;
                     Some(Zeroizing::new(
-                        line.trim_end_matches(['\n', '\r']).to_string(),
+                        read_stdin_secret()?
+                            .trim_end_matches(['\n', '\r'])
+                            .to_string(),
                     ))
                 } else {
-                    Some(Zeroizing::new(rpassword::prompt_password(
-                        "sudo password: ",
-                    )?))
+                    Some(ask("sudo password")?)
                 }
             } else {
                 None
             };
 
-            let listen_port = resolve_listen_port(cli_port)?;
-            let id = format!("{h}-{port}");
-            let label = label.unwrap_or_else(|| h.clone());
+            let label = plan.label.clone().unwrap_or_else(|| h.clone());
             // Bracket a bare IPv6 host so LESHIY_HOST is a valid `[v6]:port`.
             let public_host = leshiy_reality::addr::join_host_port(&h, listen_port);
             let now = std::time::SystemTime::now()
@@ -242,24 +376,20 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                 .unwrap_or(0);
 
             // Parse and validate the role string.
-            let role = parse_role(&role)?;
-
-            // Hoist passphrase prompt + vault load here — single prompt for both downstream
-            // lookup (entry/middle) and the final persist after provisioning.
-            let pass = prompt_passphrase(true)?;
-            let mut vault =
-                Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let role = parse_role(&plan.role)?;
 
             // exit/middle expose a QUIC carrier; default it to the listen port if unset.
             let quic = match role {
-                ProvisionRole::Exit | ProvisionRole::Middle => Some(quic.unwrap_or(listen_port)),
-                _ => quic,
+                ProvisionRole::Exit | ProvisionRole::Middle => {
+                    Some(plan.quic.unwrap_or(listen_port))
+                }
+                _ => plan.quic,
             };
 
             // entry/middle must select a downstream with a connector credential.
             let (connector, downstream_id) = match role {
                 ProvisionRole::Entry | ProvisionRole::Middle => {
-                    let ds = downstream.ok_or_else(|| {
+                    let ds = plan.downstream.clone().ok_or_else(|| {
                         anyhow::anyhow!("--role {} requires --downstream <server>", role.as_str())
                     })?;
                     let rec = vault
@@ -286,18 +416,18 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                 },
                 secret,
                 public_host,
-                dest_sni: dest,
-                image_ref: image,
+                dest_sni: plan.dest.clone(),
+                image_ref: plan.image.clone(),
                 container: "leshiy".into(),
                 quic_port: quic,
                 listen_port,
-                user_label,
+                user_label: plan.user_label.clone(),
                 now,
                 role,
                 connector,
                 downstream: downstream_id,
                 sudo: use_sudo,
-                dns_override: dns,
+                dns_override: plan.dns.clone(),
             };
 
             let mut transport = RusshTransport::new();
@@ -335,11 +465,19 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
         }
         RemoteCmd::User { cmd } => {
             use crate::cli::RemoteUserCmd;
-            let pass = prompt_passphrase(false)?;
-            let mut vault =
-                Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let (pass, mut vault) = open_vault(interactive, false)?;
             match cmd {
                 RemoteUserCmd::Add { server, label } => {
+                    let server =
+                        pick_server(&vault, server, interactive, "Server to add a client to")?;
+                    let label = match label {
+                        Some(l) => l,
+                        None if interactive => crate::wizard::text(
+                            "Label for the new client",
+                            Some(crate::cli::DEFAULT_CLIENT_LABEL),
+                        )?,
+                        None => crate::cli::DEFAULT_CLIENT_LABEL.to_string(),
+                    };
                     let mut rec = vault
                         .get(&server)
                         .cloned()
@@ -353,9 +491,14 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                         .save(&vault_path(), &pass)
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
                     render_client(&cc.uri);
+                    let mut c = crate::wizard::CommandLine::new("leshiy remote user add");
+                    c.arg(&server).opt("--label", Some(&label));
+                    echo_equivalent(interactive, &c);
                     Ok(())
                 }
                 RemoteUserCmd::Ls { server } => {
+                    let server =
+                        pick_server(&vault, server, interactive, "Server to list users on")?;
                     let rec = vault
                         .get(&server)
                         .cloned()
@@ -380,24 +523,55 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                     Ok(())
                 }
                 RemoteUserCmd::Rm { server, short_id } => {
+                    let server =
+                        pick_server(&vault, server, interactive, "Server to remove a user from")?;
                     let mut rec = vault
                         .get(&server)
                         .cloned()
                         .ok_or_else(|| anyhow::anyhow!("no server {server}"))?;
                     let mut transport = connect_pinned(&rec).await?;
+                    // Listing first lets `-i` offer the live users by label; without it the
+                    // operator would have to know a 16-hex id by heart.
+                    let short_id = match short_id {
+                        Some(s) => s,
+                        None => {
+                            anyhow::ensure!(
+                                interactive,
+                                "a user short_id is required (or pass -i to pick one)"
+                            );
+                            let users = leshiy_provision::engine::list_users(&mut transport, &rec)
+                                .await
+                                .context("list users on server")?;
+                            crate::remote_wizard::pick_user(
+                                &annotate_users(&users, &rec.clients),
+                                None,
+                            )?
+                        }
+                    };
+                    anyhow::ensure!(
+                        !interactive
+                            || crate::wizard::confirm(
+                                &format!("Delete user {short_id} on {server}?"),
+                                false
+                            )?,
+                        "cancelled"
+                    );
                     leshiy_provision::engine::delete_user(&mut transport, &mut rec, &short_id)
                         .await
                         .context("delete user on server")?;
                     vault.upsert(rec);
                     vault.save(&vault_path(), &pass).context("save vault")?;
                     crate::ui::ok(&format!("deleted user {short_id} on {server}"));
+                    let mut c = crate::wizard::CommandLine::new("leshiy remote user rm");
+                    c.arg(&server).arg(&short_id);
+                    echo_equivalent(interactive, &c);
                     Ok(())
                 }
             }
         }
         RemoteCmd::Status { server } => {
-            let pass = prompt_passphrase(false)?;
-            let vault = Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let (_pass, vault) = open_vault(interactive, false)?;
+            let server = pick_server(&vault, server, interactive, "Server to show status for")?;
             let rec = vault
                 .get(&server)
                 .ok_or_else(|| anyhow::anyhow!("no server {server}"))?;
@@ -406,6 +580,9 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             crate::ui::eline(&crate::ui::field("running", &up.to_string()));
+            let mut c = crate::wizard::CommandLine::new("leshiy remote status");
+            c.arg(&server);
+            echo_equivalent(interactive, &c);
             Ok(())
         }
         RemoteCmd::Upgrade {
@@ -420,11 +597,10 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                 let tag = crate::lifecycle::latest_version(repo)?;
                 format!("ghcr.io/{repo}:{tag}")
             } else {
-                image
+                image.unwrap_or_else(|| crate::cli::DEFAULT_IMAGE.to_string())
             };
-            let pass = prompt_passphrase(false)?;
-            let mut vault =
-                Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let (pass, mut vault) = open_vault(interactive, false)?;
+            let server = pick_server(&vault, server, interactive, "Server to upgrade")?;
             let mut rec = vault
                 .get(&server)
                 .cloned()
@@ -453,27 +629,58 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
             connection_only,
             out,
         } => {
-            let pass = prompt_passphrase(false)?;
-            let vault = Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let share = prompt_passphrase_with("Backup share passphrase: ", true)?;
+            let (_pass, vault) = open_vault(interactive, false)?;
+            let server = pick_server(&vault, server, interactive, "Server to back up")?;
+            // `--connection-only` is a bare flag, so an unset one is indistinguishable from
+            // an explicit `false`; only offer the choice when it was not already asserted.
+            let connection_only = connection_only
+                || (interactive
+                    && crate::wizard::confirm(
+                        "Strip SSH credentials, so the file is safe to share?",
+                        false,
+                    )?);
+            let out = match out {
+                Some(o) => o,
+                None if interactive => {
+                    crate::wizard::text("Write the backup to", Some(&format!("{server}.lvault")))?
+                }
+                None => anyhow::bail!("--out is required (or pass -i to be asked for it)"),
+            };
+            let share = if interactive {
+                crate::wizard::secret_confirmed("Passphrase to encrypt the backup with")?
+            } else {
+                prompt_passphrase_with("Backup share passphrase: ", true)?
+            };
             let blob = vault
                 .export_one(&server, connection_only, &share)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             std::fs::write(&out, &blob).with_context(|| format!("write {out}"))?;
             crate::ui::ok(&format!("backup written to {out}"));
+            let mut c = crate::wizard::CommandLine::new("leshiy remote backup");
+            c.arg(&server)
+                .flag("--connection-only", connection_only)
+                .opt("--out", Some(&out));
+            echo_equivalent(interactive, &c);
             Ok(())
         }
         RemoteCmd::Restore { file } => {
+            let file = match file {
+                Some(f) => f,
+                None if interactive => crate::wizard::text("Backup file to restore", None)?,
+                None => anyhow::bail!("a backup file is required (or pass -i to be asked for it)"),
+            };
             let blob = std::fs::read(&file).with_context(|| format!("read {file}"))?;
-            let share = zeroize::Zeroizing::new(
-                rpassword::prompt_password("Backup passphrase: ")
-                    .context("read backup passphrase")?,
-            );
+            let share = if interactive {
+                crate::wizard::secret("Passphrase the backup was encrypted with")?
+            } else {
+                zeroize::Zeroizing::new(
+                    rpassword::prompt_password("Backup passphrase: ")
+                        .context("read backup passphrase")?,
+                )
+            };
             let recs =
                 leshiy_provision::vault::open(&blob, &share).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let pass = prompt_passphrase(false)?;
-            let mut vault =
-                Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let (pass, mut vault) = open_vault(interactive, false)?;
             for r in recs {
                 crate::ui::ok(&format!("restored {}", r.id));
                 vault.upsert(r);
@@ -481,16 +688,41 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
             vault
                 .save(&vault_path(), &pass)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut c = crate::wizard::CommandLine::new("leshiy remote restore");
+            c.arg(&file);
+            echo_equivalent(interactive, &c);
             Ok(())
         }
         RemoteCmd::Teardown { server, purge } => {
-            let pass = prompt_passphrase(false)?;
-            let mut vault =
-                Vault::load(&vault_path(), &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let (pass, mut vault) = open_vault(interactive, false)?;
+            let server = pick_server(&vault, server, interactive, "Server to tear down")?;
             let rec = vault
                 .get(&server)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("no server {server}"))?;
+            // Same flag-vs-unset problem as `--connection-only`: only offer to escalate to
+            // a purge when the operator has not already asked for one.
+            let purge = purge
+                || (interactive
+                    && crate::wizard::confirm(
+                        "Also delete its keys and users? This cannot be undone",
+                        false,
+                    )?);
+            if interactive {
+                crate::ui::warn(&format!(
+                    "this removes the leshiy container from {}{}",
+                    rec.public_host,
+                    if purge {
+                        " and destroys its identity, users and client URIs"
+                    } else {
+                        ""
+                    }
+                ));
+                anyhow::ensure!(
+                    crate::wizard::confirm(&format!("Tear down {server}?"), false)?,
+                    "cancelled"
+                );
+            }
             let mut transport = connect_pinned(&rec).await?;
             engine::teardown(&mut transport, &rec, purge)
                 .await
@@ -500,6 +732,9 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
                 .save(&vault_path(), &pass)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             crate::ui::ok(&format!("server {server} torn down"));
+            let mut c = crate::wizard::CommandLine::new("leshiy remote teardown");
+            c.arg(&server).flag("--purge", purge);
+            echo_equivalent(interactive, &c);
             Ok(())
         }
     }
@@ -508,6 +743,100 @@ pub async fn run(cmd: crate::cli::RemoteCmd) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Without `-i`, a missing argument must be caught before the vault passphrase prompt.
+    /// These were clap-required before `-i` relaxed them, and regressing this means the
+    /// operator types a passphrase only to be told their argv was wrong.
+    #[test]
+    fn missing_required_args_are_detected_for_every_subcommand() {
+        use crate::cli::{Cli, Cmd};
+        use clap::Parser;
+
+        let missing_for = |argv: &[&str]| -> Option<&'static str> {
+            match Cli::try_parse_from(argv)
+                .unwrap_or_else(|e| panic!("{argv:?} must parse, got: {e}"))
+                .cmd
+            {
+                Cmd::Remote { cmd, .. } => missing_required_arg(&cmd),
+                _ => panic!("expected Remote"),
+            }
+        };
+
+        assert_eq!(
+            missing_for(&["leshiy", "remote", "provision"]),
+            Some("--host")
+        );
+        assert_eq!(
+            missing_for(&["leshiy", "remote", "provision", "--host", "root@h"]),
+            Some("--dest")
+        );
+        for sub in ["status", "upgrade", "teardown"] {
+            assert_eq!(missing_for(&["leshiy", "remote", sub]), Some("a server"));
+        }
+        assert_eq!(
+            missing_for(&["leshiy", "remote", "backup"]),
+            Some("a server")
+        );
+        assert_eq!(
+            missing_for(&["leshiy", "remote", "backup", "srv"]),
+            Some("--out")
+        );
+        assert_eq!(
+            missing_for(&["leshiy", "remote", "restore"]),
+            Some("a backup file")
+        );
+        for sub in ["add", "ls", "rm"] {
+            assert_eq!(
+                missing_for(&["leshiy", "remote", "user", sub]),
+                Some("a server")
+            );
+        }
+        assert_eq!(
+            missing_for(&["leshiy", "remote", "user", "rm", "srv"]),
+            Some("a user short_id")
+        );
+    }
+
+    /// The mirror image: a fully specified argv must not be flagged, or the flag-driven
+    /// path would refuse to run at all.
+    #[test]
+    fn fully_specified_invocations_are_never_flagged_as_missing() {
+        use crate::cli::{Cli, Cmd};
+        use clap::Parser;
+
+        for argv in [
+            vec!["leshiy", "remote", "ls"],
+            vec![
+                "leshiy",
+                "remote",
+                "provision",
+                "--host",
+                "root@h",
+                "--dest",
+                "d:443",
+            ],
+            vec!["leshiy", "remote", "status", "srv"],
+            vec!["leshiy", "remote", "upgrade", "srv"],
+            vec!["leshiy", "remote", "teardown", "srv"],
+            vec!["leshiy", "remote", "backup", "srv", "--out", "b.lvault"],
+            vec!["leshiy", "remote", "restore", "b.lvault"],
+            vec!["leshiy", "remote", "user", "add", "srv"],
+            vec!["leshiy", "remote", "user", "ls", "srv"],
+            vec!["leshiy", "remote", "user", "rm", "srv", "abcd"],
+        ] {
+            let Cmd::Remote { cmd, .. } = Cli::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("{argv:?} must parse, got: {e}"))
+                .cmd
+            else {
+                panic!("expected Remote")
+            };
+            assert_eq!(
+                missing_required_arg(&cmd),
+                None,
+                "{argv:?} is complete but was flagged as missing an argument"
+            );
+        }
+    }
 
     #[test]
     fn resolve_listen_port_rejects_zero() {

@@ -53,7 +53,7 @@ impl Scope {
     }
 }
 
-fn config_home() -> Result<PathBuf> {
+pub(crate) fn config_home() -> Result<PathBuf> {
     if let Some(x) = std::env::var_os("XDG_CONFIG_HOME") {
         return Ok(PathBuf::from(x));
     }
@@ -65,7 +65,7 @@ fn config_home() -> Result<PathBuf> {
 ///
 /// `create_new` + `mode(0o600)` means the file is 0600 from the first byte; a
 /// write-then-chmod would leave a window in which any local user could read the URI.
-fn write_credential(path: &Path, uri: &str) -> Result<()> {
+pub(crate) fn write_credential(path: &Path, uri: &str) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -112,7 +112,9 @@ pub fn resolve_uri(uri: Option<&str>, uri_file: Option<&str>) -> Result<String> 
     match (uri, uri_file) {
         (Some(u), None) => Ok(u.to_string()),
         (None, Some(f)) => read_credential(Path::new(f)),
-        (None, None) => anyhow::bail!("provide --uri or --uri-file"),
+        (None, None) => {
+            anyhow::bail!("provide --uri or --uri-file (or pass -i to pick a server from a list)")
+        }
         (Some(_), Some(_)) => anyhow::bail!("--uri and --uri-file are mutually exclusive"),
     }
 }
@@ -121,8 +123,14 @@ pub fn resolve_uri(uri: Option<&str>, uri_file: Option<&str>) -> Result<String> 
 ///
 /// WSL2 is the common case: systemd is opt-in there, and without it `systemctl` fails with
 /// "System has not been booted with systemd", which does not tell a user what to do.
+/// Whether systemd is the running init. Necessary but not sufficient for `service start`,
+/// which also needs a session bus — use it to offer the mode, not to skip [`preflight`].
+pub(crate) fn systemd_available() -> bool {
+    Path::new("/run/systemd/system").exists()
+}
+
 fn preflight(scope: Scope) -> Result<()> {
-    let booted = Path::new("/run/systemd/system").exists();
+    let booted = systemd_available();
     if !booted {
         let wsl = std::fs::read_to_string("/proc/version")
             .is_ok_and(|v| v.to_lowercase().contains("microsoft"));
