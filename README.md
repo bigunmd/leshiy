@@ -1,26 +1,19 @@
 # LESHIY
 
-**Secure, fast, and highly stealthy tunnel for censored networks.**
+**A tunnel that looks like ordinary HTTPS.**
 
-A greenfield, self-hostable censorship-circumvention tunnel written in pure Rust,
-designed to resist modern Deep Packet Inspection (DPI) — with Russia / TSPU as the
-primary target threat model. You run your own server(s); clients connect with a
-single `leshiy://` URI.
+Self-hosted censorship circumvention in pure Rust, built to resist modern Deep Packet
+Inspection — with Russia / TSPU as the primary threat model. You run the server; clients
+connect with a single `leshiy://` link.
 
-> **Maturity: beta, and hardening well.** The protocol is stable and the **Linux,
-> Windows, and Android** clients work reliably in day-to-day use. The five core
-> protocol/crypto/transport crates (~16k LOC) went through a full line-by-line
-> adversarial review in July 2026: every **Critical, High, and Medium** finding is
-> fixed, most with regression tests. The suite is ~590 tests, and CI gates every push
-> on `cargo fmt`, `clippy -D warnings`, the full test suite, and a RustSec advisory
-> check.
+> **Beta.** The protocol is stable and the Linux, Windows and Android clients are used
+> daily. The core crates (~16k LOC) had a full line-by-line adversarial review in July
+> 2026 — every Critical, High and Medium finding is fixed, most with regression tests.
+> 716 tests, and CI gates every push.
 >
-> That said, Leshiy has **not had an independent security audit**, and has not been
-> systematically field-tested against a live censor. Internal review is not the same
-> thing as either. For genuinely high-stakes situations — where being identified as a
-> circumvention user carries real consequences — prefer tools that have been audited
-> and battle-proven. The design follows published, peer-reviewed anti-censorship
-> research.
+> **But there has been no independent security audit**, and no systematic field testing
+> against a live censor. If being identified as a circumvention user carries real
+> consequences for you, prefer a tool that has been audited and battle-proven.
 
 ---
 
@@ -28,26 +21,23 @@ single `leshiy://` URI.
 
 - [What it does](#what-it-does)
 - [Features](#features)
+- [Quick start](#quick-start)
+  - [1. Install](#1-install)
+  - [2. Get a server](#2-get-a-server)
+  - [3. Connect](#3-connect)
+  - [4. Manage users](#4-manage-users)
+- [Interactive mode](#interactive-mode)
+- [Going further](#going-further)
 - [Desktop and mobile apps](#desktop-and-mobile-apps)
-- [Android app](#android-app)
 - [How it compares](#how-it-compares)
-- [Quick start (self-host a server)](#quick-start)
-  - [One-command install](#0-one-command-install-recommended)
-  - [Run a server](#1-run-a-server)
-  - [Connect a client (CLI)](#2-connect-a-client)
-  - [Manage users](#3-manage-users-optional)
-  - [Enable QUIC](#4-enable-the-quic-transport-optional)
-  - [Entry → Exit connector](#5-set-up-an-entry--exit-connector-optional-advanced)
-  - [Provision a server from the client](#6-provision-a-server-from-the-client)
 - [License](#license)
 
 ---
 
 ## What it does
 
-Leshiy gives the client a local **SOCKS5 proxy** (or, in the apps, a **full-device
-VPN**). Traffic sent through it is wrapped so that, to a censor on the wire, it looks
-like an ordinary visit to a real website — not a VPN.
+Leshiy gives you a local **SOCKS5 proxy** or a **full-device VPN**. To a censor watching
+the wire, your traffic looks like an ordinary visit to a real website.
 
 ```
                   censored network            │   open internet
@@ -60,135 +50,189 @@ like an ordinary visit to a real website — not a VPN.
 
 ## Features
 
-- **Two cloaked transports, picked automatically.**
-  - **REALITY (TCP/443):** borrows a real site's TLS identity (SNI-borrowing). To a
-    prober, an unauthenticated connection is transparently relayed to that real site —
-    with **per-SNI origins** when you advertise several names, so each borrowed cert
-    matches its name.
-  - **QUIC / HTTP-3:** a real HTTP/3 server; authenticated clients tunnel via HTTP/3
-    `CONNECT`, while probers get a normal web response — a static page or, for a more
-    convincing cover, a **reverse proxy to a real backend** you run. Cert-pinned.
-  - **`--transport auto`** uses QUIC where UDP is open and **falls back to REALITY/TCP
-    when UDP is blocked** — automatically.
-- **Carries UDP, not just TCP.** DNS, QUIC, WebRTC, games and other UDP apps ride the
-  tunnel: the full-device VPN tunnels UDP over **either** transport (REALITY mux
-  datagrams or QUIC `CONNECT-UDP`, RFC 9298), and the local proxy speaks **SOCKS5 UDP
-  ASSOCIATE**.
-- **Full dual-stack (IPv6).** IPv6 is carried through the tunnel alongside IPv4, with a
-  fail-closed kill-switch so it can never leak around a v6-unaware path; split-tunnel
-  include/exclude rules apply to IPv6 domains and CIDRs too.
+- **Two cloaked transports, picked automatically.** **REALITY** borrows a real site's TLS
+  identity on TCP/443; **QUIC/HTTP-3** runs a real HTTP/3 server. `auto` uses QUIC where
+  UDP is open and **falls back to TCP when it is blocked**.
+- **Anti-active-probing on both paths.** A wrong key never reveals a proxy — probers are
+  transparently relayed to the real site, or get a normal web page.
+- **Carries UDP, not just TCP.** DNS, QUIC, WebRTC and games ride the tunnel.
+- **Full dual-stack IPv6**, with a fail-closed kill-switch so it cannot leak around a
+  v6-unaware path.
 - **Post-quantum key exchange** (X25519MLKEM768 hybrid) on the REALITY path.
-- **Anti-active-probing** on both transports (a wrong key / no key never reveals a proxy),
-  with replay protection and handshake deadlines that shrug off connection-holding probes.
 - **Stream multiplexing** — the published defense against TLS-in-TLS traffic analysis.
-- **Built-in multi-user management** — per-user **data caps, up/down speed limits, and
-  expiry**, enforced in the data path and persisted (no external panel required); manage
-  live with `leshiy user …`.
-- **Entry/Exit connector (the differentiator).** Split the censor-facing **entry** from
-  the internet-facing **exit**, joined by a built-in QUIC carrier — **chainable** across
-  multiple hops. The chain lives in server-side config, so a leaked client config exposes
-  only the entry, not your topology.
-- **Pure Rust, no C TLS stack** — easy to cross-compile and audit; `#![forbid(unsafe_code)]`
-  in the core crates.
+- **Built-in multi-user management** — per-user data caps, speed limits and expiry,
+  enforced in the data path. No external panel.
+- **Entry/Exit chaining.** Split the censor-facing entry from the internet-facing exit,
+  joined by a built-in QUIC carrier and chainable across hops. The chain lives in
+  server-side config, so a leaked client link exposes only the entry.
+- **Pure Rust, no C TLS stack.** `#![forbid(unsafe_code)]` in the core crates.
+
+---
+
+## Quick start
+
+Every setup command below takes **`-i`**, which asks you what it needs instead of making
+you look up flags. That is the recommended path; the flags are all still there for
+scripting.
+
+### 1. Install
+
+On the machine you want to tunnel *from*, no root needed:
+
+```sh
+curl -fsSL https://github.com/bigunmd/leshiy/releases/latest/download/install-client.sh | sh
+```
+
+Needs `minisign` on PATH to verify the download (`apt install minisign`, `brew install minisign`, …).
+Or build it yourself: `cargo build --release`.
+
+### 2. Get a server
+
+**From your laptop, onto a fresh VPS** — the easiest path. Leshiy SSHes in, installs
+everything, and hands you a client link:
+
+```sh
+leshiy remote provision -i
+```
+
+It asks for the SSH target, offers a list of camouflage sites (and **live-probes** the one
+you pick for TLS 1.3), lets you choose the role and ports, then shows you exactly what it
+is about to do before touching anything. Saved servers go into an encrypted vault, so
+later commands just let you pick one from a list.
+
+> Provisioning pulls the container image matching your CLI
+> (`ghcr.io/bigunmd/leshiy:v<version>`), so run a released build — or point `--image`
+> somewhere else.
+
+**Or, if you are already on the VPS**, as root:
+
+```sh
+curl -fsSL https://github.com/bigunmd/leshiy/releases/latest/download/install.sh | sh
+```
+
+This installs a signed binary, runs the setup, and starts a hardened systemd service on
+443. To do it by hand instead — including entry/exit roles — use `leshiy quickstart -i`,
+which detects the machine's public address for you.
+
+Either way you end up with a `leshiy://…` link and a QR code.
+
+### 3. Connect
+
+```sh
+leshiy connect -i
+```
+
+It asks **how** you want to connect:
+
+```
+? How do you want to connect? ›
+❯ Local SOCKS5 proxy                  no root needed; point your apps at 127.0.0.1:1080
+  Full-device VPN                     routes everything on this machine; will prompt for sudo
+  Full-device VPN via the helper      same, but no sudo prompt
+  Background proxy service            a systemd user unit; survives logout
+  Background full-device VPN service  survives reboot, needs root
+```
+
+…then **which server** — picked from the ones you provisioned, so there is nothing to copy
+and paste. Given a link by someone else? Paste it instead.
+
+With a proxy running, point any app at it:
+
+```sh
+curl --socks5-hostname 127.0.0.1:1080 https://example.com
+```
+
+Already know what you want? Skip straight to it:
+
+```sh
+leshiy connect 'leshiy://…'      # proxy, one shot
+leshiy tun -i                    # full-device VPN
+leshiy service start -i          # background service
+```
+
+### 4. Manage users
+
+Your server starts with one user. Add more to a **running** server:
+
+```sh
+leshiy remote user add -i                             # a server you provisioned
+leshiy user add --data-cap 50GB --expires +30d --qr   # on the server itself
+```
+
+Each prints a new `leshiy://` link to hand out. Also `user list`, `user show <id>`,
+`user disable <id>` (cuts access instantly) and `user rm <id>`.
+
+---
+
+## Interactive mode
+
+`-i` works across the whole CLI. Anything you pass as a flag is not asked about, and every
+wizard ends by printing the equivalent flag-only command — so it teaches you the scriptable
+form as you go.
+
+| Command | What `-i` gives you |
+| --- | --- |
+| `leshiy connect -i` | pick proxy / VPN / background service, then a saved server |
+| `leshiy remote provision -i` | stand up a remote VPS over SSH |
+| `leshiy remote <cmd> -i` | pick a saved server from a list instead of typing its id |
+| `leshiy quickstart -i` | stand up a server on this machine |
+| `leshiy tun -i`, `leshiy vpn -i` | full-device VPN, directly |
+| `leshiy service start -i` | install and start the background service |
+
+It needs a terminal — in a script it refuses immediately rather than hanging.
+
+---
+
+## Going further
+
+**Entry → Exit chain.** Keep the censor-facing entry small and disposable; do the real
+egress on a separate, clean box. Stand the **exit up first**, then point an entry at it:
+
+```sh
+leshiy remote provision -i --role exit     # prints a connector credential
+leshiy remote provision -i --role entry    # pick the exit from a list
+```
+
+Give clients the **entry's** link. Add `--role middle` nodes for extra hops. The chain is
+server-side only, so a leaked client link never exposes your topology.
+
+**QUIC.** Turned on by answering yes in `quickstart -i` / `remote provision -i`, or with
+`--quic-listen <host:port>`. Clients pick it up automatically and fall back to TCP when
+UDP is blocked.
+
+**Day-2 management.** The installer drops `leshiyctl`, which works for both native and
+Docker installs: `leshiyctl status | upgrade | uninstall | user …`.
+
+For servers you provisioned remotely: `leshiy remote ls`, `status`, `upgrade`, `backup`
+(add `--connection-only` to share without SSH credentials), `restore` and `teardown` —
+all of them take `-i`.
+
+**Scripting.** Every wizard has a flag-only equivalent: run it once with `-i` and copy the
+command it prints. Credentials are never echoed into that line — keep a `leshiy://` link
+in a `0600` file and pass `--uri-file` to stay out of shell history and `ps`.
+
+---
 
 ## Desktop and mobile apps
 
-Besides the `leshiy` CLI, there are graphical clients so non-technical users can
-connect in one tap — paste a `leshiy://` link (or scan its QR) and go.
+Graphical clients for **Linux, Windows, macOS and Android** — paste a link or scan its QR
+and connect in one tap. Grab them from the
+[Releases page](https://github.com/bigunmd/leshiy/releases).
 
-**Platforms:** desktop apps for **Linux, Windows, and macOS**, plus an **Android**
-app. Download the latest build from the
-[Releases page](https://github.com/bigunmd/leshiy/releases). (Linux, Windows, and
-Android are tested and working; macOS builds are provided but less exercised. No iOS app.)
+Both proxy and full-VPN modes, **split tunnelling** (by domain, by CIDR, or per-app on
+Android), community rule lists that refresh themselves, and live throughput and latency.
 
-**Two modes:**
+The **Android** app (native Kotlin/Compose, min Android 8.0) goes furthest: Quick Settings
+tile, home-screen widget, always-on VPN, biometric lock, signed in-app updates — and it can
+**provision and manage your servers from the phone**, including entry/exit cascades, with
+credentials in an encrypted on-device vault.
 
-- **Proxy (SOCKS5)** — a local proxy you point apps at; no elevated privileges.
-- **VPN (full tunnel)** — routes the whole device. On desktop a small privileged
-  helper is launched on demand (one admin prompt); on Android the system VPN is used
-  (approve the on-screen consent the first time). On Android the VPN keeps running in
-  the background after you leave the app.
+> Linux, Windows and Android are tested and working; macOS is provided but less exercised.
+> There is no iOS app. The Android app is unit-tested in CI but has no on-device matrix
+> across vendors yet — OEM battery managers vary a lot in how aggressively they kill
+> background VPNs.
 
-**Add a server config** by pasting a `leshiy://` link, scanning a **QR code** (live
-camera on Android, or from an image file), or reading it from the clipboard.
-
-**Split tunnel — decide what actually goes through the tunnel:**
-
-- **By network / domain** — include or exclude specific IP ranges (CIDRs) and domains,
-  IPv4 and IPv6 alike.
-- **Community rule lists** — subscribe to curated preset lists (e.g. route or bypass
-  whole regions); they refresh automatically.
-- **Per-app (Android)** — tunnel only the apps you choose, or everything _except_ them.
-
-**Live status:** connection state, real-time throughput, and round-trip latency to
-your server.
-
-The Android client goes further than the desktop apps — QS tile, widget, per-app rules,
-on-device server provisioning and management. See [Android app](#android-app) below.
-
-> The apps are clients — you still need a server to connect to. Self-host one with the
-> [Quick start](#quick-start) below, then share its `leshiy://` URI (or QR) with the app.
-
-## Android app
-
-The Android client is a **native Kotlin + Jetpack Compose** app — not a web view or a
-cross-platform wrapper. The tunnel itself is the same Rust core, cross-compiled for
-`arm64-v8a`, `armeabi-v7a` and `x86_64` and called over a UniFFI bridge, so the phone
-runs exactly the protocol implementation the servers and desktop clients do.
-
-Grab `leshiy_vX.Y.Z.apk` from the
-[Releases page](https://github.com/bigunmd/leshiy/releases). Minimum Android 8.0.
-
-**Connecting**
-
-- **Full-device VPN** via Android's `VpnService` — every app on the phone goes through
-  the tunnel. Keeps running in the background once you leave the app.
-- **Add a server** by scanning a QR with the live camera, pasting a `leshiy://` link, or
-  reading it from the clipboard.
-- **Latency ping + "use fastest"** — measures round-trip time to each saved server and
-  picks the quickest.
-- **Always-on VPN** and **auto-reconnect after reboot** (both opt-in).
-
-**Controls without opening the app**
-
-- **Quick Settings tile** — toggle the tunnel straight from the notification shade.
-- **Home-screen widget** and **launcher shortcuts** (long-press the icon).
-- **Ongoing notification** with live throughput, session duration, the active profile
-  name, and a one-tap disconnect.
-
-**Split tunnel**
-
-- Include or exclude specific **domains and IP ranges** (CIDRs), IPv4 and IPv6.
-- **Per-app rules** — tunnel only the apps you pick, or everything except them.
-- **Community rule lists** — subscribe to curated presets; they refresh automatically.
-
-**Managing your servers from the phone**
-
-The app is not just a client — it can stand up and run your infrastructure:
-
-- **Provision a fresh VPS** into a leshiy server over SSH, with live progress.
-- **Build an Entry ▶ Exit cascade** from the phone, including multi-hop chains.
-- **Day-2 management** — server status, add/list/revoke client users, in-place server
-  upgrades, teardown.
-- Server credentials live in an **encrypted on-device vault** (Argon2id +
-  XChaCha20-Poly1305), with **encrypted backup and restore** so you can move to a new
-  phone.
-
-**Privacy and polish**
-
-- **Biometric app lock** — fingerprint or screen lock to open the app; the tunnel keeps
-  running while locked.
-- **Battery/Doze exemption prompt**, surfaced exactly when keep-alive needs it.
-- **In-app updates** — checks GitHub releases, downloads, **verifies the signature**, and
-  installs.
-- First-run **onboarding**, app-wide error recovery, haptic feedback, and an optional
-  live latency/throughput graph on the Connect screen (off by default).
-- Full **English and Russian** localization.
-
-> **Runtime caveat:** the Android app is exercised in day-to-day use and its logic is
-> unit-tested in CI (which also builds the APK on every push), but it does not yet have a
-> systematic on-device test matrix across vendors and Android versions. OEM battery
-> managers in particular vary a lot in how aggressively they kill background VPNs.
+---
 
 ## How it compares
 
@@ -208,243 +252,16 @@ deployed, Leshiy is new):
 | Implementation                |          **pure Rust**          |             Go             |          Go          |        Go         |
 | Maturity                      |      **beta / unaudited**       |           mature           |        mature        |      mature       |
 
-**Where Leshiy aims to differ:** one tool that runs _both_ a REALITY/TCP and a QUIC/HTTP-3
-transport with automatic fallback, ships a built-in **entry/exit connector with relay
-chaining**, includes **multi-user management** without a separate panel, and is **pure
-Rust** (no BoringSSL/C dependency). The trade-off is track record — Xray, AmneziaWG, and
-Hysteria2 are battle-tested and audited over years; Leshiy works well today but is newer
-and not yet independently audited.
-
----
-
-## Quick start
-
-Build (or grab a release binary):
-
-```sh
-cargo build --release    # binary at ./target/release/leshiy
-```
-
-### 0. One-command install (recommended)
-
-On a fresh VPS, as root:
-
-```sh
-curl -fsSL https://github.com/bigunmd/leshiy/releases/latest/download/install.sh | sh
-```
-
-This downloads a **signed** static binary (verified with minisign + SHA-256), runs the
-setup wizard, installs a hardened systemd service on 443, and prints your client
-`leshiy://` URI + a QR code.
-
-To pass flags, append them after `sh -s --` (the `-s` makes `sh` read the script from
-stdin; `--` ends `sh`'s own options so the rest go to the installer):
-
-```sh
-URL=https://github.com/bigunmd/leshiy/releases/latest/download/install.sh
-
-# Also enable the QUIC/HTTP-3 transport (443/udp) alongside REALITY:
-curl -fsSL $URL | sh -s -- --quic
-
-# Run on non-default ports (REALITY/TCP + QUIC/UDP), e.g. behind a shared IP:
-curl -fsSL $URL | sh -s -- --port 10559 --quic 10560
-
-# Install as a Docker container instead of a native systemd service:
-curl -fsSL $URL | sh -s -- --docker
-
-# QUIC with a custom SNI (the qsni in the URI); defaults to the --dest hostname:
-curl -fsSL $URL | sh -s -- --quic --quic-sni cdn.cloudflare.com
-```
-
-Other flags: `--host <ip:port>`, `--dest <host:port>`, `--port <tcp-port>` (REALITY/TCP
-listen port, default 443), `--quic [udp-port]` (bare = same as `--port`), `--quic-sni <domain>`,
-`--role single|entry|exit`, `--exit-uri '<leshiy://…>'`, `--yes`. Prefer to inspect first? The script is short — read it
-at the URL above before piping to `sh`.
-
-### 1. Run a server
-
-```sh
-# Generate the server identity + config, and print the client share URI.
-#   --host : the public address clients dial (goes into the URI)
-#   --dest : a real, popular, regionally-plausible TLS 1.3 site to camouflage as
-leshiy server-init \
-    --host <public-ip>:443 \
-    --dest www.microsoft.com:443 \
-    --out leshiy-server.toml
-# → prints:  leshiy://<pubkey>@<public-ip>:443?sni=www.microsoft.com&sid=<hex>
-
-# Start it (foreground; run under systemd/your supervisor in production):
-leshiy server --config leshiy-server.toml
-```
-
-### 2. Connect a client
-
-On the machine you want to tunnel from (Linux, **no root needed** — the client only opens a
-local port), install the verified binary into `~/.local/bin`:
-
-```sh
-# minisign is required to verify the download (one-time): apt/dnf/pacman/apk install minisign, or `brew install minisign`
-curl -fsSL https://github.com/bigunmd/leshiy/releases/latest/download/install-client.sh | sh
-```
-
-Then start the local SOCKS5 proxy with the `leshiy://` URI your server printed:
-
-```sh
-leshiy connect 'leshiy://<pubkey>@<public-ip>:443?sni=www.microsoft.com&sid=<hex>'
-# `connect` defaults to SOCKS5 on 127.0.0.1:1080, transport auto. Point any app at it:
-curl --socks5-hostname 127.0.0.1:1080 https://example.com
-```
-
-`connect` is shorthand for the full form, if you prefer explicit flags:
-
-```sh
-leshiy client \
-    --uri 'leshiy://…' \
-    --transport auto \
-    --socks 127.0.0.1:1080
-```
-
-`--transport`: `auto` (default — QUIC then REALITY), `quic`, or `tcp`.
-`--socks`: change the local listen address (default `127.0.0.1:1080`).
-
-### 3. Manage users (optional)
-
-`server-init` creates one user. Add and control more on a **running** server:
-
-```sh
-leshiy user add --data-cap 50GB --rate-down 50Mbps --expires +30d
-#   → prints a new leshiy:// URI to share with that user
-leshiy user list
-leshiy user show   <short-id>
-leshiy user disable <short-id>      # cut access instantly
-leshiy user reset-usage <short-id>
-```
-
-Add `--qr` to print a scannable QR for any share URI:
-
-```sh
-leshiy user add --data-cap 50GB --qr      # prints the leshiy:// URI + a QR to scan
-```
-
-### Day-2 management (`leshiyctl`)
-
-The installer drops a `leshiyctl` helper that works for both native and Docker installs:
-
-```sh
-leshiyctl status      # native: service + config summary;  docker: container status + logs
-leshiyctl upgrade     # native: verified binary swap + restart;  docker: pull image + recreate
-leshiyctl uninstall   # stop + remove the server (add --purge to delete config/keys)
-leshiyctl user ...    # manage users (runs inside the container on a docker install)
-```
-
-### 4. Enable the QUIC transport (optional)
-
-Add a QUIC/HTTP-3 endpoint so clients can use the UDP path (auto-fallback handles the rest):
-
-```sh
-leshiy server-init --host <public-ip>:443 --dest www.microsoft.com:443 \
-    --quic-listen <public-ip>:443 --out leshiy-server.toml
-# The printed URI now also carries the QUIC endpoint + a pinned cert fingerprint.
-```
-
-### 5. Set up an Entry → Exit connector (optional, advanced)
-
-With the installer (recommended), on each box:
-
-```sh
-# On the EXIT (clean egress): note the printed connector-credential URI.
-curl -fsSL https://github.com/bigunmd/leshiy/releases/latest/download/install.sh | sh -s -- \
-    --role exit --dest www.cloudflare.com:443 --quic
-# → prints EXIT_URI = leshiy://…
-
-# On the ENTRY (censor-facing): point it at the exit; hand its printed URI to clients.
-curl -fsSL https://github.com/bigunmd/leshiy/releases/latest/download/install.sh | sh -s -- \
-    --role entry --dest www.microsoft.com:443 --exit-uri '<EXIT_URI>'
-```
-
-Stand the **exit up first** (you need its URI for the entry). Chain further hops by giving the
-exit its own `--exit-uri`. The chain lives only in server-side config, so a leaked client
-config exposes just the entry.
-
-Keep the censor-facing **entry** small and disposable; do the real egress on a separate,
-clean **exit**.
-
-```sh
-# On the EXIT (clean-egress server): set it up and note its URI.
-leshiy server-init --host <exit-ip>:443 --dest www.cloudflare.com:443 \
-    --quic-listen <exit-ip>:443 --out exit.toml
-# → EXIT_URI = leshiy://...   (this is the connector credential)
-
-# On the ENTRY (censor-facing server): forward to the exit instead of egressing directly.
-leshiy server-init --host <entry-ip>:443 --dest www.microsoft.com:443 \
-    --connector '<EXIT_URI>' --out entry.toml
-# Give clients the ENTRY's URI. Chain further by giving the EXIT its own --connector.
-```
-
-### 6. Provision a server from the client
-
-Stand up a fresh VPS into a leshiy server over SSH:
-
-```sh
-leshiy remote provision --host root@203.0.113.5 --dest www.microsoft.com:443
-# ... live progress, then your first client config:
-#   leshiy://...   (stdout)
-#   <QR code>      (stderr)
-
-# Non-root user with sudo — prompts for the sudo password (day-2 ops re-prompt):
-leshiy remote provision --host deploy@203.0.113.5 --dest www.microsoft.com:443 --sudo
-# Automate it (feed the sudo password on stdin instead of prompting):
-printf '%s' "$SUDO_PW" | leshiy remote provision --host deploy@HOST --dest D --sudo-password-stdin
-```
-
-> **Note:** the server image must be built from this release for `--dest` and `--quic` to take effect.
-> Re-running `provision` against an already-provisioned host **reuses the existing server config**
-> (keys persist on a Docker volume); to change `--dest`/`--quic`, `teardown` the server first, then provision again.
-> `--port <n>` sets the REALITY/TCP listen port (default 443).
-
-Saved servers live in an encrypted vault (`~/.config/leshiy/servers.lvault`,
-Argon2id + XChaCha20-Poly1305). Manage them with `leshiy remote ls`,
-`leshiy remote user add <server> --label phone`, `leshiy remote status <server>`,
-`leshiy remote backup <server> --out server.lvault` (add `--connection-only`
-to share without SSH credentials), `leshiy remote restore server.lvault`, and
-`leshiy remote teardown <server> [--purge]`.
-
-`leshiy remote user ls <server>` lists the users currently on the server (live),
-and `leshiy remote user rm <server> <short_id>` deletes one. (Live `user ls`
-needs a server image built from this release or newer — it relies on
-`leshiy user list --json`.)
-
-**Chained (Entry ▶ Exit):** provision the exit first, then the entry selecting it.
-
-```sh
-# 1. Exit (terminal clean egress; QUIC carrier auto-enabled):
-leshiy remote provision --role exit --host root@EXIT_IP --dest www.cloudflare.com:443
-#    → prints a connector credential and saves the server (e.g. id EXIT_IP-22)
-
-# 2. Entry (censor-facing; forwards to the exit):
-leshiy remote provision --role entry --host root@ENTRY_IP --dest www.microsoft.com:443 \
-    --downstream EXIT_IP-22
-#    → issues the client config (QR). Clients connect to the entry; traffic exits via the exit.
-```
-
-Add `--role middle --downstream <prev>` nodes for extra hops. `leshiy remote ls` shows each server's role and downstream.
-
-**Prerequisite:** a published server image. Defaults to
-`ghcr.io/bigunmd/leshiy:v<CLI version>` — the tag CI publishes for the release you're
-running — so it tracks your client automatically; override with `--image`.
+**Where Leshiy differs:** one tool running *both* transports with automatic fallback, a
+built-in chainable entry/exit connector, multi-user management without a separate panel,
+and pure Rust with no BoringSSL/C dependency. The trade-off is track record — Xray,
+AmneziaWG and Hysteria2 are battle-tested over years.
 
 ---
 
 ## License
 
-Licensed under the GNU Affero General Public License v3.0 — see
-[LICENSE](LICENSE) or <https://www.gnu.org/licenses/agpl-3.0.html>.
+[AGPL-3.0](LICENSE). Strong copyleft: if you modify Leshiy and let others use it over a
+network, you must offer them your modified source.
 
-AGPL-3.0 is strong copyleft: if you modify Leshiy and let others use it over a
-network (e.g. you run a modified server), you must offer them your modified source.
-
-### Contribution
-
-Unless you explicitly state otherwise, any contribution intentionally submitted for
-inclusion in the work by you shall be licensed under AGPL-3.0 as above, without any
-additional terms or conditions.
+Contributions are accepted under the same license unless you state otherwise.
