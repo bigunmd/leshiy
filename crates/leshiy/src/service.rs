@@ -205,6 +205,25 @@ pub fn scope_for(tun: bool) -> Scope {
     if tun { Scope::System } else { Scope::User }
 }
 
+/// Directories the full-tunnel unit must be able to write under `ProtectSystem=strict`.
+///
+/// `/etc` covers `resolv.conf` on an ordinary host. Where it is a symlink into another mount
+/// the write follows the link and lands outside `/etc`, so that directory has to be listed
+/// too — otherwise the engine dies with EROFS as soon as it applies the DNS override. WSL2
+/// points it at `/mnt/wsl/resolv.conf`; systemd-resolved setups point it at `/run`.
+fn read_write_paths() -> String {
+    let mut paths = vec!["/etc".to_string()];
+    if let Ok(target) = std::fs::canonicalize(RESOLV_CONF)
+        && let Some(dir) = target.parent()
+        && !dir.starts_with("/etc")
+    {
+        paths.push(dir.display().to_string());
+    }
+    paths.join(" ")
+}
+
+const RESOLV_CONF: &str = "/etc/resolv.conf";
+
 fn render_unit(exe: &Path, uri_file: &Path, o: &StartOpts<'_>, scope: Scope) -> String {
     let mut exec = format!(
         "{} {} --uri-file {} --transport {}",
@@ -238,7 +257,6 @@ fn render_unit(exe: &Path, uri_file: &Path, o: &StartOpts<'_>, scope: Scope) -> 
     let common = "\
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=0
 Environment=RUST_LOG=leshiy=warn
 ";
 
@@ -250,6 +268,12 @@ Environment=RUST_LOG=leshiy=warn
         // it in ~/.local/bin, so that is the normal case, not an edge one. Downgrade to
         // read-only only when the binary actually lives under a home directory; the
         // credential is in /etc, so a readable home does not expose it.
+        // CAP_DAC_OVERRIDE is not optional here. Applying the DNS override means writing
+        // the file /etc/resolv.conf resolves to, and under systemd-resolved that is
+        // /run/systemd/resolve/stub-resolv.conf, owned by the systemd-resolve user at mode
+        // 644. Being uid 0 is not enough to write it once the bounding set drops the
+        // capability, so the engine fails with EACCES and the unit crash-loops.
+        let rw_paths = read_write_paths();
         let protect_home = if exe.starts_with("/home") || exe.starts_with("/root") {
             "ProtectHome=read-only"
         } else {
@@ -257,12 +281,12 @@ Environment=RUST_LOG=leshiy=warn
         };
         format!(
             "\
-AmbientCapabilities=CAP_NET_ADMIN
-CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN CAP_DAC_OVERRIDE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE
 DeviceAllow=/dev/net/tun rw
 ProtectSystem=strict
 {protect_home}
-ReadWritePaths=/etc
+ReadWritePaths={rw_paths}
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 TimeoutStopSec=30
 "
@@ -297,7 +321,8 @@ UMask=0077
     };
 
     format!(
-        "{MARKER}\n[Unit]\nDescription=Leshiy client tunnel\n{after}\n[Service]\n\
+        "{MARKER}\n[Unit]\nDescription=Leshiy client tunnel\n{after}\
+StartLimitIntervalSec=0\n\n[Service]\n\
          Type=notify\nNotifyAccess=main\nTimeoutStartSec=60\nExecStart={exec}\n{common}{hardening}\n\
          [Install]\nWantedBy={wanted_by}\n"
     )
@@ -440,6 +465,47 @@ mod tests {
         assert!(unit.contains("--already-elevated"), "{unit}");
     }
 
+    /// Being root is not sufficient to write the DNS file: under systemd-resolved it is
+    /// owned by the systemd-resolve user, so dropping CAP_DAC_OVERRIDE from the bounding
+    /// set makes the engine fail with EACCES and crash-loop the unit.
+    #[test]
+    fn vpn_unit_keeps_the_capability_needed_to_rewrite_dns() {
+        let unit = render_unit(
+            Path::new("/usr/local/bin/leshiy"),
+            Path::new("/etc/leshiy/client.uri"),
+            &opts(true, None),
+            Scope::System,
+        );
+        for line in ["AmbientCapabilities=", "CapabilityBoundingSet="] {
+            let got = unit
+                .lines()
+                .find(|l| l.starts_with(line))
+                .unwrap_or_else(|| panic!("{line} missing:\n{unit}"));
+            assert!(got.contains("CAP_NET_ADMIN"), "{got}");
+            assert!(got.contains("CAP_DAC_OVERRIDE"), "{got}");
+        }
+    }
+
+    /// Under ProtectSystem=strict the engine can only write what ReadWritePaths lists. When
+    /// resolv.conf is a symlink into another mount — /mnt/wsl on WSL2, /run under
+    /// systemd-resolved — listing /etc alone is not enough and applying the DNS override
+    /// fails with EROFS, crash-looping the unit.
+    #[test]
+    fn read_write_paths_cover_wherever_resolv_conf_really_lives() {
+        let paths = read_write_paths();
+        assert!(paths.contains("/etc"), "{paths}");
+        if let Ok(target) = std::fs::canonicalize("/etc/resolv.conf")
+            && let Some(dir) = target.parent()
+            && !dir.starts_with("/etc")
+        {
+            assert!(
+                paths.contains(&dir.display().to_string()),
+                "resolv.conf resolves to {} but ReadWritePaths is {paths}",
+                target.display()
+            );
+        }
+    }
+
     /// ProtectHome=yes makes /home appear empty to the service, so systemd cannot exec a
     /// binary there and the unit dies with 203/EXEC. install-client.sh installs to
     /// ~/.local/bin, so this is the default layout, not a corner case.
@@ -489,8 +555,18 @@ mod tests {
             &opts(false, None),
             Scope::User,
         );
-        assert!(unit.contains("StartLimitIntervalSec=0"), "{unit}");
         assert!(unit.contains("Restart=always"), "{unit}");
+
+        // systemd only parses StartLimitIntervalSec in [Unit]. Under [Service] it logs
+        // "Unknown key name ... ignoring" and the protection above is silently inert.
+        let unit_section = unit
+            .split("[Service]")
+            .next()
+            .expect("unit must have a [Unit] section");
+        assert!(
+            unit_section.contains("StartLimitIntervalSec=0"),
+            "StartLimitIntervalSec must live in [Unit], got:\n{unit}"
+        );
     }
 
     #[test]
