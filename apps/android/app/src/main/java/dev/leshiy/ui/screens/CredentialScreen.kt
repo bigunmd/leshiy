@@ -24,9 +24,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -52,7 +50,6 @@ fun CredentialScreen(
 ) {
     val s = LocalStrings.current
     val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
     val credential by vm.credential.collectAsStateWithLifecycle()
 
     val cred = credential
@@ -81,7 +78,7 @@ fun CredentialScreen(
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 CredAction(LeshiyIcons.Clipboard, s.copyLink, Modifier.weight(1f)) {
-                    clipboard.setText(AnnotatedString(cred.uri))
+                    dev.leshiy.ui.components.copySensitive(context, cred.uri)
                     note = s.copied
                 }
                 CredAction(LeshiyIcons.Wisp, if (saved) s.saved else s.saveToProfiles, Modifier.weight(1f), enabled = !saved) {

@@ -53,6 +53,7 @@ import dev.leshiy.ui.SplitViewModel
 import dev.leshiy.ui.components.Atmosphere
 import dev.leshiy.ui.components.LeshiySnackbarHost
 import dev.leshiy.ui.components.LeshiySnackbarVisuals
+import dev.leshiy.ui.components.SecureWindow
 import dev.leshiy.ui.i18n.LangState
 import dev.leshiy.ui.i18n.LocalStrings
 import dev.leshiy.ui.i18n.stringsFor
@@ -301,6 +302,7 @@ private fun AppNav(startDestination: String, onConnect: (String) -> Unit, onDisc
             )
         }
         composable(Route.SERVERS) {
+            SecureWindow()
             ServersScreen(
                 vm = profilesVm,
                 scannedUri = scannedUri,
@@ -313,6 +315,7 @@ private fun AppNav(startDestination: String, onConnect: (String) -> Unit, onDisc
             SplitScreen(appsVm = appsVm, splitVm = splitVm, onBack = { nav.popBackStack() })
         }
         composable(Route.DEPLOY) {
+            SecureWindow()
             DeployScreen(
                 vm = provisionVm,
                 onStarted = { nav.navigate(Route.PROVISIONING) },
@@ -324,6 +327,7 @@ private fun AppNav(startDestination: String, onConnect: (String) -> Unit, onDisc
             )
         }
         composable(Route.PROVISIONING) {
+            SecureWindow()
             ProvisioningScreen(
                 vm = provisionVm,
                 onDone = { uri, label ->
@@ -357,6 +361,7 @@ private fun AppNav(startDestination: String, onConnect: (String) -> Unit, onDisc
             )
         }
         composable(Route.CASCADE) {
+            SecureWindow()
             CascadeBuilderScreen(
                 vm = cascadeVm,
                 manageVm = manageVm,
@@ -368,9 +373,11 @@ private fun AppNav(startDestination: String, onConnect: (String) -> Unit, onDisc
             )
         }
         composable(Route.VAULT_BACKUP) {
+            SecureWindow()
             VaultBackupScreen(vm = backupVm, onBack = { nav.popBackStack() })
         }
         composable(Route.MANAGE) {
+            SecureWindow()
             ManageScreen(
                 vm = manageVm,
                 onOpenServer = { nav.navigate(Route.SERVER_DETAIL) },
@@ -378,6 +385,7 @@ private fun AppNav(startDestination: String, onConnect: (String) -> Unit, onDisc
             )
         }
         composable(Route.SERVER_DETAIL) {
+            SecureWindow()
             ServerDetailScreen(
                 vm = manageVm,
                 upgradeVm = upgradeVm,
@@ -387,6 +395,7 @@ private fun AppNav(startDestination: String, onConnect: (String) -> Unit, onDisc
             )
         }
         composable(Route.SERVER_USERS) {
+            SecureWindow()
             ServerUsersScreen(
                 vm = manageVm,
                 onOpenCredential = { nav.navigate(Route.CREDENTIAL) },
@@ -394,6 +403,7 @@ private fun AppNav(startDestination: String, onConnect: (String) -> Unit, onDisc
             )
         }
         composable(Route.SERVER_UPGRADE) {
+            SecureWindow()
             UpgradeScreen(
                 vm = upgradeVm,
                 // The vault record changed — without the refresh the Version card would come back
@@ -409,6 +419,7 @@ private fun AppNav(startDestination: String, onConnect: (String) -> Unit, onDisc
             )
         }
         composable(Route.CREDENTIAL) {
+            SecureWindow()
             CredentialScreen(
                 vm = manageVm,
                 onSaveToProfiles = { uri, label -> profilesVm.add(uri, label) },
