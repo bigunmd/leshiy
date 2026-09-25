@@ -12,6 +12,12 @@ created by a maintainer (not committed to the repo).
 `minisign -P "$MINISIGN_PUB"` — the **bare key line passed as a string**, not a two-line key
 *file* (`minisign -p <file>` would fail with "Error while loading the public key file").
 
+The same key signs the Android train: `android-release.yml` publishes `SHA256SUMS.minisig`
+from a separate `publish` job (never the Gradle/cargo build job), and the Android app embeds
+`scripts/minisign.pub` at build time (`leshiy-mobile`) and refuses any in-app update whose
+`SHA256SUMS` it did not sign. Rotating the key therefore also means shipping an app build
+with the new key *before* the first release signed by it.
+
 **To rotate the key** (or set one up on a fork):
 
 ```sh

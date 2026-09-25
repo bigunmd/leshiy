@@ -76,6 +76,38 @@ jobs:
           ( cd dist && sha256sum *.apk > SHA256SUMS )
           ls -la dist
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-dist
+          path: dist/
+
+  # Signing + publishing run in their own job: the build above executes Gradle plugins and cargo
+  # build scripts, and none of that may share a runner with MINISIGN_SECRET_KEY (the same split as
+  # release.yml — see scripts/RELEASE.md). The in-app updater refuses a SHA256SUMS this key did
+  # not sign.
+  publish:
+    needs: apk
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-dist
+          path: dist
+      - name: Install minisign
+        run: sudo apt-get update && sudo apt-get install -y minisign
+      - name: Sign checksums (minisign)
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > minisign.key
+          trap 'rm -f minisign.key' EXIT   # never leave the secret key around
+          echo "$MINISIGN_PASSWORD" | minisign -S -s minisign.key -m dist/SHA256SUMS
+          minisign -Vm dist/SHA256SUMS -p scripts/minisign.pub
+
       - name: Publish draft release
         uses: softprops/action-gh-release@v2
         with:
@@ -89,3 +121,4 @@ jobs:
           files: |
             dist/*.apk
             dist/SHA256SUMS
+            dist/SHA256SUMS.minisig
