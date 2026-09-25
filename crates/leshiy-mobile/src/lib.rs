@@ -7,6 +7,7 @@ mod dns;
 mod error;
 mod profiles;
 mod provision;
+mod release_sig;
 mod runtime;
 mod server;
 mod status;
@@ -17,6 +18,7 @@ pub use profiles::{ProfileInfo, ProfileManager};
 pub use provision::{
     ProvisionConfig, ProvisionListener, ProvisionUpdate, Provisioner, default_image_ref,
 };
+pub use release_sig::verify_release_checksums;
 pub use server::{RemoteUserInfo, ServerInfo, ServerManager};
 pub use status::{ConnState, Status};
 
