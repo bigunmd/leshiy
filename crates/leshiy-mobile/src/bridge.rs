@@ -12,6 +12,11 @@ pub trait StatusListener: Send + Sync {
     fn on_status(&self, status: Status);
 }
 
+/// How long [`LeshiyBridge::stop`] waits for the runtime's work to wind down. Async tasks are
+/// dropped at their next yield almost immediately; this only bounds the wait on blocking-pool
+/// work, which a plain runtime drop would wait on forever.
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 struct Running {
     cancel: Arc<Notify>,
     /// Signalled by [`LeshiyBridge::reattach_tun`] when the host establishes a new TUN to change
@@ -19,8 +24,9 @@ struct Running {
     reattach: Arc<Notify>,
     /// Signalled by [`LeshiyBridge::network_changed`]; forces the reconnect supervisor to re-dial.
     kick: Arc<Notify>,
-    // Keeping the runtime alive keeps the engine + poller tasks running; dropping it stops them.
-    _rt: Runtime,
+    // Keeping the runtime alive keeps the engine + poller tasks running; [`LeshiyBridge::stop`]
+    // shuts it down.
+    rt: Runtime,
     // Held so the state channel outlives the session (the poller clones its own receiver).
     _state_rx: tokio::sync::watch::Receiver<ConnState>,
 }
@@ -124,7 +130,7 @@ impl LeshiyBridge {
             cancel,
             reattach,
             kick,
-            _rt: rt,
+            rt,
             _state_rx: state_rx,
         });
         Ok(())
@@ -173,10 +179,14 @@ impl LeshiyBridge {
         Ok(())
     }
 
-    /// Stop the tunnel and tear down the engine + poller. Idempotent.
+    /// Stop the tunnel and tear down the engine + poller. Idempotent. Returns within
+    /// [`STOP_GRACE`] even if blocking work (a re-dial's `getaddrinfo`) is still in flight — that
+    /// work is left to finish on its own thread rather than holding the caller hostage.
     pub fn stop(&self) {
-        if let Some(running) = self.inner.lock().unwrap().take() {
+        let running = self.inner.lock().unwrap().take();
+        if let Some(running) = running {
             running.cancel.notify_waiters();
+            running.rt.shutdown_timeout(STOP_GRACE);
         }
     }
 }
@@ -198,5 +208,47 @@ mod tests {
     fn good_uri_parses() {
         let uri = crate::runtime::sample_uri_for_test();
         assert!(crate::runtime::validate_uri(&uri).is_ok());
+    }
+
+    /// `stop()` must not wait on in-flight blocking work. A re-dial's `getaddrinfo` runs on the
+    /// blocking pool and can take the whole DNS timeout; a plain runtime drop waits for it forever,
+    /// which froze the app when the host called `stop()` from its UI thread.
+    #[test]
+    fn stop_does_not_wait_for_blocking_work() {
+        use super::{LeshiyBridge, Running};
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+        use tokio::sync::Notify;
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        rt.spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_secs(10)); // a stalled getaddrinfo
+        });
+        started_rx.recv().unwrap();
+        let (_state_tx, state_rx) =
+            tokio::sync::watch::channel(crate::status::ConnState::Connected);
+        let bridge = LeshiyBridge {
+            inner: Mutex::new(Some(Running {
+                cancel: Arc::new(Notify::new()),
+                reattach: Arc::new(Notify::new()),
+                kick: Arc::new(Notify::new()),
+                rt,
+                _state_rx: state_rx,
+            })),
+        };
+
+        let started = Instant::now();
+        bridge.stop();
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "stop() blocked for {:?}",
+            started.elapsed()
+        );
+        assert!(bridge.inner.lock().unwrap().is_none());
     }
 }
