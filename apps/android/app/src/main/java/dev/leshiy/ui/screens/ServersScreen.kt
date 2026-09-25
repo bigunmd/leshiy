@@ -131,7 +131,7 @@ fun ServersScreen(
                     PrimaryButton(
                         s.addServerBtn,
                         onClick = {
-                            if (vm.add(uri, name)) { uri = ""; name = "" }
+                            vm.add(uri, name) { ok -> if (ok) { uri = ""; name = "" } }
                         },
                         enabled = uri.isNotBlank(),
                         modifier = Modifier.fillMaxWidth(),
