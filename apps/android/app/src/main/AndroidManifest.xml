@@ -52,6 +52,16 @@
                 android:resource="@xml/shortcuts" />
         </activity>
 
+        <!-- Launcher-shortcut target. Not exported: the launcher starts static shortcuts with our
+             identity, and no other app can fire its connect/disconnect actions. -->
+        <activity
+            android:name=".ShortcutActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.NoDisplay" />
+
         <activity
             android:name=".ui.QrScanActivity"
             android:exported="false"
@@ -100,19 +110,23 @@
             </intent-filter>
         </service>
 
-        <!-- Home-screen toggle widget. exported so the launcher/host can bind it; the toggle
-             broadcast is our own package action. -->
+        <!-- Home-screen toggle widget. exported so the launcher/host can bind it; it only accepts
+             the protected APPWIDGET_UPDATE. Taps go to the non-exported WidgetToggleReceiver, so no
+             other app can toggle the VPN. -->
         <receiver
             android:name=".LeshiyWidgetProvider"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-                <action android:name="dev.leshiy.WIDGET_TOGGLE" />
             </intent-filter>
             <meta-data
                 android:name="android.appwidget.provider"
                 android:resource="@xml/leshiy_widget_info" />
         </receiver>
+
+        <receiver
+            android:name=".WidgetToggleReceiver"
+            android:exported="false" />
 
         <!-- Exposes the downloaded update APK (cacheDir/updates) to the package installer. -->
         <provider

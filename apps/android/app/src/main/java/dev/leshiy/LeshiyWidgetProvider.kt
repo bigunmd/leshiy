@@ -3,6 +3,7 @@ package dev.leshiy
 import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProvider
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -24,30 +25,6 @@ class LeshiyWidgetProvider : AppWidgetProvider() {
         for (id in ids) mgr.updateAppWidget(id, render(context, running))
     }
 
-    override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == ACTION_TOGGLE) {
-            val verb = tileAction(
-                running = TunnelRepository.running.value,
-                hasConsent = VpnService.prepare(context) == null,
-                hasProfile = runCatching { Profiles.manager(context).activeUri() }.getOrNull() != null,
-            )
-            when (verb) {
-                TileVerb.STOP ->
-                    context.startService(
-                        Intent(context, LeshiyVpnService::class.java).setAction(LeshiyVpnService.ACTION_STOP),
-                    )
-                TileVerb.START ->
-                    context.startForegroundService(Intent(context, LeshiyVpnService::class.java))
-                TileVerb.OPEN_APP ->
-                    context.startActivity(
-                        Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                    )
-            }
-            requestUpdate(context)
-        }
-        super.onReceive(context, intent)
-    }
-
     private fun render(context: Context, running: Boolean): RemoteViews {
         val views = RemoteViews(context.packageName, R.layout.widget_leshiy)
         val tint = if (running) COLOR_ON else COLOR_OFF
@@ -65,12 +42,11 @@ class LeshiyWidgetProvider : AppWidgetProvider() {
         PendingIntent.getBroadcast(
             context,
             0,
-            Intent(context, LeshiyWidgetProvider::class.java).setAction(ACTION_TOGGLE),
+            Intent(context, WidgetToggleReceiver::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
     companion object {
-        private const val ACTION_TOGGLE = "dev.leshiy.WIDGET_TOGGLE"
         private const val COLOR_ON = 0xFF7CE07A.toInt() // Wisp
         private const val COLOR_OFF = 0xFF8FA98C.toInt() // Dim
 
@@ -82,5 +58,33 @@ class LeshiyWidgetProvider : AppWidgetProvider() {
             val provider = LeshiyWidgetProvider()
             provider.onUpdate(context, mgr, ids)
         }
+    }
+}
+
+/**
+ * The widget's tap target. Not exported: only the widget's own PendingIntent (sent with our
+ * identity) reaches it. On the exported provider, any installed app could broadcast the toggle and
+ * silently switch the VPN off.
+ */
+class WidgetToggleReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val verb = tileAction(
+            running = TunnelRepository.running.value,
+            hasConsent = VpnService.prepare(context) == null,
+            hasProfile = runCatching { Profiles.manager(context).activeUri() }.getOrNull() != null,
+        )
+        when (verb) {
+            TileVerb.STOP ->
+                context.startService(
+                    Intent(context, LeshiyVpnService::class.java).setAction(LeshiyVpnService.ACTION_STOP),
+                )
+            TileVerb.START ->
+                context.startForegroundService(Intent(context, LeshiyVpnService::class.java))
+            TileVerb.OPEN_APP ->
+                context.startActivity(
+                    Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+        }
+        LeshiyWidgetProvider.requestUpdate(context)
     }
 }

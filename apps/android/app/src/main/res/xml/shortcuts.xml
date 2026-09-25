@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Launcher long-press shortcuts. Each targets MainActivity with an action it handles in
-     handleShortcut(); the tunnel is started/stopped without revealing UI (works under app-lock). -->
+<!-- Launcher long-press shortcuts. Each targets the non-exported ShortcutActivity, which starts or
+     stops the tunnel without revealing UI (works under app-lock). -->
 <shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
     <shortcut
         android:shortcutId="connect"
@@ -11,7 +11,7 @@
         <intent
             android:action="dev.leshiy.SHORTCUT_CONNECT"
             android:targetPackage="dev.leshiy"
-            android:targetClass="dev.leshiy.MainActivity" />
+            android:targetClass="dev.leshiy.ShortcutActivity" />
     </shortcut>
     <shortcut
         android:shortcutId="disconnect"
@@ -22,6 +22,6 @@
         <intent
             android:action="dev.leshiy.SHORTCUT_DISCONNECT"
             android:targetPackage="dev.leshiy"
-            android:targetClass="dev.leshiy.MainActivity" />
+            android:targetClass="dev.leshiy.ShortcutActivity" />
     </shortcut>
 </shortcuts>
