@@ -47,6 +47,14 @@ pub struct RemoteUserInfo {
     pub uri: String,
 }
 
+/// What [`ServerManager::upgrade`] left running.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UpgradeOutcome {
+    pub image_ref: String,
+    /// The Telegram proxy (`tg://proxy`) link, when the upgrade was asked to enable it.
+    pub mtproxy_link: Option<String>,
+}
+
 /// What an [`ServerManager::import_backup`] merge did, so the UI can say so.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct ImportReport {
@@ -265,8 +273,12 @@ impl ServerManager {
     }
 
     /// Pull a new image and recreate the container. Users, keys and client URIs survive — they
-    /// live on the data volume, which only `teardown(purge: true)` removes. Returns the image
-    /// ref now running.
+    /// live on the data volume, which only `teardown(purge: true)` removes.
+    ///
+    /// With `enable_mtproxy`, the recreated server is then also made to serve the Telegram proxy
+    /// (ADR-0035) — a no-op if it already does — and the outcome carries its link. That step runs
+    /// after the record is saved: by then the new container is running, so a Telegram failure
+    /// must not leave the vault naming the old image.
     ///
     /// This is not the same as re-provisioning: `engine::provision` reuses an already-running
     /// container by design, so it reports every step Done and changes nothing. Upgrade is the
@@ -276,12 +288,13 @@ impl ServerManager {
         server_id: String,
         image_ref: Option<String>,
         sudo_password: Option<String>,
+        enable_mtproxy: bool,
         listener: Box<dyn ProvisionListener>,
-    ) -> Result<String, BridgeError> {
+    ) -> Result<UpgradeOutcome, BridgeError> {
         let mut rec = self.record(&server_id)?;
         let image = resolve_image_ref(image_ref.as_deref());
         let rt = Self::rt()?;
-        rt.block_on(async {
+        let mtproxy_link = rt.block_on(async {
             emit(&*listener, "Connect", "Started", &rec.host);
             let mut t = Self::connect(&rec, sudo_password).await?;
             emit(&*listener, "Connect", "Done", "");
@@ -293,14 +306,26 @@ impl ServerManager {
                 });
             })
             .await
-            .map_err(err)
+            .map_err(err)?;
+            // Only reached when the new container is actually up: `engine::upgrade` leaves the
+            // record untouched on failure, so the vault can never name a version that isn't running.
+            emit(&*listener, "Persist", "Started", "");
+            self.persist(rec.clone())?;
+            emit(&*listener, "Persist", "Done", "");
+            if !enable_mtproxy {
+                return Ok(None);
+            }
+            emit(&*listener, "Telegram", "Started", "");
+            let link = engine::mtproxy_link(&mut t, &rec, true)
+                .await
+                .map_err(err)?;
+            emit(&*listener, "Telegram", "Done", "");
+            Ok::<_, BridgeError>(Some(link))
         })?;
-        // Only reached when the new container is actually up: `engine::upgrade` leaves the record
-        // untouched on failure, so the vault can never name a version that isn't running.
-        emit(&*listener, "Persist", "Started", "");
-        self.persist(rec)?;
-        emit(&*listener, "Persist", "Done", "");
-        Ok(image)
+        Ok(UpgradeOutcome {
+            image_ref: image,
+            mtproxy_link,
+        })
     }
 
     /// Stop + remove the server (optionally purge its data volume), then drop it from the vault.
@@ -497,7 +522,7 @@ mod tests {
     fn upgrade_an_unknown_server_fails_before_it_dials_anything() {
         let sm = ServerManager::open(tmp(), "pass".into()).unwrap();
         let e = sm
-            .upgrade("nope".into(), None, None, Box::new(NullListener))
+            .upgrade("nope".into(), None, None, false, Box::new(NullListener))
             .unwrap_err();
         assert!(matches!(e, BridgeError::NoSuchProfile));
     }
