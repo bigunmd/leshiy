@@ -289,6 +289,7 @@ pub async fn run(cmd: crate::cli::RemoteCmd, interactive: bool) -> Result<()> {
             user_label,
             role,
             downstream,
+            mtproxy,
         } => {
             let flags = crate::remote_wizard::ProvisionFlags {
                 host,
@@ -428,7 +429,7 @@ pub async fn run(cmd: crate::cli::RemoteCmd, interactive: bool) -> Result<()> {
                 downstream: downstream_id,
                 sudo: use_sudo,
                 dns_override: plan.dns.clone(),
-                mtproxy: false,
+                mtproxy,
             };
 
             let mut transport = RusshTransport::new();
@@ -461,6 +462,15 @@ pub async fn run(cmd: crate::cli::RemoteCmd, interactive: bool) -> Result<()> {
                         render_client(&uri);
                     }
                 }
+            }
+            if mtproxy {
+                let link = engine::mtproxy_link(&mut transport, &rec, true)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("telegram proxy: {e}"))?;
+                crate::ui::eline(&crate::ui::heading(
+                    "Telegram proxy — open this link in Telegram:",
+                ));
+                println!("{link}"); // stdout: the tg://proxy link
             }
             Ok(())
         }
@@ -569,6 +579,25 @@ pub async fn run(cmd: crate::cli::RemoteCmd, interactive: bool) -> Result<()> {
                     Ok(())
                 }
             }
+        }
+        RemoteCmd::Mtproxy { server, enable } => {
+            let (_pass, vault) = open_vault(interactive, false)?;
+            let server = pick_server(&vault, server, interactive, "Server for the Telegram proxy")?;
+            let rec = vault
+                .get(&server)
+                .ok_or_else(|| anyhow::anyhow!("no server {server}"))?;
+            let mut transport = connect_pinned(rec).await?;
+            let link = engine::mtproxy_link(&mut transport, rec, enable)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e} (pass --enable to turn it on)"))?;
+            println!("{link}"); // stdout: the tg://proxy link
+            let mut c = crate::wizard::CommandLine::new("leshiy remote mtproxy");
+            c.arg(&server);
+            if enable {
+                c.arg("--enable");
+            }
+            echo_equivalent(interactive, &c);
+            Ok(())
         }
         RemoteCmd::Status { server } => {
             let (_pass, vault) = open_vault(interactive, false)?;

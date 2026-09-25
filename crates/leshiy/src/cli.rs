@@ -78,6 +78,10 @@ pub enum Cmd {
         /// The URI must include a `quic=` endpoint (e.g. `quic=host:port&qsni=…`).
         #[arg(long)]
         connector: Option<String>,
+        /// Also serve Telegram on the same port: prints a `tg://proxy` link for the Telegram
+        /// app (MTProxy, fake-TLS). Off by default — see `leshiy mtproxy --help` for the risk.
+        #[arg(long)]
+        mtproxy: bool,
     },
     /// Run the REALITY server from a config file.
     Server {
@@ -224,6 +228,10 @@ pub enum Cmd {
         /// Exit node's `leshiy://` URI (the connector credential) — required for --role entry.
         #[arg(long)]
         exit_uri: Option<String>,
+        /// Also serve Telegram on the same port: prints a `tg://proxy` link for the Telegram
+        /// app (MTProxy, fake-TLS). Off by default — see `leshiy mtproxy --help` for the risk.
+        #[arg(long)]
+        mtproxy: bool,
     },
     /// Show service + config status for an installed server.
     Status {
@@ -294,6 +302,18 @@ pub enum Cmd {
     },
     /// Container entrypoint: build config from LESHIY_* env vars on first boot, then run.
     Boot,
+    /// Print this server's Telegram proxy (MTProxy) link, enabling it with `--enable`.
+    ///
+    /// Telegram clients using the link are served on the REALITY port; everyone else still sees
+    /// the borrowed site. Telegram's own fake-TLS handshake is fingerprinted by some DPI, so a
+    /// censor that flags it may block this server's IP — and leshiy with it.
+    Mtproxy {
+        #[arg(long, default_value = "leshiy-server.toml")]
+        config: String,
+        /// Generate a secret if the config has none. Restart the server to apply.
+        #[arg(long)]
+        enable: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -622,6 +642,10 @@ pub enum RemoteCmd {
         /// For entry/middle: the saved downstream server (id or label) to forward to.
         #[arg(long)]
         downstream: Option<String>,
+        /// Also serve Telegram on the same port and print its `tg://proxy` link (MTProxy,
+        /// fake-TLS). Off by default — see `leshiy remote mtproxy --help` for the risk.
+        #[arg(long)]
+        mtproxy: bool,
     },
     /// List saved servers.
     Ls,
@@ -632,6 +656,17 @@ pub enum RemoteCmd {
     },
     /// Show whether a saved server is running.
     Status { server: Option<String> },
+    /// Print a saved server's Telegram proxy (MTProxy) link, enabling it with `--enable`.
+    ///
+    /// Telegram clients using the link are served on the REALITY port; everyone else still sees
+    /// the borrowed site. Telegram's own fake-TLS handshake is fingerprinted by some DPI, so a
+    /// censor that flags it may block this server's IP — and leshiy with it.
+    Mtproxy {
+        server: Option<String>,
+        /// Enable it if the server has none (restarts the server container).
+        #[arg(long)]
+        enable: bool,
+    },
     /// Upgrade a saved server: pull a new image and recreate its container.
     ///
     /// Re-running `provision` does NOT do this — it reuses an already-running container by

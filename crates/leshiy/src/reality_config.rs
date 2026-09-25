@@ -61,6 +61,10 @@ pub struct RealityServerConfig {
     /// static "It works!" page is used.
     #[serde(default)]
     pub masquerade_origin: Option<String>,
+    /// Telegram MTProxy secret (32 hex chars). When set, Telegram clients holding the matching
+    /// `tg://proxy` link are served on the REALITY listener (ADR-0035).
+    #[serde(default)]
+    pub mtproxy_secret: Option<String>,
 }
 
 impl RealityServerConfig {
@@ -88,7 +92,12 @@ impl RealityServerConfig {
             max_time_diff: Duration::from_secs(self.max_time_diff_secs),
             dest: self.dest.clone(),
             dest_by_sni: self.dest_by_sni.clone(),
-            mtproxy: None,
+            mtproxy: self
+                .mtproxy_secret
+                .as_deref()
+                .map(leshiy_reality::mtproxy::MtProxySecret::from_hex)
+                .transpose()
+                .context("bad mtproxy_secret")?,
         })
     }
 }
@@ -119,11 +128,35 @@ mod tests {
             connector: None,
             allow_private_egress: false,
             masquerade_origin: None,
+            mtproxy_secret: None,
         };
         let ac = c.to_auth_config().unwrap();
+        assert!(ac.mtproxy.is_none());
         assert_eq!(ac.dest, "www.microsoft.com:443");
         assert!(ac.sni_allowed("www.microsoft.com"));
         assert!(ac.short_id_allowed(&[1, 2, 3, 4, 0, 0, 0, 0]));
         assert_eq!(*ac.static_secret, [5u8; 32]);
+    }
+
+    #[test]
+    fn mtproxy_secret_is_optional_and_parsed() {
+        let base = r#"
+listen = "0.0.0.0:443"
+dest = "www.microsoft.com:443"
+server_names = ["www.microsoft.com"]
+static_private_key_b64 = "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU"
+short_ids = []
+max_time_diff_secs = 120
+"#;
+        let legacy: RealityServerConfig = toml::from_str(base).unwrap();
+        assert!(legacy.to_auth_config().unwrap().mtproxy.is_none());
+
+        let with = format!("{base}mtproxy_secret = \"00112233445566778899aabbccddeeff\"\n");
+        let c: RealityServerConfig = toml::from_str(&with).unwrap();
+        assert!(c.to_auth_config().unwrap().mtproxy.is_some());
+
+        let bad = format!("{base}mtproxy_secret = \"nothex\"\n");
+        let c: RealityServerConfig = toml::from_str(&bad).unwrap();
+        assert!(c.to_auth_config().is_err());
     }
 }

@@ -72,6 +72,7 @@ pub struct QuickstartOpts<'a> {
     pub summary_json: bool,
     pub role: crate::cli::Role,
     pub exit_uri: Option<&'a str>,
+    pub mtproxy: bool,
 }
 
 pub async fn run(opts: QuickstartOpts<'_>) -> Result<()> {
@@ -117,6 +118,7 @@ pub async fn run(opts: QuickstartOpts<'_>) -> Result<()> {
         quic_cert: None,
         quic_key: None,
         connector,
+        mtproxy: opts.mtproxy,
     })?;
     // 3. Show the QR for phones (or the connector credential for exit role) — humans only.
     if !opts.summary_json {
@@ -142,6 +144,7 @@ pub async fn run(opts: QuickstartOpts<'_>) -> Result<()> {
             "uri": out.uri,
             "listen": out.listen,
             "quic_listen": out.quic_listen,
+            "mtproxy_link": out.mtproxy_link,
         });
         println!("{summary}");
     }

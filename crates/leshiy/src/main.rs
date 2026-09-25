@@ -4,6 +4,7 @@ mod client_wizard;
 mod elevate;
 mod host;
 mod lifecycle;
+mod mtproxy_cli;
 mod quickstart;
 mod reality_config;
 mod remote_cli;
@@ -221,6 +222,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             quic_cert,
             quic_key,
             connector,
+            mtproxy,
         } => {
             let plan = server_plan(
                 server_wizard::ServerFlags {
@@ -256,6 +258,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 quic_cert: plan.quic_cert.as_deref(),
                 quic_key: plan.quic_key.as_deref(),
                 connector: plan.exit_uri.as_deref(),
+                mtproxy,
             })?;
         }
         cli::Cmd::Quickstart {
@@ -270,6 +273,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             summary_json,
             role,
             exit_uri,
+            mtproxy,
         } => {
             let plan = server_plan(
                 server_wizard::ServerFlags {
@@ -302,10 +306,14 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 summary_json,
                 role: plan.role,
                 exit_uri: plan.exit_uri.as_deref(),
+                mtproxy,
             })
             .await?
         }
         cli::Cmd::Server { config } => server::run(&config).await?,
+        cli::Cmd::Mtproxy { config, enable } => {
+            println!("{}", mtproxy_cli::link(&config, enable)?);
+        }
         cli::Cmd::Client {
             uri,
             uri_file,

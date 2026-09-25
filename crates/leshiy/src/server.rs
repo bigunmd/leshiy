@@ -24,6 +24,8 @@ pub struct InitOutput {
     pub uri: String,
     pub listen: String,
     pub quic_listen: Option<String>,
+    /// `tg://proxy` link when the Telegram MTProxy was enabled.
+    pub mtproxy_link: Option<String>,
 }
 
 /// Options for `server-init`. Bundles all the CLI args into one struct to avoid
@@ -39,6 +41,8 @@ pub struct InitOptions<'a> {
     pub quic_key: Option<&'a str>,
     /// Optional exit-node `leshiy://` URI (must have a `quic=` endpoint).
     pub connector: Option<&'a str>,
+    /// Also serve Telegram MTProxy clients on the REALITY listener (ADR-0035).
+    pub mtproxy: bool,
 }
 
 /// Ensure a borrowed-site `dest` carries an explicit port, defaulting to 443.
@@ -94,6 +98,7 @@ pub fn init(opts: InitOptions<'_>) -> Result<InitOutput> {
         quic_cert,
         quic_key,
         connector,
+        mtproxy,
     } = opts;
     // Borrowed sites are host:port; default the port so the REALITY server can
     // dial dest even when the operator passed a bare hostname (`--dest host`).
@@ -215,6 +220,7 @@ pub fn init(opts: InitOptions<'_>) -> Result<InitOutput> {
         None
     };
 
+    let mtproxy_secret = mtproxy.then(leshiy_reality::mtproxy::MtProxySecret::generate);
     let cfg = RealityServerConfig {
         listen,
         dest: dest.to_string(),
@@ -264,23 +270,34 @@ pub fn init(opts: InitOptions<'_>) -> Result<InitOutput> {
             .and_then(|q| q.cert_sha256.as_ref().map(hex::encode)),
         connector: connector.map(|s| s.to_string()),
         allow_private_egress: false,
+        mtproxy_secret: mtproxy_secret.as_ref().map(|s| s.to_hex()),
     };
     let uri = format_reality_uri_full(&pk, host, &sni, &short_id, quic_endpoint.as_ref());
     write_secret_file(out, &toml::to_string_pretty(&cfg)?)?;
     crate::ui::ok(&format!("REALITY server config written to {out}"));
     crate::ui::eline(&crate::ui::heading("Share this URI with clients:"));
     println!("{uri}"); // stdout: raw URI (script-consumable)
+    let mtproxy_link = mtproxy_secret
+        .as_ref()
+        .map(|s| leshiy_reality::mtproxy::tg_link(host, s, &sni));
+    if let Some(link) = &mtproxy_link {
+        crate::ui::eline(&crate::ui::heading(
+            "Telegram proxy — open this link in Telegram:",
+        ));
+        crate::ui::eline(link);
+    }
     Ok(InitOutput {
         config_path: out.to_string(),
         uri,
         listen: cfg.listen.clone(),
         quic_listen: cfg.quic_listen.clone(),
+        mtproxy_link,
     })
 }
 
 /// Write a config containing the static key with owner-only perms (0600).
 /// Uses `create_new` so it never clobbers an existing server identity.
-fn write_secret_file(path: &str, contents: &str) -> Result<()> {
+pub(crate) fn write_secret_file(path: &str, contents: &str) -> Result<()> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -327,6 +344,8 @@ pub struct BootConfig {
     pub quic_domain: Option<String>,
     pub config: String,
     pub connector: Option<String>,
+    /// `LESHIY_MTPROXY=1`: enable the Telegram MTProxy on first boot.
+    pub mtproxy: bool,
 }
 
 /// Read boot config from an env accessor. `LESHIY_HOST` and `LESHIY_DEST` are
@@ -342,6 +361,7 @@ pub fn resolve_boot_config(get: impl Fn(&str) -> Option<String>) -> Result<BootC
         quic_domain: get("LESHIY_QUIC_DOMAIN"),
         config: get("LESHIY_CONFIG").unwrap_or_else(|| "/etc/leshiy/server.toml".to_string()),
         connector: get("LESHIY_CONNECTOR"),
+        mtproxy: get("LESHIY_MTPROXY").is_some_and(|v| matches!(v.trim(), "1" | "true" | "yes")),
     })
 }
 
@@ -362,6 +382,7 @@ pub async fn boot() -> Result<()> {
             quic_cert: None,
             quic_key: None,
             connector: c.connector.as_deref(),
+            mtproxy: c.mtproxy,
         })?;
     }
     run(&c.config).await
@@ -561,6 +582,9 @@ pub async fn run(config: &str) -> Result<()> {
     }
 
     tracing::info!(listen = %cfg.listen, dest = %cfg.dest, sock = %sock_path, "leshiy REALITY server up");
+    if auth.mtproxy.is_some() {
+        tracing::info!("Telegram MTProxy enabled on the REALITY listener");
+    }
 
     run_reality_server(listener, auth, user_store, egress, cert)
         .await
@@ -612,6 +636,17 @@ mod boot_tests {
         assert_eq!(c.listen, "0.0.0.0:443");
         assert_eq!(c.config, "/etc/leshiy/server.toml");
         assert!(c.quic_listen.is_none());
+        assert!(!c.mtproxy);
+    }
+
+    #[test]
+    fn resolve_boot_reads_mtproxy_flag() {
+        let m = HashMap::from([
+            ("LESHIY_HOST", "h:443"),
+            ("LESHIY_DEST", "d:443"),
+            ("LESHIY_MTPROXY", "1"),
+        ]);
+        assert!(resolve_boot_config(env(&m)).unwrap().mtproxy);
     }
 
     #[test]
@@ -681,12 +716,43 @@ mod tests {
             quic_cert: None,
             quic_key: None,
             connector: None,
+            mtproxy: false,
         })
         .unwrap();
         assert!(res.uri.starts_with("leshiy://"));
         assert_eq!(res.listen, "0.0.0.0:443");
         assert!(res.quic_listen.is_none());
         assert_eq!(res.config_path, out_s);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn init_with_mtproxy_persists_secret_and_returns_link() {
+        let dir = std::env::temp_dir().join(format!("leshiy-mtp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("server.toml");
+        let res = init(InitOptions {
+            host: "203.0.113.5:443",
+            dest: "www.microsoft.com:443",
+            listen: None,
+            out: out.to_str().unwrap(),
+            quic_listen: None,
+            quic_domain: None,
+            quic_cert: None,
+            quic_key: None,
+            connector: None,
+            mtproxy: true,
+        })
+        .unwrap();
+        let cfg: RealityServerConfig =
+            toml::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        let secret = cfg.mtproxy_secret.expect("secret persisted");
+        let link = res.mtproxy_link.expect("link returned");
+        let sni_hex = hex::encode("www.microsoft.com");
+        assert_eq!(
+            link,
+            format!("tg://proxy?server=203.0.113.5&port=443&secret=ee{secret}{sni_hex}")
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -757,6 +823,7 @@ mod tests {
             quic_cert: None,
             quic_key: None,
             connector: None,
+            mtproxy: false,
         })
         .unwrap();
         // The client URI must advertise the PUBLIC host, never the all-interfaces bind addr.
@@ -801,6 +868,7 @@ mod tests {
             quic_cert: None,
             quic_key: None,
             connector: None,
+            mtproxy: false,
         })
         .unwrap();
         assert!(
