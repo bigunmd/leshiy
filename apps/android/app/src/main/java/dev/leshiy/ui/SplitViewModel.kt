@@ -6,6 +6,7 @@ import dev.leshiy.LeshiyVpnService
 import dev.leshiy.data.PerAppMode
 import dev.leshiy.data.SplitKind
 import dev.leshiy.data.SplitStore
+import dev.leshiy.data.parseRuleEntries
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -39,11 +40,28 @@ class SplitViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Add an IP/CIDR or a domain, auto-detected. Returns false if it's neither. */
-    fun addEntry(input: String): Boolean = addQuietly(input).also { if (it) rulesChanged() }
+    fun addEntry(input: String): Boolean {
+        if (store.addCidr(input)) {
+            _cidrs.value = store.cidrs()
+        } else if (store.addDomain(input)) {
+            _domains.value = store.domains()
+        } else {
+            return false
+        }
+        rulesChanged()
+        return true
+    }
 
-    /** Add many entries (a rule file), applying them to the tunnel once. Returns how many were valid. */
-    fun importEntries(lines: Sequence<String>): Int =
-        lines.count { addQuietly(it) }.also { if (it > 0) rulesChanged() }
+    /** Add a rule file in one write, applying it to the tunnel once. Returns how many rules were valid. */
+    fun importEntries(lines: Sequence<String>): Int {
+        val (cidrs, domains) = parseRuleEntries(lines)
+        if (cidrs.isEmpty() && domains.isEmpty()) return 0
+        store.addAll(cidrs, domains)
+        _cidrs.value = store.cidrs()
+        _domains.value = store.domains()
+        rulesChanged()
+        return cidrs.size + domains.size
+    }
 
     fun removeCidr(cidr: String) {
         store.removeCidr(cidr)
@@ -55,18 +73,6 @@ class SplitViewModel(app: Application) : AndroidViewModel(app) {
         store.removeDomain(domain)
         _domains.value = store.domains()
         rulesChanged()
-    }
-
-    private fun addQuietly(input: String): Boolean {
-        if (store.addCidr(input)) {
-            _cidrs.value = store.cidrs()
-            return true
-        }
-        if (store.addDomain(input)) {
-            _domains.value = store.domains()
-            return true
-        }
-        return false
     }
 
     /** Rules only shape the tunnel while the network scheme is active and not OFF. */

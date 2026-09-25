@@ -44,6 +44,26 @@ fun cidrParts(input: String): Pair<String, Int>? {
     return addr to prefix
 }
 
+/**
+ * Sort rule-file lines into normalized CIDRs and domains (the same normalisation as
+ * [SplitStore.addCidr] / [SplitStore.addDomain]); invalid lines and duplicates are dropped. Pure —
+ * unit-tested.
+ */
+fun parseRuleEntries(lines: Sequence<String>): Pair<Set<String>, Set<String>> {
+    val cidrs = LinkedHashSet<String>()
+    val domains = LinkedHashSet<String>()
+    for (line in lines) {
+        val parts = cidrParts(line)
+        if (parts != null) {
+            cidrs += "${parts.first}/${parts.second}"
+        } else {
+            val domain = line.trim().lowercase()
+            if (isValidDomain(domain)) domains += domain
+        }
+    }
+    return cidrs to domains
+}
+
 /** The DNS server the VPN interface hands to apps. */
 const val VPN_DNS = "1.1.1.1"
 
@@ -159,6 +179,18 @@ class SplitStore(context: Context) {
         val next = domains().toMutableSet().apply { add(d) }
         prefs.edit().putStringSet("domains", next).apply()
         return true
+    }
+
+    /**
+     * Merge a whole rule file in one write. Adding line by line rewrote the full set per line —
+     * quadratic — and queued one pending write each, which Android flushes on the main thread
+     * when the app is backgrounded.
+     */
+    fun addAll(newCidrs: Set<String>, newDomains: Set<String>) {
+        prefs.edit()
+            .putStringSet("cidrs", cidrs().toSet() + newCidrs)
+            .putStringSet("domains", domains().toSet() + newDomains)
+            .apply()
     }
 
     fun removeDomain(domain: String) {
