@@ -30,3 +30,5 @@ uniffi = { workspace = true, features = ["cli"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+# `start_paused` virtual time; `test-util` is not part of the workspace feature set.
+tokio = { workspace = true, features = ["test-util"] }

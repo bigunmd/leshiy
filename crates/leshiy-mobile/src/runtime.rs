@@ -39,22 +39,30 @@ pub async fn run_engine(
         let _ = state_tx.send(ConnState::Failed);
         std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
     })?;
-    let server_ip = match tokio::net::lookup_host(&parsed.server_addr)
-        .await
-        .ok()
-        .and_then(|mut it| it.next())
-    {
-        Some(a) => a.ip(),
-        None => {
-            let _ = state_tx.send(ConnState::Failed);
-            return Err(std::io::Error::other("no address for server"));
-        }
-    };
     let pref = TransportPref::Auto;
-    let dial = RealTransport.dial(&uri, pref).await;
-    let _ = state_tx.send(next_on_dial_result(dial.is_ok()));
-    let seed: Arc<dyn leshiy_client::Tunnel> =
-        Arc::from(dial.map_err(|e| std::io::Error::other(format!("dial: {e}")))?);
+    // The host has already routed traffic into the interface, so giving up here would blackhole
+    // the device until someone noticed. Keep trying instead — the server may be briefly down, or
+    // the phone not yet online (a boot-time connect) — publishing Failed once so the UI can say
+    // so, and dialing again at once when the host reports a network change.
+    let (server_addr, uri_ref) = (&parsed.server_addr, &uri);
+    let (server_ip, seed) = retry_until(
+        || async move {
+            let ip = tokio::net::lookup_host(server_addr)
+                .await
+                .ok()?
+                .next()?
+                .ip();
+            let tunnel = RealTransport.dial(uri_ref, pref).await.ok()?;
+            Some((ip, Arc::<dyn leshiy_client::Tunnel>::from(tunnel)))
+        },
+        ReconnectParams::default(),
+        &kick,
+        || {
+            let _ = state_tx.send(next_on_dial_result(false));
+        },
+    )
+    .await;
+    let _ = state_tx.send(next_on_dial_result(true));
     // `spawn_with_kick`, not `spawn`: the VpnService watches the default network and tells us the
     // moment it changes, which the tunnel itself can only discover by timing out.
     let tunnel = ReconnectingTunnel::spawn_with_kick(
@@ -107,6 +115,34 @@ pub async fn run_engine(
     result
 }
 
+/// Run `attempt` until it yields a value, sleeping with capped exponential backoff between
+/// failures (`on_fail` runs after each). A `kick` cuts the current wait short. Never gives up:
+/// the caller is torn down from outside (runtime shutdown) when the user stops the tunnel.
+async fn retry_until<T, F, Fut>(
+    mut attempt: F,
+    params: ReconnectParams,
+    kick: &Notify,
+    mut on_fail: impl FnMut(),
+) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    let mut failures = 0u32;
+    loop {
+        if let Some(value) = attempt().await {
+            return value;
+        }
+        on_fail();
+        let delay = leshiy_client::backoff_delay(failures, params.base, params.max);
+        failures = failures.saturating_add(1);
+        tokio::select! {
+            () = tokio::time::sleep(delay) => {}
+            () = kick.notified() => {}
+        }
+    }
+}
+
 #[cfg(test)]
 pub fn sample_uri_for_test() -> String {
     leshiy_reality::config::format_reality_uri(
@@ -115,4 +151,68 @@ pub fn sample_uri_for_test() -> String {
         "www.microsoft.com",
         &[1u8, 2, 3, 4, 0, 0, 0, 0],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_until;
+    use leshiy_client::ReconnectParams;
+    use std::cell::Cell;
+    use std::time::Duration;
+    use tokio::sync::Notify;
+    use tokio::time::Instant;
+
+    fn params() -> ReconnectParams {
+        ReconnectParams {
+            base: Duration::from_millis(500),
+            max: Duration::from_secs(30),
+            hold: Duration::from_secs(5),
+        }
+    }
+
+    /// A failed first dial used to end the engine, leaving the VPN interface up with nothing
+    /// reading it: every packet blackholed until the user noticed and disconnected.
+    #[tokio::test(start_paused = true)]
+    async fn keeps_retrying_with_backoff_until_it_connects() {
+        let attempts = Cell::new(0);
+        let failures = Cell::new(0);
+        let started = Instant::now();
+        let got = retry_until(
+            || {
+                attempts.set(attempts.get() + 1);
+                let n = attempts.get();
+                async move { (n == 4).then_some(n) }
+            },
+            params(),
+            &Notify::new(),
+            || failures.set(failures.get() + 1),
+        )
+        .await;
+        assert_eq!((got, failures.get()), (4, 3));
+        // 0.5 + 1 + 2 s of exponential backoff between the four attempts.
+        assert_eq!(started.elapsed(), Duration::from_millis(3500));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_network_change_retries_at_once() {
+        let kick = Notify::new();
+        kick.notify_one(); // the host saw the default network change mid-backoff
+        let attempts = Cell::new(0);
+        let started = Instant::now();
+        retry_until(
+            || {
+                attempts.set(attempts.get() + 1);
+                let n = attempts.get();
+                async move { (n == 2).then_some(()) }
+            },
+            ReconnectParams {
+                base: Duration::from_secs(60),
+                ..params()
+            },
+            &kick,
+            || {},
+        )
+        .await;
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
 }
