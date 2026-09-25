@@ -14,6 +14,7 @@ import android.net.IpPrefix
 import android.net.Network
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import android.graphics.drawable.Icon
 import android.os.SystemClock
 import android.util.Log
@@ -81,7 +82,8 @@ class LeshiyVpnService : VpnService() {
         // Foreground promptly — required within 5s when launched via
         // startForegroundService (QS tile), and before any potentially slow work.
         LangState.init(applicationContext)
-        startForeground(NOTIFICATION_ID, buildNotification(activeProfileName()))
+        profileName = activeProfileName()
+        startForeground(NOTIFICATION_ID, buildNotification())
 
         // Explicit URI from the UI, or (always-on / boot / tile) the persisted active profile.
         val uri = intent?.getStringExtra(EXTRA_URI)
@@ -206,20 +208,22 @@ class LeshiyVpnService : VpnService() {
 
     /**
      * Refresh the ongoing notification every second while connected, so it shows live up/down and
-     * session duration. IMPORTANCE_LOW, so these silent updates never buzz or interrupt.
+     * session duration. IMPORTANCE_LOW, so these silent updates never buzz or interrupt. Built and
+     * posted off the main thread (it shares a process with the UI), and skipped while the screen
+     * is off, where nobody can see it.
      */
     private fun startNotificationUpdates() {
         notifJob?.cancel()
-        notifJob = scope.launch {
+        val nm = getSystemService(NotificationManager::class.java) ?: return
+        val power = getSystemService(PowerManager::class.java)
+        notifJob = scope.launch(Dispatchers.Default) {
             while (true) {
                 delay(NOTIF_UPDATE_MS)
+                if (power?.isInteractive == false) continue
                 val st = TunnelRepository.status.value ?: continue
                 if (st.state != ConnState.CONNECTED) continue
                 val seconds = if (connectedSince > 0L) (SystemClock.elapsedRealtime() - connectedSince) / 1000 else 0L
-                runCatching {
-                    getSystemService(NotificationManager::class.java)
-                        ?.notify(NOTIFICATION_ID, buildNotification(activeProfileName(), st.upBytes, st.downBytes, seconds))
-                }
+                runCatching { nm.notify(NOTIFICATION_ID, buildNotification(st.upBytes, st.downBytes, seconds)) }
             }
         }
     }
@@ -512,18 +516,44 @@ class LeshiyVpnService : VpnService() {
                 .list().firstOrNull { it.isActive }?.name
         }.getOrNull()?.takeIf { it.isNotBlank() }
 
+    /**
+     * The session's profile name, read once per start rather than on every notification tick —
+     * and it is the profile the tunnel actually dialed, even if another is activated meanwhile.
+     */
+    @Volatile
+    private var profileName: String? = null
+
+    private val openAppIntent by lazy {
+        PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    private val stopIntent by lazy {
+        PendingIntent.getService(
+            this,
+            1,
+            Intent(this, LeshiyVpnService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        getSystemService(NotificationManager::class.java)?.createNotificationChannel(
+            NotificationChannel(CHANNEL_ID, "Leshiy VPN", NotificationManager.IMPORTANCE_LOW),
+        )
+    }
+
     private fun buildNotification(
-        profileName: String?,
         up: ULong = 0u,
         down: ULong = 0u,
         seconds: Long = -1L,
     ): Notification {
-        val mgr = getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            mgr.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "Leshiy VPN", NotificationManager.IMPORTANCE_LOW),
-            )
-        }
+        val profileName = profileName
         val s = stringsFor(LangState.lang.value)
         // With live stats (seconds >= 0): profile name in the title, throughput + duration in the
         // text. Without (the initial foreground notification): the plain connected line.
@@ -533,28 +563,16 @@ class LeshiyVpnService : VpnService() {
         } else {
             profileName?.let { String.format(s.notifConnected, it) } ?: s.notifConnectedPlain
         }
-        val openApp = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val stop = PendingIntent.getService(
-            this,
-            1,
-            Intent(this, LeshiyVpnService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_qs_leshiy)
-            .setContentIntent(openApp)
+            .setContentIntent(openAppIntent)
             .addAction(
                 Notification.Action.Builder(
                     Icon.createWithResource(this, R.drawable.ic_qs_leshiy),
                     s.notifDisconnect,
-                    stop,
+                    stopIntent,
                 ).build(),
             )
             .setOngoing(true)
@@ -581,6 +599,9 @@ class LeshiyVpnService : VpnService() {
         private const val NOTIFICATION_ID = 1
         private const val TAG = "LeshiyVpnService"
 
+        /** How often the ongoing notification's live up/down + duration refresh while connected. */
+        private const val NOTIF_UPDATE_MS = 1000L
+
         /**
          * How often domain rules are re-resolved. Well above a typical DNS TTL (60–300s) on
          * purpose: chasing every rotation would re-establish the interface constantly, and each
@@ -588,9 +609,6 @@ class LeshiyVpnService : VpnService() {
          * than churns, a slow cadence still converges — it just takes longer to discover a large
          * CDN pool. Matches the desktop resolver's REFRESH.
          */
-        /** How often the ongoing notification's live up/down + duration refresh while connected. */
-        private const val NOTIF_UPDATE_MS = 1000L
-
         private const val DOMAIN_REFRESH_MS = 30 * 60 * 1000L
 
         /** Retry gap while no domain rule has resolved yet (tunnel still settling, resolver slow). */
