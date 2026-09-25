@@ -15,13 +15,22 @@ data class PerAppPlan(val allowed: List<String>, val disallowed: List<String>)
  * - INCLUDE: only the listed apps are tunneled (`addAllowedApplication`), self dropped. An empty
  *   allow-list would route nothing, so it falls back to OFF semantics.
  * - EXCLUDE: all apps except the listed (plus self) are tunneled (`addDisallowedApplication`).
+ *
+ * Packages failing [isInstalled] are dropped first: the Builder rejects them, and an INCLUDE list
+ * of only since-uninstalled apps would otherwise allow nothing — tunneling every app, self included.
  */
-fun perAppPlan(mode: PerAppMode, packages: Set<String>, selfPkg: String): PerAppPlan = when (mode) {
-    PerAppMode.OFF -> PerAppPlan(emptyList(), listOf(selfPkg))
-    PerAppMode.INCLUDE -> {
-        val allowed = packages.filter { it != selfPkg }
-        if (allowed.isEmpty()) PerAppPlan(emptyList(), listOf(selfPkg))
-        else PerAppPlan(allowed, emptyList())
+fun perAppPlan(
+    mode: PerAppMode,
+    packages: Set<String>,
+    selfPkg: String,
+    isInstalled: (String) -> Boolean = { true },
+): PerAppPlan {
+    val present = packages.filter { it != selfPkg && isInstalled(it) }
+    return when (mode) {
+        PerAppMode.OFF -> PerAppPlan(emptyList(), listOf(selfPkg))
+        PerAppMode.INCLUDE ->
+            if (present.isEmpty()) PerAppPlan(emptyList(), listOf(selfPkg))
+            else PerAppPlan(present, emptyList())
+        PerAppMode.EXCLUDE -> PerAppPlan(emptyList(), present + selfPkg)
     }
-    PerAppMode.EXCLUDE -> PerAppPlan(emptyList(), (packages + selfPkg).toList())
 }

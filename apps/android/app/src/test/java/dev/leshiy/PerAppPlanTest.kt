@@ -31,6 +31,22 @@ class PerAppPlanTest {
     }
 
     @Test
+    fun include_with_only_uninstalled_apps_falls_back_to_off() {
+        // Otherwise nothing is allowed, the Builder tunnels every app — ourselves included — and
+        // our own dial loops back into the tunnel.
+        val p = perAppPlan(PerAppMode.INCLUDE, setOf("com.gone"), self) { it != "com.gone" }
+        assertTrue(p.allowed.isEmpty())
+        assertEquals(listOf(self), p.disallowed)
+    }
+
+    @Test
+    fun uninstalled_apps_are_dropped() {
+        val installed: (String) -> Boolean = { it != "com.gone" }
+        assertEquals(listOf("com.a"), perAppPlan(PerAppMode.INCLUDE, setOf("com.a", "com.gone"), self, installed).allowed)
+        assertEquals(listOf("com.a", self), perAppPlan(PerAppMode.EXCLUDE, setOf("com.a", "com.gone"), self, installed).disallowed)
+    }
+
+    @Test
     fun exclude_disallows_listed_plus_self() {
         val p = perAppPlan(PerAppMode.EXCLUDE, setOf("com.a"), self)
         assertTrue(p.allowed.isEmpty())

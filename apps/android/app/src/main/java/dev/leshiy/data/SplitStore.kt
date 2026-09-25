@@ -44,6 +44,45 @@ fun cidrParts(input: String): Pair<String, Int>? {
     return addr to prefix
 }
 
+/** The DNS server the VPN interface hands to apps. */
+const val VPN_DNS = "1.1.1.1"
+
+/** What network-mode split tunnelling puts on the VPN interface. */
+data class NetRoutePlan(
+    val routes: List<Pair<String, Int>>,
+    val excludes: List<Pair<String, Int>>,
+    /** Whether the interface needs a v6 address, without which v6 routes are refused. */
+    val v6Address: Boolean,
+)
+
+/**
+ * Routes for network-mode split tunnelling. Pure — unit-tested.
+ *
+ * - INCLUDE with ranges: only those ranges — plus [VPN_DNS], or every app's lookups would leave
+ *   in plaintext beside the tunnel — are tunneled. Without any, it falls back to full tunnel.
+ * - EXCLUDE: full tunnel minus the ranges ([canExclude] = `excludeRoute`, Android 13+). A v6 range
+ *   is only excluded when v6 is captured at all ([blockV6]); otherwise it already goes direct.
+ * - OFF: full tunnel. [blockV6] additionally routes `::/0` in, so v6 cannot leak around it.
+ */
+fun netRoutePlan(
+    mode: PerAppMode,
+    cidrs: List<Pair<String, Int>>,
+    blockV6: Boolean,
+    canExclude: Boolean,
+): NetRoutePlan {
+    if (mode == PerAppMode.INCLUDE && cidrs.isNotEmpty()) {
+        val routes = cidrs + (VPN_DNS to 32)
+        return NetRoutePlan(routes.distinct(), emptyList(), v6Address = cidrs.any { ':' in it.first })
+    }
+    val full = if (blockV6) listOf("0.0.0.0" to 0, "::" to 0) else listOf("0.0.0.0" to 0)
+    val excludes = if (mode == PerAppMode.EXCLUDE && canExclude) {
+        cidrs.filter { blockV6 || ':' !in it.first }
+    } else {
+        emptyList()
+    }
+    return NetRoutePlan(full, excludes, v6Address = blockV6)
+}
+
 /**
  * Cap on accumulated domain-rule routes. Each is a route on the VPN interface and the accumulated
  * set only grows, so a pathological subscription list — or a CDN with a large address pool — must
