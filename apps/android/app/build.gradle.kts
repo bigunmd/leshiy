@@ -2,7 +2,6 @@ import java.io.File
 
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
@@ -21,7 +20,7 @@ fun versionToCode(v: String): Int {
 
 android {
     namespace = "dev.leshiy"
-    compileSdk = 35
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "dev.leshiy"
@@ -55,43 +54,40 @@ android {
         }
     }
 
+    // Built-in Kotlin takes its JVM target from targetCompatibility.
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = "17"
     }
     buildFeatures {
         compose = true
         buildConfig = true // BuildConfig.VERSION_NAME / DEBUG for the in-app updater
     }
-    // The Rust bridge .so files are staged here by scripts/build-android-jni.sh.
-    sourceSets["main"].jniLibs.srcDirs("src/main/jniLibs")
+    // The Rust bridge .so files are staged by scripts/build-android-jni.sh into src/main/jniLibs,
+    // AGP's default location — no source-set override needed.
 }
 
 dependencies {
-    implementation(platform("androidx.compose:compose-bom:2024.09.03"))
+    implementation(platform("androidx.compose:compose-bom:2026.09.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.activity:activity-compose:1.9.3")
-    implementation("androidx.core:core-ktx:1.13.1")
-    implementation("androidx.navigation:navigation-compose:2.8.5")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
-    implementation("androidx.datastore:datastore-preferences:1.1.1")
+    implementation("androidx.activity:activity-compose:1.13.0")
+    implementation("androidx.core:core-ktx:1.19.1")
+    implementation("androidx.navigation:navigation-compose:2.10.2")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
     implementation("androidx.biometric:biometric:1.1.0")
     // QR import: CameraX preview + ML Kit barcode scanning (offline).
-    implementation("androidx.camera:camera-camera2:1.3.4")
-    implementation("androidx.camera:camera-lifecycle:1.3.4")
-    implementation("androidx.camera:camera-view:1.3.4")
+    implementation("androidx.camera:camera-camera2:1.6.2")
+    implementation("androidx.camera:camera-lifecycle:1.6.2")
+    implementation("androidx.camera:camera-view:1.6.2")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
     // QR export: encode issued credential URIs to a bitmap (offline, pure-Java).
-    implementation("com.google.zxing:core:3.5.3")
+    implementation("com.google.zxing:core:3.5.4")
     // UniFFI-generated Kotlin needs the JNA runtime.
-    implementation("net.java.dev.jna:jna:5.14.0@aar")
+    implementation("net.java.dev.jna:jna:5.19.1@aar")
     testImplementation("junit:junit:4.13.2")
     // android.jar's org.json classes are stubs in JVM unit tests; this real implementation
     // shadows them so the release-JSON parsing is testable off-device.
-    testImplementation("org.json:json:20240303")
+    testImplementation("org.json:json:20260814")
 }

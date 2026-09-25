@@ -19,7 +19,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.launch
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -57,7 +59,9 @@ fun ServersScreen(
     val fastest = fastestReachable(results.mapValues { (_, v) -> (v as? Latency.Reachable)?.ms })
     // Ping when the set of servers changes (covers screen open); activating doesn't re-ping.
     androidx.compose.runtime.LaunchedEffect(profiles.map { it.id }) { latencyVm.ping(profiles) }
-    val clipboard = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
+    val context = LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     var name by remember { mutableStateOf("") }
     var uri by remember { mutableStateOf("") }
     // Absorb a QR scan into the URI field.
@@ -122,7 +126,11 @@ fun ServersScreen(
                         trailing = {
                             Row {
                                 IconBtn(LeshiyIcons.Clipboard, s.pasteClipboard, tint = Wisp) {
-                                    clipboard.getText()?.text?.trim()?.let { if (it.isNotEmpty()) uri = it }
+                                    scope.launch {
+                                        val clip = clipboard.getClipEntry()?.clipData?.takeIf { it.itemCount > 0 }
+                                        clip?.getItemAt(0)?.coerceToText(context)?.toString()?.trim()
+                                            ?.let { if (it.isNotEmpty()) uri = it }
+                                    }
                                 }
                                 IconBtn(LeshiyIcons.Qr, s.scanQr, tint = Wisp, onClick = onScan)
                             }
