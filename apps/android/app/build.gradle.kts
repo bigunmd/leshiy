@@ -63,6 +63,16 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    // One APK per ABI (each carries only its own native bridge) plus the universal one, which
+    // pre-split app versions look for when they update. The updater picks the device's ABI.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a", "x86_64")
+            isUniversalApk = true
+        }
+    }
     buildFeatures {
         compose = true
         buildConfig = true // BuildConfig.VERSION_NAME / DEBUG for the in-app updater

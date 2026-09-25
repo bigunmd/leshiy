@@ -54,6 +54,31 @@ class UpdateCheckTest {
         assertNull(selectApkAsset(listOf("SHA256SUMS", "app-release-unsigned.apk"), "1.7.0"))
     }
 
+    private val split = listOf(
+        "SHA256SUMS",
+        "leshiy_v1.14.0.apk",
+        "leshiy_v1.14.0-arm64-v8a.apk",
+        "leshiy_v1.14.0-armeabi-v7a.apk",
+        "leshiy_v1.14.0-x86_64.apk",
+    )
+
+    @Test
+    fun `picks the split apk for the device's preferred abi`() {
+        assertEquals(
+            "leshiy_v1.14.0-arm64-v8a.apk",
+            selectApkAsset(split, "1.14.0", listOf("arm64-v8a", "armeabi-v7a", "armeabi")),
+        )
+        assertEquals("leshiy_v1.14.0-x86_64.apk", selectApkAsset(split, "1.14.0", listOf("x86_64", "x86")))
+    }
+
+    @Test
+    fun `falls back to the universal apk, never another abi's split`() {
+        assertEquals("leshiy_v1.14.0.apk", selectApkAsset(split, "1.14.0", listOf("riscv64")))
+        assertEquals("leshiy_v1.14.0.apk", selectApkAsset(split, "1.14.0"))
+        assertNull(selectApkAsset(split - "leshiy_v1.14.0.apk", "1.14.0", listOf("riscv64")))
+        assertNull(selectApkAsset(listOf("leshiy_v1.14.0-arm64-v8a-unsigned.apk"), "1.14.0", listOf("arm64-v8a")))
+    }
+
     // --- release list parsing ---
 
     private fun release(

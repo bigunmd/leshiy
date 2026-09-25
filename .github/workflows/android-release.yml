@@ -66,12 +66,15 @@ jobs:
           VER="${GITHUB_REF_NAME#android-}"   # android-v1.7.0 → v1.7.0
           # Rename before checksumming so SHA256SUMS lists the published filenames
           # (the in-app updater verifies the APK against its SHA256SUMS entry by name).
-          # Signed → leshiy_vX.Y.Z.apk; unsigned (no keystore) → leshiy_vX.Y.Z-unsigned.apk.
+          # ABI splits: app-<abi>-release.apk → leshiy_vX.Y.Z-<abi>.apk, and the universal
+          # app-universal-release.apk → leshiy_vX.Y.Z.apk (the name pre-split apps update to).
+          # Unsigned (no keystore) builds get an -unsigned suffix the updater never offers.
           find apps/android/app/build/outputs/apk/release -name "*.apk" | while read -r apk; do
-            case "$(basename "$apk")" in
-              *-unsigned*) cp "$apk" "dist/leshiy_${VER}-unsigned.apk" ;;
-              *)           cp "$apk" "dist/leshiy_${VER}.apk" ;;
-            esac
+            base="$(basename "$apk" .apk)"          # app-arm64-v8a-release[-unsigned]
+            abi="${base#app-}"; abi="${abi%%-release*}"
+            [ "$abi" = "universal" ] && abi="" || abi="-$abi"
+            case "$base" in *-unsigned) unsigned="-unsigned" ;; *) unsigned="" ;; esac
+            cp "$apk" "dist/leshiy_${VER}${abi}${unsigned}.apk"
           done
           ( cd dist && sha256sum *.apk > SHA256SUMS )
           ls -la dist
@@ -117,7 +120,7 @@ jobs:
           # releases/latest install URLs 404 once an Android release is published.
           make_latest: false
           name: Leshiy Android ${{ github.ref_name }}
-          body: "Native Android APK for ${{ github.ref_name }} (universal). Kotlin/Compose app."
+          body: "Native Android APKs for ${{ github.ref_name }}: one per ABI (arm64-v8a for most phones, armeabi-v7a, x86_64) and a universal leshiy_vX.Y.Z.apk. Kotlin/Compose app."
           files: |
             dist/*.apk
             dist/SHA256SUMS

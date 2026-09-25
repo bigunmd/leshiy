@@ -2,6 +2,7 @@ package dev.leshiy.update
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import androidx.core.content.FileProvider
 import dev.leshiy.BuildConfig
 import dev.leshiy.data.AppPrefs
@@ -129,7 +130,7 @@ object UpdateManager {
         try {
             val body = fetchText(RELEASES_URL)
             AppPrefs.setLastUpdateCheck(app, System.currentTimeMillis())
-            val candidate = pickLatestAndroidRelease(body)
+            val candidate = pickLatestAndroidRelease(body, Build.SUPPORTED_ABIS.toList())
             val current = BuildConfig.VERSION_NAME
             _state.value = when {
                 candidate == null || compareVersions(candidate.version, current) <= 0 ->

@@ -31,22 +31,31 @@ fun compareVersions(a: String, b: String): Int {
 }
 
 /**
- * The APK asset to download: the CI name (`leshiy_vX.Y.Z.apk`) when present, else any signed
- * `.apk` (covers pre-rename releases' `app-release.apk`). `-unsigned` builds are never offered —
- * they can't install over a signed app anyway.
+ * The APK asset to download: the split for the first of [abis] (the device's supported ABIs, most
+ * preferred first) that the release carries, else the universal CI name (`leshiy_vX.Y.Z.apk`),
+ * else any signed non-split `.apk` (covers pre-rename releases' `app-release.apk`). `-unsigned`
+ * builds are never offered — they can't install over a signed app anyway.
  */
-fun selectApkAsset(names: List<String>, version: String): String? {
-    val preferred = "leshiy_v$version.apk"
-    if (preferred in names) return preferred
-    return names.firstOrNull { it.endsWith(".apk") && !it.contains("-unsigned") }
+fun selectApkAsset(names: List<String>, version: String, abis: List<String> = emptyList()): String? {
+    // Per-ABI split (`leshiy_vX.Y.Z-<abi>.apk`) for the device's most preferred ABI: it carries
+    // only that ABI's native bridge, a fraction of the universal download.
+    abis.firstNotNullOfOrNull { abi -> "leshiy_v$version-$abi.apk".takeIf { it in names } }?.let { return it }
+    val universal = "leshiy_v$version.apk"
+    if (universal in names) return universal
+    return names.firstOrNull { name ->
+        name.endsWith(".apk") && !name.contains("-unsigned") && SPLIT_ABIS.none { name.endsWith("-$it.apk") }
+    }
 }
+
+/** ABIs the release publishes split APKs for; another ABI's split must never be installed. */
+private val SPLIT_ABIS = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
 
 /**
  * Newest published `android-v*` release in a GitHub `/releases` JSON array, or null.
  * Deliberately not `/releases/latest`: the shared "latest" pointer is pinned to the `v*`
  * server/CLI train (see verify-release-pointer.yml).
  */
-fun pickLatestAndroidRelease(json: String): ReleaseCandidate? {
+fun pickLatestAndroidRelease(json: String, abis: List<String> = emptyList()): ReleaseCandidate? {
     val arr = JSONArray(json)
     var best: ReleaseCandidate? = null
     for (i in 0 until arr.length()) {
@@ -60,7 +69,7 @@ fun pickLatestAndroidRelease(json: String): ReleaseCandidate? {
             val a = assets.getJSONObject(j)
             urlByName[a.optString("name")] = a.optString("browser_download_url")
         }
-        val apkName = selectApkAsset(urlByName.keys.toList(), version) ?: continue
+        val apkName = selectApkAsset(urlByName.keys.toList(), version, abis) ?: continue
         best = ReleaseCandidate(
             version = version,
             apkName = apkName,

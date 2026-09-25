@@ -29,15 +29,15 @@ export ANDROID_NDK_HOME=~/Android/ndk/28.2.13676358
 # 1. Build the Rust bridge (.so per ABI) + generate Kotlin bindings.
 ../../scripts/build-android-jni.sh
 
-# 2. Build the APK (the Gradle wrapper is committed; pinned to Gradle 8.11.1).
+# 2. Build the APKs (the Gradle wrapper is committed; pinned to Gradle 9.8.0, AGP 9.4).
 ./gradlew assembleDebug
-# -> app/build/outputs/apk/debug/app-debug.apk
+# -> app/build/outputs/apk/debug/app-{arm64-v8a,armeabi-v7a,x86_64,universal}-debug.apk
 ```
 
-Verified 2026-07-05: produces a ~25 MB debug APK with `libleshiy_mobile.so` for
-arm64-v8a/armeabi-v7a/x86_64. If Gradle itself isn't installed, fetch a binary dist once
-(`gradle-8.11.1-bin.zip` from services.gradle.org) and run `gradle wrapper` — after that
-`./gradlew` is self-contained.
+Builds split per ABI: each `app-<abi>-*.apk` carries only that ABI's `libleshiy_mobile.so`, and
+`app-universal-*.apk` carries all three. Release builds are shrunk with R8 (keep rules for JNA,
+the UniFFI bindings and ML Kit in `app/proguard-rules.pro`). The `./gradlew` wrapper is
+self-contained.
 
 The bridge outputs (`app/src/main/jniLibs/`, `app/src/main/java/uniffi/`) are generated and
 git-ignored — regenerate them with the script, don't hand-edit.
