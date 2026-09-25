@@ -108,7 +108,11 @@ fun SettingsScreen(
                     Spacer(Modifier.size(12.dp))
                     Switch(
                         checked = blockV6,
-                        onCheckedChange = { blockV6 = it; AppPrefs.setBlockIpv6(context, it) },
+                        onCheckedChange = {
+                            blockV6 = it
+                            AppPrefs.setBlockIpv6(context, it)
+                            dev.leshiy.LeshiyVpnService.reconfigure(context)
+                        },
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = Bg0,
                             checkedTrackColor = Wisp,
@@ -133,6 +137,11 @@ fun SettingsScreen(
                         onCheckedChange = {
                             sleepKa = it
                             AppPrefs.setSleepKeepalive(context, it)
+                            if (!it) {
+                                dev.leshiy.LeshiyVpnService.cancelKeepaliveAlarm(context)
+                            } else if (dev.leshiy.data.TunnelRepository.running.value) {
+                                dev.leshiy.LeshiyVpnService.scheduleKeepaliveAlarm(context)
+                            }
                             // Keepalive is near-useless under Doze restriction — prompt for the
                             // exemption the moment it starts to matter.
                             if (shouldPromptBattery(it, BatteryOptimization.isUnrestricted(context))) {

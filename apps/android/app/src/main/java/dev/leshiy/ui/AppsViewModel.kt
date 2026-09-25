@@ -4,8 +4,11 @@ import android.app.Application
 import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import dev.leshiy.LeshiyVpnService
 import dev.leshiy.data.PerAppMode
 import dev.leshiy.data.PerAppStore
+import dev.leshiy.data.SplitKind
+import dev.leshiy.data.SplitStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -55,10 +58,17 @@ class AppsViewModel(app: Application) : AndroidViewModel(app) {
     fun setMode(m: PerAppMode) {
         store.setMode(m)
         _mode.value = m
+        applyLive()
     }
 
     fun toggle(pkg: String) {
         store.toggle(pkg)
         load()
+        if (store.mode() != PerAppMode.OFF) applyLive()
+    }
+
+    /** App rules only shape the tunnel while the app scheme is the active one. */
+    private fun applyLive() {
+        if (SplitStore(getApplication()).kind() == SplitKind.APP) LeshiyVpnService.reconfigure(getApplication())
     }
 }

@@ -134,9 +134,9 @@ private fun ColumnScope.NetSplit(vm: SplitViewModel) {
             importMsg = runCatching {
                 val added = withContext(Dispatchers.IO) {
                     context.contentResolver.openInputStream(uri)!!.bufferedReader().useLines { lines ->
-                        lines.map { it.substringBefore('#').trim() }
-                            .filter { it.isNotEmpty() }
-                            .count { vm.addEntry(it) }
+                        vm.importEntries(
+                            lines.map { it.substringBefore('#').trim() }.filter { it.isNotEmpty() },
+                        )
                     }
                 }
                 s.importedCount.format(added)
