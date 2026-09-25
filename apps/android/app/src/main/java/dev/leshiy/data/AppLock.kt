@@ -32,6 +32,15 @@ fun shouldLock(
     graceMs: Long = LOCK_GRACE_MS,
 ): Boolean = enabled && elapsedSinceBackgroundMs >= graceMs
 
+/**
+ * Whether a newly created activity starts behind the lock. A rotation or language change recreates
+ * the activity ([recreated]) in the same process, where an unlock already happened — re-prompting
+ * then is just noise. After process death the saved state is restored too, but the in-process
+ * unlock is gone, so it locks. Pure, like [shouldLock].
+ */
+fun shouldStartLocked(enabled: Boolean, recreated: Boolean, unlockedInProcess: Boolean): Boolean =
+    enabled && !(recreated && unlockedInProcess)
+
 /** How long the app may sit in the background before the server vault is locked again. */
 const val VAULT_LOCK_MS = 5 * 60_000L
 

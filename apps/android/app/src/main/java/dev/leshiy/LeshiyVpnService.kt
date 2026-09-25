@@ -64,6 +64,7 @@ class LeshiyVpnService : VpnService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        lastStartId = startId
         when (intent?.action) {
             ACTION_STOP -> {
                 stopTunnel()
@@ -103,6 +104,12 @@ class LeshiyVpnService : VpnService() {
 
     /** True from a start request until [stopTunnel]. Main-confined. */
     private var sessionActive = false
+
+    /**
+     * The newest start id delivered. [stopTunnel] stops only up to it, so a connect queued right
+     * behind a disconnect is not killed along with the old session.
+     */
+    private var lastStartId = 0
     private var startJob: Job? = null
     private var reconfigJob: Job? = null
 
@@ -434,7 +441,7 @@ class LeshiyVpnService : VpnService() {
         LeshiyTileService.requestUpdate(applicationContext)
         LeshiyWidgetProvider.requestUpdate(applicationContext)
         stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        stopSelf(lastStartId)
     }
 
     /**

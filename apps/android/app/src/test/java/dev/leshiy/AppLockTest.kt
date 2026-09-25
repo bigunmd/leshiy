@@ -2,11 +2,25 @@ package dev.leshiy
 
 import dev.leshiy.data.LOCK_GRACE_MS
 import dev.leshiy.data.shouldLock
+import dev.leshiy.data.shouldStartLocked
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AppLockTest {
+
+    @Test
+    fun a_configuration_change_keeps_an_unlocked_app_unlocked() {
+        assertFalse(shouldStartLocked(enabled = true, recreated = true, unlockedInProcess = true))
+    }
+
+    @Test
+    fun a_cold_start_or_process_death_restore_starts_locked() {
+        // After process death the saved state survives but the unlock does not.
+        assertTrue(shouldStartLocked(enabled = true, recreated = true, unlockedInProcess = false))
+        assertTrue(shouldStartLocked(enabled = true, recreated = false, unlockedInProcess = true))
+        assertFalse(shouldStartLocked(enabled = false, recreated = false, unlockedInProcess = false))
+    }
 
     @Test
     fun disabled_never_locks() {

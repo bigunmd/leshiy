@@ -39,6 +39,7 @@ import dev.leshiy.data.AppPrefs
 import dev.leshiy.data.Profiles
 import dev.leshiy.data.shouldLock
 import dev.leshiy.data.shouldLockVault
+import dev.leshiy.data.shouldStartLocked
 import dev.leshiy.data.TunnelRepository
 import dev.leshiy.data.VaultHolder
 import dev.leshiy.data.UiEvents
@@ -105,7 +106,14 @@ class MainActivity : FragmentActivity() {
         AppPrefs.initLiveStats(this)
         UpdateManager.autoCheck(this)
         // Cold start: lock immediately if the feature is on (before any UI is shown).
-        locked.value = AppPrefs.appLockEnabled(this)
+        locked.value = shouldStartLocked(
+            enabled = AppPrefs.appLockEnabled(this),
+            recreated = savedInstanceState != null,
+            unlockedInProcess = unlockedInProcess,
+        )
+        if (!locked.value) unlockedInProcess = true
+        // The consent dialog outlives a recreation of this activity; its result must still connect.
+        pendingUri = savedInstanceState?.getString(KEY_PENDING_URI)
         enableEdgeToEdge()
         setContent {
             val lang by LangState.lang.collectAsStateWithLifecycle()
@@ -175,6 +183,11 @@ class MainActivity : FragmentActivity() {
 
     private fun finishOnboarding() = AppPrefs.setOnboardingComplete(this, true)
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(KEY_PENDING_URI, pendingUri)
+    }
+
     override fun onStop() {
         super.onStop()
         backgroundedAt = SystemClock.elapsedRealtime()
@@ -192,7 +205,10 @@ class MainActivity : FragmentActivity() {
         }
         val elapsed = SystemClock.elapsedRealtime() - backgroundedAt
         val relock = shouldLock(AppPrefs.appLockEnabled(this), elapsed)
-        if (relock) locked.value = true
+        if (relock) {
+            locked.value = true
+            unlockedInProcess = false
+        }
         if (shouldLockVault(relock, elapsed)) VaultHolder.lock()
     }
 
@@ -203,6 +219,7 @@ class MainActivity : FragmentActivity() {
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                     locked.value = false
+                    unlockedInProcess = true
                 }
                 // onAuthenticationError / failure: stay locked; the user retries via the button.
             },
@@ -219,6 +236,14 @@ class MainActivity : FragmentActivity() {
             builder.setNegativeButtonText(s.lockCancel)
         }
         runCatching { prompt.authenticate(builder.build()) }
+    }
+
+    private companion object {
+        const val KEY_PENDING_URI = "pending_uri"
+
+        /** Survives activity recreation but not process death — see [shouldStartLocked]. */
+        @Volatile
+        var unlockedInProcess = false
     }
 }
 
