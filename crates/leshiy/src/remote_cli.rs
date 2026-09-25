@@ -428,6 +428,7 @@ pub async fn run(cmd: crate::cli::RemoteCmd, interactive: bool) -> Result<()> {
                 downstream: downstream_id,
                 sudo: use_sudo,
                 dns_override: plan.dns.clone(),
+                mtproxy: false,
             };
 
             let mut transport = RusshTransport::new();

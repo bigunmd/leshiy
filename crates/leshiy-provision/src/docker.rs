@@ -295,6 +295,16 @@ pub fn exec_user_rm_cmd(container: &str, short_id: &str) -> String {
     )
 }
 
+/// Print the server's `tg://proxy` link; with `enable`, first give it an MTProxy secret.
+pub fn exec_mtproxy_cmd(container: &str, enable: bool) -> String {
+    let enable = if enable { " --enable" } else { "" };
+    format!("sudo docker exec {container} leshiy mtproxy --config /etc/leshiy/server.toml{enable}")
+}
+
+pub fn restart_cmd(container: &str) -> String {
+    format!("sudo docker restart {container}")
+}
+
 pub fn parse_ps_names(stdout: &str) -> Vec<String> {
     stdout
         .lines()

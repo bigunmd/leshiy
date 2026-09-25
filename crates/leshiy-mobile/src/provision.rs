@@ -156,6 +156,7 @@ pub fn build_params(cfg: &ProvisionConfig, now: u64) -> ProvisionParams {
         downstream: cfg.downstream.clone(),
         sudo: cfg.sudo_password.is_some(),
         dns_override: cfg.dns_override.clone().filter(|s| !s.trim().is_empty()),
+        mtproxy: false,
     }
 }
 

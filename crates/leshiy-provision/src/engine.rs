@@ -79,6 +79,8 @@ pub struct ProvisionParams {
     /// Operator override for the container's DNS resolver (`--dns`). When set and
     /// valid it is used verbatim, skipping host detection and the public fallback.
     pub dns_override: Option<String>,
+    /// Also serve the Telegram MTProxy on the REALITY port (`LESHIY_MTPROXY=1` on first boot).
+    pub mtproxy: bool,
 }
 
 fn ev(step: Step, status: Status, detail: impl Into<String>) -> ProgressEvent {
@@ -311,6 +313,9 @@ async fn provision_inner<T: Transport>(
         }
         if let Some(conn) = &p.connector {
             envs.push(("LESHIY_CONNECTOR".to_string(), conn.clone()));
+        }
+        if p.mtproxy {
+            envs.push(("LESHIY_MTPROXY".to_string(), "1".to_string()));
         }
         let run = docker::run_cmd(
             &p.container,
@@ -561,6 +566,37 @@ pub async fn status<T: Transport>(t: &mut T, rec: &ServerRecord) -> Result<bool>
     Ok(names.iter().any(|n| n == &rec.container))
 }
 
+/// The server's Telegram proxy (`tg://proxy`) link. With `enable`, a server that has none gets
+/// a secret and its container is restarted so the running server serves it.
+pub async fn mtproxy_link<T: Transport>(
+    t: &mut T,
+    rec: &ServerRecord,
+    enable: bool,
+) -> Result<String> {
+    let out = match t
+        .run(&docker::exec_mtproxy_cmd(&rec.container, false))
+        .await?
+        .ok()
+    {
+        Ok(out) => out,
+        Err(e) if !enable => return Err(e),
+        Err(_) => {
+            let out = t
+                .run(&docker::exec_mtproxy_cmd(&rec.container, true))
+                .await?
+                .ok()?;
+            t.run(&docker::restart_cmd(&rec.container)).await?.ok()?;
+            out
+        }
+    };
+    out.stdout
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("tg://proxy?"))
+        .map(str::to_string)
+        .ok_or_else(|| Error::Parse("no tg://proxy link in `leshiy mtproxy` output".into()))
+}
+
 /// Remove the server container (and optionally purge its config dir).
 ///
 /// Best-effort: `docker rm -f` is allowed to fail (the container may not exist
@@ -763,6 +799,7 @@ mod tests {
             downstream: None,
             sudo: false,
             dns_override: None,
+            mtproxy: false,
         }
     }
 
@@ -2253,6 +2290,73 @@ mod tests {
         assert_eq!(rec.downstream.as_deref(), Some("exit-1"));
         assert!(rec.connector_uri.is_none()); // entry exposes no upstream credential
         assert!(t.calls().iter().any(|c| c.contains("LESHIY_CONNECTOR=")));
+    }
+
+    #[tokio::test]
+    async fn provision_with_mtproxy_sends_mtproxy_env() {
+        let mut t = FakeTransport::new();
+        t.on(super::super::docker::detect_docker_cmd(), ok("yes"))
+            .on(
+                "docker exec",
+                ok("leshiy://QUJD@1.2.3.4:443?sni=d&sid=0102030400000000\n"),
+            );
+        let mut p = params();
+        p.mtproxy = true;
+        provision(&mut t, &p, &mut |_| {}).await.unwrap();
+        assert!(t.calls().iter().any(|c| c.contains("LESHIY_MTPROXY=")));
+    }
+
+    const LINK: &str = "tg://proxy?server=1.2.3.4&port=443&secret=ee00";
+
+    #[tokio::test]
+    async fn mtproxy_link_of_enabled_server_needs_no_restart() {
+        let mut t = FakeTransport::new();
+        t.on("leshiy mtproxy", ok(&format!("{LINK}\n")));
+        let link = mtproxy_link(&mut t, &rec_with_one_client(), true)
+            .await
+            .unwrap();
+        assert_eq!(link, LINK);
+        assert!(!t.calls().iter().any(|c| c.contains("docker restart")));
+    }
+
+    #[tokio::test]
+    async fn mtproxy_enable_on_disabled_server_restarts_container() {
+        let mut t = FakeTransport::new();
+        let disabled = CommandOutput {
+            code: 1,
+            stdout: String::new(),
+            stderr: "not enabled".into(),
+        };
+        t.on("--enable", ok(&format!("{LINK}\n")))
+            .on("leshiy mtproxy", disabled);
+        let link = mtproxy_link(&mut t, &rec_with_one_client(), true)
+            .await
+            .unwrap();
+        assert_eq!(link, LINK);
+        assert!(
+            t.calls()
+                .iter()
+                .any(|c| c.contains("docker restart leshiy"))
+        );
+    }
+
+    #[tokio::test]
+    async fn mtproxy_link_of_disabled_server_without_enable_errors() {
+        let mut t = FakeTransport::new();
+        t.on(
+            "leshiy mtproxy",
+            CommandOutput {
+                code: 1,
+                stdout: String::new(),
+                stderr: "not enabled".into(),
+            },
+        );
+        assert!(
+            mtproxy_link(&mut t, &rec_with_one_client(), false)
+                .await
+                .is_err()
+        );
+        assert!(!t.calls().iter().any(|c| c.contains("--enable")));
     }
 
     #[tokio::test]
