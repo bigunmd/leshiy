@@ -45,7 +45,11 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8: a smaller, faster APK. JNA and the UniFFI bindings are reached reflectively and
+            // from native code, so proguard-rules.pro keeps them whole.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Sign only when a keystore is provided (CI release); otherwise leave it unsigned
             // (still installable for testing, just not updatable).
             if (System.getenv("ANDROID_KEYSTORE_PATH") != null) {
