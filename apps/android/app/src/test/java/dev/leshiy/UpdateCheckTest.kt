@@ -94,6 +94,16 @@ class UpdateCheckTest {
     }
 
     @Test
+    fun `picks up the checksum signature when published`() {
+        val signed = release("android-v1.7.0", assets = listOf("leshiy_v1.7.0.apk", "SHA256SUMS", "SHA256SUMS.minisig"))
+        assertEquals(
+            "https://example.com/android-v1.7.0/SHA256SUMS.minisig",
+            pickLatestAndroidRelease("[$signed]")!!.sigUrl,
+        )
+        assertNull(pickLatestAndroidRelease("[" + release("android-v1.7.0") + "]")!!.sigUrl)
+    }
+
+    @Test
     fun `legacy asset naming still resolves`() {
         val json = "[" + release("android-v1.6.4", assets = listOf("app-release.apk", "SHA256SUMS")) + "]"
         assertEquals("app-release.apk", pickLatestAndroidRelease(json)!!.apkName)

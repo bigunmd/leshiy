@@ -15,6 +15,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import uniffi.leshiy_mobile.verifyReleaseChecksums
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -33,9 +34,14 @@ sealed interface UpdateUi {
 }
 
 /**
- * Checks GitHub Releases for a newer `android-v*` build, downloads + SHA-256-verifies the APK,
- * and hands it to the platform installer. Best-effort by design: when the tunnel is up the
- * requests ride through it; when GitHub is unreachable, launch checks fail silently.
+ * Checks GitHub Releases for a newer `android-v*` build, downloads it, and hands it to the
+ * platform installer — but only once `SHA256SUMS` verifies against the project's minisign release
+ * key and the APK matches its entry there. A checksum file from the same release on its own only
+ * proves the download is intact, not who published it.
+ *
+ * These requests never ride the tunnel: the app is excluded from its own VPN (routing-loop
+ * avoidance), so they go straight to GitHub. Best-effort by design: when GitHub is unreachable,
+ * launch checks fail silently.
  */
 object UpdateManager {
     private const val RELEASES_URL =
@@ -81,7 +87,10 @@ object UpdateManager {
                     mkdirs()
                 }
                 val sumsUrl = candidate.sumsUrl ?: error("release has no SHA256SUMS")
-                val sums = parseSha256Sums(fetchText(sumsUrl))
+                val sigUrl = candidate.sigUrl ?: error("release has no SHA256SUMS signature")
+                val sumsBytes = fetchBytes(sumsUrl)
+                if (!verifyReleaseChecksums(sumsBytes, fetchText(sigUrl))) error("bad SHA256SUMS signature")
+                val sums = parseSha256Sums(sumsBytes.toString(Charsets.UTF_8))
                 val expected = sums[candidate.apkName] ?: error("no checksum for ${candidate.apkName}")
                 val apk = File(dir, candidate.apkName)
                 fetchFile(candidate.apkUrl, apk) { done, total ->
@@ -144,11 +153,14 @@ object UpdateManager {
             setRequestProperty("Accept", "application/vnd.github+json")
         }
 
-    private fun fetchText(url: String): String {
+    private fun fetchText(url: String): String = fetchBytes(url).toString(Charsets.UTF_8)
+
+    /** The exact bytes — a signature covers bytes, not decoded text. */
+    private fun fetchBytes(url: String): ByteArray {
         val conn = open(url)
         try {
             check(conn.responseCode == 200) { "HTTP ${conn.responseCode}" }
-            return conn.inputStream.bufferedReader().readText()
+            return conn.inputStream.use { it.readBytes() }
         } finally {
             conn.disconnect()
         }

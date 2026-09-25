@@ -11,6 +11,8 @@ data class ReleaseCandidate(
     val apkUrl: String,
     /** SHA256SUMS asset URL; null means the release can't be verified (and won't install). */
     val sumsUrl: String?,
+    /** Minisign signature of SHA256SUMS; null means the release is unsigned (and won't install). */
+    val sigUrl: String? = null,
 )
 
 /** "android-v1.2.3" → "1.2.3"; null for server-train (`v*`), suffixed, or malformed tags. */
@@ -64,6 +66,7 @@ fun pickLatestAndroidRelease(json: String): ReleaseCandidate? {
             apkName = apkName,
             apkUrl = urlByName.getValue(apkName),
             sumsUrl = urlByName["SHA256SUMS"],
+            sigUrl = urlByName["SHA256SUMS.minisig"],
         )
     }
     return best
