@@ -31,6 +31,9 @@ tokio-rustls = "0.26"
 rcgen = "0.13"
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 aes-gcm = "0.10"
+# AES-256-CTR for the MTProxy obfuscated2 layer. Same versions aes-gcm already pulls in.
+aes = { version = "0.8", features = ["zeroize"] }
+ctr = { version = "0.9", features = ["zeroize"] }
 hkdf = "0.12"
 hmac = "0.12"
 chacha20poly1305 = "0.10"
