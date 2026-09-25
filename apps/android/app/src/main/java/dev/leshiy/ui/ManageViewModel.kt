@@ -32,6 +32,17 @@ class ManageViewModel : ViewModel() {
     // memory for the session only — never persisted (matches the vault contract).
     val sudo = MutableStateFlow<Map<String, String>>(emptyMap())
 
+    /** On vault lock: drop everything read out of it, and the session's sudo passwords with it. */
+    fun forgetVault() {
+        servers.value = emptyList()
+        users.value = emptyList()
+        selected.value = null
+        status.value = ServerStatus.UNKNOWN
+        credential.value = null
+        message.value = null
+        sudo.value = emptyMap()
+    }
+
     fun setSudo(id: String, password: String) {
         sudo.value = sudo.value + (id to password)
     }

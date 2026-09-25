@@ -38,7 +38,9 @@ import androidx.navigation.compose.rememberNavController
 import dev.leshiy.data.AppPrefs
 import dev.leshiy.data.Profiles
 import dev.leshiy.data.shouldLock
+import dev.leshiy.data.shouldLockVault
 import dev.leshiy.data.TunnelRepository
+import dev.leshiy.data.VaultHolder
 import dev.leshiy.data.UiEvents
 import dev.leshiy.data.UiMessage
 import dev.leshiy.data.UiMessageKind
@@ -176,10 +178,12 @@ class MainActivity : FragmentActivity() {
     override fun onStop() {
         super.onStop()
         backgroundedAt = SystemClock.elapsedRealtime()
+        VaultHolder.scheduleLock()
     }
 
     override fun onStart() {
         super.onStart()
+        VaultHolder.cancelScheduledLock()
         // The first onStart follows onCreate (cold start already handled there); only re-lock on a
         // genuine return from background, and only past the grace window.
         if (!sawFirstStart) {
@@ -187,7 +191,9 @@ class MainActivity : FragmentActivity() {
             return
         }
         val elapsed = SystemClock.elapsedRealtime() - backgroundedAt
-        if (shouldLock(AppPrefs.appLockEnabled(this), elapsed)) locked.value = true
+        val relock = shouldLock(AppPrefs.appLockEnabled(this), elapsed)
+        if (relock) locked.value = true
+        if (shouldLockVault(relock, elapsed)) VaultHolder.lock()
     }
 
     private fun promptUnlock() {
@@ -230,6 +236,8 @@ private object Route {
     const val CREDENTIAL = "manage/credential"
     const val CASCADE = "cascade"
     const val VAULT_BACKUP = "manage/backup"
+
+    val NEEDS_VAULT = setOf(SERVER_DETAIL, SERVER_USERS, SERVER_UPGRADE, CREDENTIAL)
 }
 
 @Composable
@@ -265,6 +273,19 @@ private fun AppNav(startDestination: String, onConnect: (String) -> Unit, onDisc
         UiEvents.messages.collect { msg ->
             snackbarHost.currentSnackbarData?.dismiss()
             snackbarHost.showSnackbar(LeshiySnackbarVisuals(msg.text, msg.kind))
+        }
+    }
+    LaunchedEffect(Unit) {
+        // A vault lock takes what was read out of it with it, and the screens past the Manage gate
+        // (which assume an open vault) fall back to the gate. StateFlow replays the current value,
+        // so a lock that happened while this was off-screen (app-lock) is still applied here.
+        VaultHolder.unlockedFlow.collect { open ->
+            if (open) return@collect
+            manageVm.forgetVault()
+            backupVm.forgetVault()
+            if (nav.currentDestination?.route in Route.NEEDS_VAULT) {
+                if (!nav.popBackStack(Route.MANAGE, inclusive = false)) nav.popBackStack(Route.CONNECT, inclusive = false)
+            }
         }
     }
     LaunchedEffect(Unit) {

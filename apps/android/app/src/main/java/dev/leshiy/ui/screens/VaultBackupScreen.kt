@@ -61,7 +61,7 @@ fun VaultBackupScreen(vm: VaultBackupViewModel, onBack: () -> Unit) {
     val context = LocalContext.current
     val s = LocalStrings.current
     val scope = rememberCoroutineScope()
-    var unlocked by remember { mutableStateOf(VaultHolder.unlocked) }
+    val unlocked by VaultHolder.unlockedFlow.collectAsStateWithLifecycle()
 
     LaunchedEffect(unlocked) { if (unlocked) vm.refreshServers() }
 
@@ -69,13 +69,20 @@ fun VaultBackupScreen(vm: VaultBackupViewModel, onBack: () -> Unit) {
         if (!unlocked) {
             var pass by remember { mutableStateOf("") }
             var failed by remember { mutableStateOf(false) }
+            var busy by remember { mutableStateOf(false) }
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(s.unlockVault, style = MaterialTheme.typography.labelSmall, color = Dim)
                 Field(pass, { pass = it; failed = false }, s.vaultPassphrase)
                 PrimaryButton(
                     s.unlock,
-                    onClick = { if (VaultHolder.unlock(context, pass)) unlocked = true else failed = true },
-                    enabled = pass.isNotBlank(),
+                    onClick = {
+                        busy = true
+                        scope.launch {
+                            if (!VaultHolder.unlock(context, pass)) failed = true
+                            busy = false
+                        }
+                    },
+                    enabled = pass.isNotBlank() && !busy,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 if (failed) {

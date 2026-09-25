@@ -86,6 +86,7 @@ fun DeployScreen(
     var keyPass by remember { mutableStateOf("") }
     val context = LocalContext.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var unlocking by remember { mutableStateOf(false) }
     val keyFileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) scope.launch {
             runCatching {
@@ -224,16 +225,20 @@ fun DeployScreen(
             PrimaryButton(
                 text = if (state.running) s.provisioning else s.provision,
                 onClick = {
-                    // If a vault passphrase was given, unlock first so the server is saved for
-                    // management — and so the collision check below has records to read.
-                    if (!dev.leshiy.data.VaultHolder.unlocked && vaultPass.isNotBlank()) {
-                        dev.leshiy.data.VaultHolder.unlock(context, vaultPass)
+                    unlocking = true
+                    scope.launch {
+                        // If a vault passphrase was given, unlock first so the server is saved for
+                        // management — and so the collision check below has records to read.
+                        if (!dev.leshiy.data.VaultHolder.unlocked && vaultPass.isNotBlank()) {
+                            dev.leshiy.data.VaultHolder.unlock(context, vaultPass)
+                        }
+                        unlocking = false
+                        val saved = dev.leshiy.data.VaultHolder.get()?.servers() ?: emptyList()
+                        val hit = deployCollision(saved, host.trim(), sshPort.trim().toIntOrNull() ?: 22)
+                        if (hit != null) collision = hit else startProvision()
                     }
-                    val saved = dev.leshiy.data.VaultHolder.get()?.servers() ?: emptyList()
-                    val hit = deployCollision(saved, host.trim(), sshPort.trim().toIntOrNull() ?: 22)
-                    if (hit != null) collision = hit else startProvision()
                 },
-                enabled = !state.running && host.isNotBlank() &&
+                enabled = !state.running && !unlocking && host.isNotBlank() &&
                     (if (useKey) pem.isNotBlank() else password.isNotBlank()),
                 modifier = Modifier.fillMaxWidth(),
             )

@@ -31,3 +31,15 @@ fun shouldLock(
     elapsedSinceBackgroundMs: Long,
     graceMs: Long = LOCK_GRACE_MS,
 ): Boolean = enabled && elapsedSinceBackgroundMs >= graceMs
+
+/** How long the app may sit in the background before the server vault is locked again. */
+const val VAULT_LOCK_MS = 5 * 60_000L
+
+/**
+ * Whether returning to the foreground should lock the server vault. Pure, like [shouldLock].
+ *
+ * The vault holds SSH credentials for every saved server, so it must not stay open for the
+ * process's lifetime — which, with the VPN service keeping the process alive, is indefinitely.
+ */
+fun shouldLockVault(appRelocked: Boolean, elapsedSinceBackgroundMs: Long): Boolean =
+    appRelocked || elapsedSinceBackgroundMs >= VAULT_LOCK_MS

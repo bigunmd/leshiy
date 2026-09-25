@@ -20,7 +20,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -59,20 +61,28 @@ fun CascadeBuilderScreen(
 ) {
     val s = LocalStrings.current
     val context = LocalContext.current
-    var unlocked by remember { mutableStateOf(VaultHolder.unlocked) }
+    val unlocked by VaultHolder.unlockedFlow.collectAsStateWithLifecycle()
     androidx.compose.runtime.LaunchedEffect(unlocked) { if (unlocked) manageVm.refreshServers() }
 
     ScreenFrame(s.buildCascade, onBack = onBack) {
         if (!unlocked) {
             var pass by remember { mutableStateOf("") }
             var failed by remember { mutableStateOf(false) }
+            var busy by remember { mutableStateOf(false) }
+            val scope = rememberCoroutineScope()
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(s.unlockVault, style = MaterialTheme.typography.labelSmall, color = Dim)
                 Field(pass, { pass = it; failed = false }, s.vaultPassphrase)
                 PrimaryButton(
                     s.unlock,
-                    onClick = { if (VaultHolder.unlock(context, pass)) unlocked = true else failed = true },
-                    enabled = pass.isNotBlank(),
+                    onClick = {
+                        busy = true
+                        scope.launch {
+                            if (!VaultHolder.unlock(context, pass)) failed = true
+                            busy = false
+                        }
+                    },
+                    enabled = pass.isNotBlank() && !busy,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 if (failed) Text(s.wrongPassphrase, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)

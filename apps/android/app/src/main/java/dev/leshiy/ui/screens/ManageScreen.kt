@@ -16,7 +16,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -45,7 +47,7 @@ fun ManageScreen(
 ) {
     val context = LocalContext.current
     val s = LocalStrings.current
-    var unlocked by remember { mutableStateOf(VaultHolder.unlocked) }
+    val unlocked by VaultHolder.unlockedFlow.collectAsStateWithLifecycle()
 
     // Refresh whenever the screen is shown with an unlocked vault — e.g. after deploying a
     // server, where the vault was already unlocked so the unlock branch below never runs.
@@ -57,15 +59,21 @@ fun ManageScreen(
         if (!unlocked) {
             var pass by remember { mutableStateOf("") }
             var failed by remember { mutableStateOf(false) }
+            var busy by remember { mutableStateOf(false) }
+            val scope = rememberCoroutineScope()
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(s.unlockVault, style = MaterialTheme.typography.labelSmall, color = Dim)
                 Field(pass, { pass = it; failed = false }, s.vaultPassphrase)
                 PrimaryButton(
                     s.unlock,
                     onClick = {
-                        if (VaultHolder.unlock(context, pass)) unlocked = true else failed = true
+                        busy = true
+                        scope.launch {
+                            if (!VaultHolder.unlock(context, pass)) failed = true
+                            busy = false
+                        }
                     },
-                    enabled = pass.isNotBlank(),
+                    enabled = pass.isNotBlank() && !busy,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 if (failed) Text(s.wrongPassphrase, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)

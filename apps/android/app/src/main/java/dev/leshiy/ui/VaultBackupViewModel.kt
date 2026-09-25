@@ -20,6 +20,12 @@ class VaultBackupViewModel : ViewModel() {
     val message = MutableStateFlow<String?>(null)
     val report = MutableStateFlow<ImportReport?>(null)
 
+    /** On vault lock: drop what was read out of it. */
+    fun forgetVault() {
+        servers.value = emptyList()
+        report.value = null
+    }
+
     fun refreshServers() {
         servers.value = VaultHolder.get()?.servers() ?: emptyList()
     }
