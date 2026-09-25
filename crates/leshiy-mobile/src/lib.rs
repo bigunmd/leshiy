@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod bridge;
+mod dns;
 mod error;
 mod profiles;
 mod provision;

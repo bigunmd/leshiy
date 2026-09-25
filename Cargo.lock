@@ -1996,6 +1996,8 @@ dependencies = [
 name = "leshiy-mobile"
 version = "1.13.0"
 dependencies = [
+ "async-trait",
+ "bytes",
  "leshiy-client",
  "leshiy-provision",
  "leshiy-reality",

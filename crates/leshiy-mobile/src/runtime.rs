@@ -23,6 +23,7 @@ pub fn validate_uri(uri: &str) -> Result<RealityUri, BridgeError> {
 ///
 /// The TUN fd must already be injected (android) via `leshiy_tun::sys::android::set_tun_fd`
 /// before this is called.
+#[allow(clippy::too_many_arguments)] // one handle per bridge control/observation channel
 pub async fn run_engine(
     uri: String,
     counters: Arc<ByteCounters>,
@@ -31,6 +32,7 @@ pub async fn run_engine(
     kick: Arc<Notify>,
     state_tx: watch::Sender<ConnState>,
     rtt_ms: Arc<AtomicU64>,
+    tunnel_slot: crate::bridge::TunnelSlot,
 ) -> std::io::Result<()> {
     let _ = state_tx.send(ConnState::Connecting);
     let parsed = validate_uri(&uri).map_err(|e| {
@@ -63,6 +65,7 @@ pub async fn run_engine(
         ReconnectParams::default(),
         kick,
     );
+    *tunnel_slot.lock().unwrap() = Some(Arc::downgrade(&tunnel));
 
     // Sample the tunnel's keepalive RTT (~1 Hz) into the shared cell the status poller reads.
     // Runs until the engine is cancelled; `tunnel` is an `Arc`, so this clone is cheap.

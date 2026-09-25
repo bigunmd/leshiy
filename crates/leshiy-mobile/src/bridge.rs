@@ -1,8 +1,8 @@
 //! UniFFI-exposed control object: `start(fd, uri, listener)` / `stop()`.
 use crate::error::BridgeError;
 use crate::status::{ConnState, Status};
-use leshiy_client::ByteCounters;
-use std::sync::{Arc, Mutex};
+use leshiy_client::{ByteCounters, Tunnel};
+use std::sync::{Arc, Mutex, Weak};
 use tokio::runtime::Runtime;
 use tokio::sync::Notify;
 
@@ -29,7 +29,12 @@ struct Running {
     rt: Runtime,
     // Held so the state channel outlives the session (the poller clones its own receiver).
     _state_rx: tokio::sync::watch::Receiver<ConnState>,
+    /// The engine's tunnel once dialed, for [`LeshiyBridge::resolve_via_tunnel`]. Weak, so it
+    /// never keeps a reconnect supervisor alive past the engine that owns it.
+    tunnel: TunnelSlot,
 }
+
+pub(crate) type TunnelSlot = Arc<Mutex<Option<Weak<dyn Tunnel>>>>;
 
 /// Control handle for a single VPN session (one per process).
 #[derive(uniffi::Object)]
@@ -79,8 +84,10 @@ impl LeshiyBridge {
         // Shared cell holding the latest keepalive RTT (ms); the engine updates it, poller reads it.
         let rtt_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (state_tx, state_rx) = tokio::sync::watch::channel(ConnState::Disconnected);
+        let tunnel: TunnelSlot = Arc::new(Mutex::new(None));
 
         // Engine driver task.
+        let engine_tunnel = tunnel.clone();
         let engine_uri = uri.clone();
         let engine_counters = counters.clone();
         let engine_cancel = cancel.clone();
@@ -96,6 +103,7 @@ impl LeshiyBridge {
                 engine_kick,
                 state_tx,
                 engine_rtt,
+                engine_tunnel,
             )
             .await
             {
@@ -132,8 +140,45 @@ impl LeshiyBridge {
             kick,
             rt,
             _state_rx: state_rx,
+            tunnel,
         });
         Ok(())
+    }
+
+    /// Resolve `hosts` (A + AAAA, at most `max_per_host` addresses each) **through the tunnel**,
+    /// returning IP literals. The host app is excluded from its own VPN, so resolving split-tunnel
+    /// domain rules with the system resolver would leak the rule list to the censor in plaintext
+    /// and accept its poisoned answers. Blocking, bounded to a few tens of seconds — call off the
+    /// UI thread. Empty when the tunnel is not up yet or nothing resolved.
+    pub fn resolve_via_tunnel(&self, hosts: Vec<String>, max_per_host: u32) -> Vec<String> {
+        let (handle, tunnel) = {
+            let guard = self.inner.lock().unwrap();
+            let Some(running) = guard.as_ref() else {
+                return Vec::new();
+            };
+            let tunnel = running
+                .tunnel
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(Weak::upgrade);
+            (running.rt.handle().clone(), tunnel)
+        };
+        let Some(tunnel) = tunnel else {
+            return Vec::new();
+        };
+        // Spawned rather than `block_on`: if `stop()` shuts the runtime down mid-resolve, the task
+        // is dropped, the sender with it, and this returns instead of touching a dead driver.
+        let (tx, rx) = std::sync::mpsc::channel();
+        handle.spawn(async move {
+            let addrs = crate::dns::resolve_all(tunnel, hosts, max_per_host as usize).await;
+            let _ = tx.send(addrs);
+        });
+        rx.recv_timeout(crate::dns::OVERALL_TIMEOUT + std::time::Duration::from_secs(1))
+            .unwrap_or_default()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
     }
 
     /// Tell the tunnel the default network changed, so it re-dials now instead of waiting to
@@ -239,6 +284,7 @@ mod tests {
                 kick: Arc::new(Notify::new()),
                 rt,
                 _state_rx: state_rx,
+                tunnel: Arc::new(Mutex::new(None)),
             })),
         };
 
