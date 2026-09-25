@@ -13,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -34,7 +35,6 @@ class AppsViewModel(app: Application) : AndroidViewModel(app) {
     private fun load() = viewModelScope.launch {
         val self = getApplication<Application>().packageName
         val pm = getApplication<Application>().packageManager
-        val checked = store.packages()
         val rows = withContext(Dispatchers.IO) {
             val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
             pm.queryIntentActivities(intent, 0)
@@ -46,13 +46,15 @@ class AppsViewModel(app: Application) : AndroidViewModel(app) {
                         AppRow(
                             pkg = pkg,
                             label = pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString(),
-                            checked = pkg in checked,
+                            checked = false,
                         )
                     }.getOrNull()
                 }
                 .sortedBy { it.label.lowercase() }
         }
-        _apps.value = rows
+        // Read the rules only now, so a toggle made while the list was loading is not lost.
+        val checked = store.packages()
+        _apps.value = rows.map { it.copy(checked = it.pkg in checked) }
     }
 
     fun setMode(m: PerAppMode) {
@@ -61,9 +63,14 @@ class AppsViewModel(app: Application) : AndroidViewModel(app) {
         applyLive()
     }
 
+    /**
+     * Flip one app's box in place. Re-querying every installed app per tap was slow, and
+     * overlapping reloads could land out of order and show a stale checkbox.
+     */
     fun toggle(pkg: String) {
         store.toggle(pkg)
-        load()
+        val checked = pkg in store.packages()
+        _apps.update { rows -> rows.map { if (it.pkg == pkg) it.copy(checked = checked) else it } }
         if (store.mode() != PerAppMode.OFF) applyLive()
     }
 
