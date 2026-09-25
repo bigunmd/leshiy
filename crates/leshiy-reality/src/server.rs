@@ -178,8 +178,24 @@ where
         let _ = tokio::io::copy_bidirectional(&mut client, &mut dest).await;
         return Ok(());
     }
+    // The MTProxy MAC is checked for every ClientHello when enabled, before knowing whether the
+    // REALITY auth succeeds, so its (small) cost does not split the two outcomes in timing.
+    let mtproxy = cfg.mtproxy.as_ref().and_then(|secret| {
+        crate::mtproxy::authenticate(&first.payload, secret, now_secs, cfg.max_time_diff)
+    });
     match classify_full(&first.payload, &cfg, now_secs) {
         ClassificationFull::Unauthed => {
+            // A replayed MTProxy hello gets the dest, like a replayed REALITY one: answering it
+            // would confirm to a censor that this recorded handshake opens a proxy.
+            let fresh = |a: &crate::mtproxy::Authenticated| {
+                fields.as_ref().ok().is_some_and(|f| {
+                    crate::replay::replay_key(a.digest(), &f.session_id)
+                        .is_some_and(|k| !replay.check_and_record(k, now_secs as u64))
+                })
+            };
+            if let Some(auth) = mtproxy.filter(fresh) {
+                return crate::mtproxy::serve(client, dest, auth, egress).await;
+            }
             let _ = tokio::io::copy_bidirectional(&mut client, &mut dest).await;
             Ok(())
         }
@@ -630,6 +646,7 @@ mod tests {
             max_time_diff: Duration::from_secs(120),
             dest: "www.example.com:443".into(),
             dest_by_sni: Default::default(),
+            mtproxy: None,
         }
     }
 

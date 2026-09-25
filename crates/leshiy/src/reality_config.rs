@@ -88,6 +88,7 @@ impl RealityServerConfig {
             max_time_diff: Duration::from_secs(self.max_time_diff_secs),
             dest: self.dest.clone(),
             dest_by_sni: self.dest_by_sni.clone(),
+            mtproxy: None,
         })
     }
 }

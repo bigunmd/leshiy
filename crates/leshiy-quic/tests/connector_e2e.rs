@@ -313,6 +313,7 @@ async fn connector_reality_front_two_hop() {
         max_time_diff: Duration::from_secs(120),
         dest,
         dest_by_sni: Default::default(),
+        mtproxy: None,
     });
     let cert = Arc::new(ServerCert::generate());
 

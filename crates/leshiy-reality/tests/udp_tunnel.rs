@@ -41,6 +41,7 @@ async fn authed_datagram_echo() {
         max_time_diff: Duration::from_secs(120),
         dest: "www.example.com:443".into(),
         dest_by_sni: Default::default(),
+        mtproxy: None,
     });
     let cert = Arc::new(ServerCert::generate());
 

@@ -27,6 +27,9 @@ pub struct ServerAuthConfig {
     /// matches one advertised name and the others are distinguishable (cert-SAN mismatch). An
     /// SNI absent here falls back to [`dest`](Self::dest). Empty = single-dest (legacy) behavior.
     pub dest_by_sni: std::collections::HashMap<String, String>,
+    /// When set, Telegram MTProxy (fake-TLS) clients holding this secret are served on the same
+    /// listener (ADR-0035). `None` = REALITY only.
+    pub mtproxy: Option<crate::mtproxy::MtProxySecret>,
 }
 
 #[derive(Clone)]
@@ -187,6 +190,7 @@ mod tests {
                 "b.example".to_string(),
                 "b.origin:443".to_string(),
             )]),
+            mtproxy: None,
         };
         // Per-SNI override wins.
         assert_eq!(cfg.dest_for(Some("b.example")), "b.origin:443");

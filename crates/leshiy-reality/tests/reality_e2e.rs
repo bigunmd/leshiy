@@ -138,6 +138,7 @@ async fn authed_tunnel_echo() {
         max_time_diff: Duration::from_secs(120),
         dest,
         dest_by_sni: Default::default(),
+        mtproxy: None,
     });
     let cert = Arc::new(ServerCert::generate());
 
@@ -208,6 +209,7 @@ async fn prober_gets_real_dest() {
         max_time_diff: Duration::from_secs(120),
         dest,
         dest_by_sni: Default::default(),
+        mtproxy: None,
     });
     let cert = Arc::new(ServerCert::generate());
 
@@ -276,6 +278,7 @@ async fn garbage_is_relayed_to_dest() {
         max_time_diff: Duration::from_secs(120),
         dest: echo,
         dest_by_sni: Default::default(),
+        mtproxy: None,
     });
     let cert = Arc::new(ServerCert::generate());
     let sl = TcpListener::bind("127.0.0.1:0").await.unwrap();

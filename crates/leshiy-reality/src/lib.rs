@@ -13,6 +13,7 @@ pub mod control;
 pub mod egress;
 pub mod error;
 pub mod handshake;
+pub mod mtproxy;
 pub mod netguard;
 pub mod ratelimit;
 pub mod replay;

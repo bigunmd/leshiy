@@ -64,6 +64,7 @@ async fn authed_icmp_echo_roundtrips_and_preserves_the_client_identifier() {
         max_time_diff: Duration::from_secs(120),
         dest: "www.example.com:443".into(),
         dest_by_sni: Default::default(),
+        mtproxy: None,
     });
     let cert = Arc::new(ServerCert::generate());
 
@@ -163,6 +164,7 @@ async fn non_echo_icmp_is_not_relayed() {
         max_time_diff: Duration::from_secs(120),
         dest: "www.example.com:443".into(),
         dest_by_sni: Default::default(),
+        mtproxy: None,
     });
     let cert = Arc::new(ServerCert::generate());
     let sl = TcpListener::bind("127.0.0.1:0").await.unwrap();

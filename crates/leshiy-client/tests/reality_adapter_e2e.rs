@@ -118,6 +118,7 @@ async fn reality_adapter_round_trip() {
         max_time_diff: Duration::from_secs(120),
         dest,
         dest_by_sni: Default::default(),
+        mtproxy: None,
     });
     let cert = Arc::new(ServerCert::generate());
 
@@ -204,6 +205,7 @@ async fn start_reality_server() -> (String, String) {
         max_time_diff: Duration::from_secs(120),
         dest,
         dest_by_sni: Default::default(),
+        mtproxy: None,
     });
     let cert = Arc::new(ServerCert::generate());
     let sl = TcpListener::bind("127.0.0.1:0").await.unwrap();
