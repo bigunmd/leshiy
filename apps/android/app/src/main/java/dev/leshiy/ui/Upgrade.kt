@@ -6,6 +6,10 @@ enum class StepState { PENDING, ACTIVE, DONE, FAILED }
 /** The steps `ServerManager.upgrade` emits, in order. Index = position in the timeline. */
 val UPGRADE_STEPS = listOf("Connect", "PullImage", "RunContainer", "Persist")
 
+/** The steps of one run: enabling the Telegram proxy comes last, after the upgrade is saved. */
+fun upgradeSteps(mtproxy: Boolean): List<String> =
+    if (mtproxy) UPGRADE_STEPS + "Telegram" else UPGRADE_STEPS
+
 /**
  * Everything the upgrade screen renders.
  *
@@ -14,6 +18,8 @@ val UPGRADE_STEPS = listOf("Connect", "PullImage", "RunContainer", "Persist")
  */
 data class UpgradeState(
     val running: Boolean = false,
+    /** This run's steps — see [upgradeSteps]. */
+    val steps: List<String> = UPGRADE_STEPS,
     /** Step Started but not yet Done; -1 when none. */
     val activeIndex: Int = -1,
     /** Steps fully Done. */
@@ -42,13 +48,15 @@ data class UpgradeState(
      * greater-than-zero check, is what gates its use in [applyEvent].
      */
     val activeSince: Long = 0L,
+    /** The server's `tg://proxy` link, once a run that enabled the Telegram proxy succeeds. */
+    val mtproxyLink: String? = null,
 )
 
 /** Fold one bridge progress event into the state. Unknown steps are logged and ignored. */
 fun UpgradeState.applyEvent(step: String, status: String, detail: String, nowMs: Long): UpgradeState {
     var next = copy(log = log + "$step/$status  $detail".trimEnd())
     if (detail.isNotBlank()) next = next.copy(detail = detail)
-    val i = UPGRADE_STEPS.indexOf(step)
+    val i = steps.indexOf(step)
     if (i < 0) return next
     return when (status) {
         "Started" -> next.copy(activeIndex = i, activeSince = nowMs)
@@ -75,14 +83,14 @@ fun UpgradeState.applyEvent(step: String, status: String, detail: String, nowMs:
  * real work (image ref validation, `docker inspect` for env, container-exists check, DNS
  * inspection, port parsing) before its first event — the failure is pinned to [doneCount], the
  * next un-started step, which is exactly where execution had reached. Guarded against
- * [doneCount] having already reached [UPGRADE_STEPS] size (everything completed).
+ * [doneCount] having already reached the size of [UpgradeState.steps] (everything completed).
  */
 fun UpgradeState.applyError(message: String): UpgradeState = copy(
     running = false,
     error = message,
     failedIndex = when {
         activeIndex >= 0 -> activeIndex
-        doneCount < UPGRADE_STEPS.size -> doneCount
+        doneCount < steps.size -> doneCount
         else -> failedIndex
     },
     activeIndex = -1,

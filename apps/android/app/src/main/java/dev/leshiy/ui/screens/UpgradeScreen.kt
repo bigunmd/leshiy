@@ -1,5 +1,8 @@
 package dev.leshiy.ui.screens
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -35,16 +38,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.leshiy.ui.StepState
-import dev.leshiy.ui.UPGRADE_STEPS
 import dev.leshiy.ui.UpgradeState
 import dev.leshiy.ui.UpgradeViewModel
+import dev.leshiy.ui.components.OutlineButton
 import dev.leshiy.ui.components.PanelCard
 import dev.leshiy.ui.components.PrimaryButton
 import dev.leshiy.ui.components.ScreenFrame
+import dev.leshiy.ui.components.SecureWindow
 import dev.leshiy.ui.components.SectionLabel
+import dev.leshiy.ui.components.copySensitive
 import dev.leshiy.ui.formatElapsed
 import dev.leshiy.ui.i18n.LocalStrings
 import dev.leshiy.ui.icons.LeshiyIcons
@@ -83,11 +89,17 @@ fun UpgradeScreen(
         }
     }
 
-    val names = listOf(s.stepConnect, s.stepPullImage, s.stepRecreate, s.stepSave)
-    require(names.size == UPGRADE_STEPS.size) {
-        "UPGRADE_STEPS has ${UPGRADE_STEPS.size} steps but `names` only labels ${names.size} — add a label"
+    val names = state.steps.map { step ->
+        when (step) {
+            "Connect" -> s.stepConnect
+            "PullImage" -> s.stepPullImage
+            "RunContainer" -> s.stepRecreate
+            "Persist" -> s.stepSave
+            "Telegram" -> s.stepTelegram
+            else -> step
+        }
     }
-    val states = stepStates(UPGRADE_STEPS.size, state.doneCount, state.activeIndex, state.failedIndex)
+    val states = stepStates(state.steps.size, state.doneCount, state.activeIndex, state.failedIndex)
 
     val (headline, tint) = when {
         state.error != null -> s.upgradeFailed to Warn
@@ -160,6 +172,8 @@ fun UpgradeScreen(
                 }
             }
 
+            state.mtproxyLink?.let { MtproxyLinkPanel(it) }
+
             Spacer(Modifier.size(4.dp))
 
             when {
@@ -168,6 +182,42 @@ fun UpgradeScreen(
             }
         }
     }
+}
+
+/** The `tg://proxy` link with the two things to do with it: hand it to Telegram, or copy it. */
+@Composable
+private fun MtproxyLinkPanel(link: String) {
+    val s = LocalStrings.current
+    val context = LocalContext.current
+    var note by remember(link) { mutableStateOf<String?>(null) }
+    SecureWindow()
+    SectionLabel(s.mtproxyLinkTitle)
+    Text(s.mtproxyLinkHint, style = MaterialTheme.typography.labelSmall, color = Dim)
+    PanelCard {
+        Text(link, fontFamily = PlexMono, style = MaterialTheme.typography.labelSmall, color = Wisp)
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        OutlineButton(
+            s.openInTelegram,
+            onClick = {
+                try {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link)))
+                } catch (_: ActivityNotFoundException) {
+                    note = s.telegramNotInstalled
+                }
+            },
+            modifier = Modifier.weight(1f),
+        )
+        OutlineButton(
+            s.copyLink,
+            onClick = {
+                copySensitive(context, link)
+                note = s.copied
+            },
+            modifier = Modifier.weight(1f),
+        )
+    }
+    note?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = Wisp) }
 }
 
 /** Elapsed for a step: live while active, frozen at its final duration once done. */

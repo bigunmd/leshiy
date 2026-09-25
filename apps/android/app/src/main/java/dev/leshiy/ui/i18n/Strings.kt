@@ -283,6 +283,13 @@ interface Strings {
     val stepPullImage: String
     val stepRecreate: String
     val stepSave: String
+    val stepTelegram: String
+    val mtproxyTitle: String
+    val mtproxySub: String
+    val mtproxyLinkTitle: String
+    val mtproxyLinkHint: String
+    val openInTelegram: String
+    val telegramNotInstalled: String
     // Shade (notification + QS tile)
     val notifConnected: String
     val notifConnectedPlain: String
@@ -563,6 +570,13 @@ val EnStrings: Strings = object : Strings {
     override val stepPullImage = "Pull image"
     override val stepRecreate = "Recreate container"
     override val stepSave = "Save"
+    override val stepTelegram = "Telegram proxy"
+    override val mtproxyTitle = "Also run a Telegram proxy"
+    override val mtproxySub = "Telegram connects to this server directly, on the same port, with a tg:// link — no Leshiy app needed. Telegram's own handshake is recognisable to some censors: if they block this server's IP over it, Leshiy on this server goes down too."
+    override val mtproxyLinkTitle = "Telegram proxy"
+    override val mtproxyLinkHint = "Open it on a device with Telegram, or share it. Anyone with this link can use the proxy."
+    override val openInTelegram = "Open in Telegram"
+    override val telegramNotInstalled = "Telegram is not installed on this device"
     override val notifConnected = "Connected — %1\$s"
     override val notifConnectedPlain = "Connected"
     override val notifDisconnect = "Disconnect"
@@ -832,6 +846,13 @@ val RuStrings: Strings = object : Strings {
     override val stepPullImage = "Загрузка образа"
     override val stepRecreate = "Пересоздание контейнера"
     override val stepSave = "Сохранение"
+    override val stepTelegram = "Прокси для Telegram"
+    override val mtproxyTitle = "Также запустить прокси для Telegram"
+    override val mtproxySub = "Telegram подключается к этому серверу напрямую, на том же порту, по ссылке tg:// — приложение Leshiy не нужно. Рукопожатие самого Telegram распознаётся некоторыми цензорами: если из-за него заблокируют IP сервера, Leshiy на этом сервере тоже перестанет работать."
+    override val mtproxyLinkTitle = "Прокси для Telegram"
+    override val mtproxyLinkHint = "Откройте её на устройстве с Telegram или поделитесь ей. Прокси может пользоваться любой, у кого есть эта ссылка."
+    override val openInTelegram = "Открыть в Telegram"
+    override val telegramNotInstalled = "Telegram не установлен на этом устройстве"
     override val notifConnected = "Подключено — %1\$s"
     override val notifConnectedPlain = "Подключено"
     override val notifDisconnect = "Отключить"

@@ -30,12 +30,20 @@ class UpgradeViewModel : ViewModel() {
     /**
      * [fromRef] and [targetRef] are full image refs; the caller has already resolved the target
      * (an Advanced override, else `defaultImageRef()`), because it needs it to decide whether an
-     * update is even available.
+     * update is even available. [mtproxy] also makes the server serve the Telegram proxy.
      */
-    fun upgrade(serverId: String, label: String, fromRef: String, targetRef: String, sudoPassword: String?) {
+    fun upgrade(
+        serverId: String,
+        label: String,
+        fromRef: String,
+        targetRef: String,
+        sudoPassword: String?,
+        mtproxy: Boolean,
+    ) {
         if (_state.value.running) return
         _state.value = UpgradeState(
             running = true,
+            steps = upgradeSteps(mtproxy),
             label = label,
             from = shortVersion(fromRef),
             to = shortVersion(targetRef),
@@ -54,11 +62,17 @@ class UpgradeViewModel : ViewModel() {
             }
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    VaultHolder.get()!!.upgrade(serverId, targetRef, sudoPassword, listener)
+                    VaultHolder.get()!!.upgrade(serverId, targetRef, sudoPassword, mtproxy, listener)
                 }
             }
             result.fold(
-                onSuccess = { _state.value = _state.value.copy(running = false, done = true) },
+                onSuccess = { outcome ->
+                    _state.value = _state.value.copy(
+                        running = false,
+                        done = true,
+                        mtproxyLink = outcome.mtproxyLink,
+                    )
+                },
                 onFailure = { e -> _state.value = _state.value.applyError(e.message ?: "failed") },
             )
         }

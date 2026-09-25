@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -38,6 +40,7 @@ import dev.leshiy.ui.components.StatusPill
 import dev.leshiy.ui.i18n.LocalStrings
 import dev.leshiy.ui.icons.LeshiyIcons
 import dev.leshiy.ui.shortVersion
+import dev.leshiy.ui.theme.Bg0
 import dev.leshiy.ui.theme.Dim
 import dev.leshiy.ui.theme.Moss
 import dev.leshiy.ui.theme.Warn
@@ -140,6 +143,24 @@ fun ServerDetailScreen(
                     // Never disabled when up to date: a re-run is how new container run-flags land
                     // (provision reuses a running container and would change nothing).
                     val upgradeAllowed = canUpgrade(upgradeState, server.id)
+                    var mtproxy by remember(server.id) { mutableStateOf(false) }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(s.mtproxyTitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onBackground)
+                            Text(s.mtproxySub, style = MaterialTheme.typography.labelSmall, color = Dim)
+                        }
+                        Spacer(Modifier.size(12.dp))
+                        Switch(
+                            checked = mtproxy,
+                            onCheckedChange = { mtproxy = it },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Bg0,
+                                checkedTrackColor = Wisp,
+                                uncheckedTrackColor = MaterialTheme.colorScheme.surface,
+                                uncheckedBorderColor = MaterialTheme.colorScheme.outline,
+                            ),
+                        )
+                    }
                     PrimaryButton(
                         if (hasUpdate) s.upgradeServer else s.reapplyVersion.format(shortVersion(effective)),
                         onClick = {
@@ -149,6 +170,7 @@ fun ServerDetailScreen(
                                 fromRef = server.imageRef,
                                 targetRef = effective,
                                 sudoPassword = sudoPw[server.id]?.takeIf { it.isNotBlank() },
+                                mtproxy = mtproxy,
                             )
                             onOpenUpgrade()
                         },

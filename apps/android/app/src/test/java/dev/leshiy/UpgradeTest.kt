@@ -10,6 +10,7 @@ import dev.leshiy.ui.formatElapsed
 import dev.leshiy.ui.shortVersion
 import dev.leshiy.ui.stepStates
 import dev.leshiy.ui.updateAvailable
+import dev.leshiy.ui.upgradeSteps
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -159,5 +160,34 @@ class UpgradeTest {
     @Test fun can_upgrade_is_false_for_a_different_server_while_one_is_running() {
         val s = UpgradeState(running = true, serverId = "berlin")
         assertFalse(canUpgrade(s, "oslo"))
+    }
+
+    @Test fun the_telegram_step_runs_last_and_only_when_asked() {
+        assertEquals(UPGRADE_STEPS, upgradeSteps(mtproxy = false))
+        assertEquals(UPGRADE_STEPS + "Telegram", upgradeSteps(mtproxy = true))
+    }
+
+    @Test fun a_telegram_event_is_tracked_when_the_run_includes_it() {
+        val s = UpgradeState(running = true, steps = upgradeSteps(true), doneCount = UPGRADE_STEPS.size)
+            .applyEvent("Telegram", "Started", "", nowMs = 10)
+            .applyEvent("Telegram", "Done", "", nowMs = 40)
+        assertEquals(UPGRADE_STEPS.size + 1, s.doneCount)
+        assertEquals(30L, s.stepMs[UPGRADE_STEPS.size])
+    }
+
+    @Test fun a_telegram_event_is_ignored_when_the_run_does_not_include_it() {
+        val s = UpgradeState(running = true, doneCount = UPGRADE_STEPS.size)
+            .applyEvent("Telegram", "Started", "", nowMs = 10)
+        assertEquals(-1, s.activeIndex)
+    }
+
+    /** The upgrade itself is saved before Telegram runs, so a Telegram failure must not
+     *  be pinned on (or undo) any of the upgrade's own steps. */
+    @Test fun a_telegram_failure_is_pinned_to_the_telegram_step() {
+        val s = UpgradeState(running = true, steps = upgradeSteps(true), doneCount = UPGRADE_STEPS.size)
+            .applyEvent("Telegram", "Started", "", nowMs = 0)
+            .applyError("boom")
+        assertEquals(UPGRADE_STEPS.size, s.failedIndex)
+        assertEquals(UPGRADE_STEPS.size, s.doneCount)
     }
 }
