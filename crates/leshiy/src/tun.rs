@@ -30,15 +30,22 @@ async fn bind_local_socks(addr: &str) -> Result<tokio::net::TcpListener> {
 
 /// Report a usable tunnel once the dial has succeeded and the SOCKS port (if any) is held.
 fn announce(tun_name: &str, socks: Option<&str>) {
+    // macOS only honors explicit `utunN` names; anything else is kernel-allocated.
+    let on = if cfg!(target_os = "macos")
+        && !tun_name
+            .strip_prefix("utun")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    {
+        String::new()
+    } else {
+        format!(" on {}", crate::ui::value(tun_name))
+    };
     let scope = if crate::service::running_under_wsl() {
         " (WSL2: this tunnels WSL traffic only — Windows apps are unaffected)"
     } else {
         ""
     };
-    crate::ui::ok(&format!(
-        "full-tunnel VPN up on {}{scope}",
-        crate::ui::value(tun_name)
-    ));
+    crate::ui::ok(&format!("full-tunnel VPN up{on}{scope}"));
     match socks {
         Some(s) => {
             crate::ui::ok(&format!(

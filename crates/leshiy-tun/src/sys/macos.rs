@@ -451,7 +451,7 @@ mod tests {
         .unwrap();
         let sess = MacOsOps
             .start(
-                "utun9",
+                "leshiy0",
                 1400,
                 &plan,
                 &["1.1.1.1".parse().unwrap()],
