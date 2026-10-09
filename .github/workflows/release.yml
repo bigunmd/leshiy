@@ -33,8 +33,33 @@ jobs:
           name: tar-${{ matrix.target }}
           path: leshiy-*.tar.gz
 
+  binaries-macos:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }} -p leshiy
+      - name: Package
+        run: |
+          V="${GITHUB_REF_NAME}"
+          T="${{ matrix.target }}"
+          mkdir -p dist
+          install -m755 "target/$T/release/leshiy" "dist/leshiy"
+          tar -C dist -czf "leshiy-$V-$T.tar.gz" leshiy
+          rm dist/leshiy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tar-${{ matrix.target }}
+          path: leshiy-*.tar.gz
+
   release:
-    needs: binaries
+    needs: [binaries, binaries-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write   # create the GitHub Release

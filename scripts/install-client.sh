@@ -23,17 +23,26 @@ die() { echo "error: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 detect_target() {
+  case "$(uname -s)" in
+    Linux) os="unknown-linux-musl" ;;
+    Darwin) os="apple-darwin" ;;
+    *) die "unsupported OS $(uname -s); build from source: cargo build --release" ;;
+  esac
   case "$(uname -m)" in
-    x86_64|amd64) echo "x86_64-unknown-linux-musl" ;;
-    aarch64|arm64) echo "aarch64-unknown-linux-musl" ;;
+    x86_64|amd64) echo "x86_64-$os" ;;
+    aarch64|arm64) echo "aarch64-$os" ;;
     *) die "unsupported arch $(uname -m); build from source: cargo build --release" ;;
   esac
+}
+
+sha256_check() {
+  if have sha256sum; then sha256sum -c -; else shasum -a 256 -c -; fi
 }
 
 resolve_version() {
   if [ "$VERSION" = "latest" ]; then
     # The repo ships three release trains that all share GitHub's single "latest" pointer:
-    # the server/CLI train (vX.Y.Z, the only one carrying the Linux binary + these scripts),
+    # the server/CLI train (vX.Y.Z, the only one carrying the CLI binaries + these scripts),
     # plus desktop-v* and android-v*. /releases/latest can therefore resolve to a desktop or
     # android tag that has none of our assets. List releases (newest first) and pick the newest
     # server-train tag instead — `^v[0-9]` matches vX.Y.Z but not desktop-v*/android-v*.
@@ -68,7 +77,7 @@ install_client() {
   # Pass the pubkey via -P (bare key line), then verify the artifact's checksum.
   minisign -Vm "$tmp/SHA256SUMS" -P "$MINISIGN_PUB" -x "$tmp/SHA256SUMS.minisig" \
     || die "signature verification FAILED — aborting"
-  ( cd "$tmp" && grep "$tarball" SHA256SUMS | sha256sum -c - ) \
+  ( cd "$tmp" && grep "$tarball" SHA256SUMS | sha256_check ) \
     || die "checksum mismatch — aborting"
   tar -C "$tmp" -xzf "$tmp/$tarball"
   mkdir -p "$BINDIR"

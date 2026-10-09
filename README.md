@@ -77,7 +77,8 @@ scripting.
 
 ### 1. Install
 
-On the machine you want to tunnel *from*, no root needed:
+On the machine you want to tunnel *from* — Linux or macOS (Intel or Apple Silicon), no root
+needed:
 
 ```sh
 curl -fsSL https://github.com/bigunmd/leshiy/releases/latest/download/install-client.sh | sh
@@ -85,6 +86,9 @@ curl -fsSL https://github.com/bigunmd/leshiy/releases/latest/download/install-cl
 
 Needs `minisign` on PATH to verify the download (`apt install minisign`, `brew install minisign`, …).
 Or build it yourself: `cargo build --release`.
+
+> **On macOS** everything except `leshiy service` works: that command manages a systemd
+> unit, so run `leshiy connect` or `sudo leshiy tun` in the foreground instead.
 
 ### 2. Get a server
 

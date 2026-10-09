@@ -66,11 +66,7 @@ impl HostOps for RealHostOps {
             .lines()
             .last()
             .ok_or_else(|| anyhow::anyhow!("embedded minisign pubkey missing"))?;
-        let target = match std::env::consts::ARCH {
-            "x86_64" => "x86_64-unknown-linux-musl",
-            "aarch64" => "aarch64-unknown-linux-musl",
-            other => anyhow::bail!("unsupported arch {other}"),
-        };
+        let target = release_target(std::env::consts::OS, std::env::consts::ARCH)?;
         // All dynamic values are passed as positional args ($1..$5) so none is interpolated
         // into the shell program text — no command-injection surface.
         //
@@ -110,7 +106,8 @@ curl -fsSL --retry 3 --retry-connrefused --connect-timeout 30 \
   "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" \
   "$base/SHA256SUMS.minisig" -o "$tmp/SHA256SUMS.minisig"
 minisign -Vm "$tmp/SHA256SUMS" -P "$pubkey" -x "$tmp/SHA256SUMS.minisig"
-( cd "$tmp" && awk -v f="$tarball" '$2==f' SHA256SUMS | sha256sum -c - )
+if command -v sha256sum >/dev/null 2>&1; then sha256="sha256sum"; else sha256="shasum -a 256"; fi
+( cd "$tmp" && awk -v f="$tarball" '$2==f' SHA256SUMS | $sha256 -c - )
 tar -C "$tmp" -xzf "$tmp/$tarball"
 dd if="$tmp/leshiy" of="$new" bs=1M conv=fsync 2>/dev/null
 chmod 755 "$new"
@@ -132,6 +129,16 @@ mv -f "$new" "$dest"
         }
         Ok(())
     }
+}
+
+fn release_target(os: &str, arch: &str) -> Result<&'static str> {
+    Ok(match (os, arch) {
+        ("linux", "x86_64") => "x86_64-unknown-linux-musl",
+        ("linux", "aarch64") => "aarch64-unknown-linux-musl",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        (os, arch) => anyhow::bail!("no release binary for {os}/{arch}; build from source"),
+    })
 }
 
 /// The release signing public key, embedded at build time (last line is the key).
@@ -186,5 +193,32 @@ pub mod mock {
                 .push(format!("fetch:{repo}:{version}:{dest}"));
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::release_target;
+
+    #[test]
+    fn release_target_matches_published_tarballs() {
+        assert_eq!(
+            release_target("linux", "x86_64").unwrap(),
+            "x86_64-unknown-linux-musl"
+        );
+        assert_eq!(
+            release_target("linux", "aarch64").unwrap(),
+            "aarch64-unknown-linux-musl"
+        );
+        assert_eq!(
+            release_target("macos", "x86_64").unwrap(),
+            "x86_64-apple-darwin"
+        );
+        assert_eq!(
+            release_target("macos", "aarch64").unwrap(),
+            "aarch64-apple-darwin"
+        );
+        assert!(release_target("windows", "x86_64").is_err());
+        assert!(release_target("linux", "riscv64").is_err());
     }
 }
