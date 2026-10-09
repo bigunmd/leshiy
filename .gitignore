@@ -38,3 +38,6 @@ rustc-ice-*.txt
 *.keystore
 *.jks.b64
 keystore.properties
+
+# Local engineering records
+/.gold/
