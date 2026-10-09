@@ -185,7 +185,15 @@ impl Egress for DirectEgress {
 /// Requires the process GID to fall inside `net.ipv4.ping_group_range`; the container sets it.
 /// Without it this fails `EACCES`, the association is declined, and the client keeps dropping
 /// ICMP — the same degradation as talking to a server that never advertised `CAP_ICMP`.
+///
+/// Declined on macOS: its ICMP sockets receive all inbound ICMP, leaking replies across flows.
 fn icmp_socket(ip: std::net::IpAddr) -> Result<tokio::net::UdpSocket> {
+    if cfg!(target_os = "macos") {
+        return Err(crate::RealityError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "ICMP egress is Linux-only (macOS ICMP sockets are not per-flow)",
+        )));
+    }
     let (domain, protocol) = match ip {
         std::net::IpAddr::V4(_) => (socket2::Domain::IPV4, socket2::Protocol::ICMPV4),
         std::net::IpAddr::V6(_) => (socket2::Domain::IPV6, socket2::Protocol::ICMPV6),
