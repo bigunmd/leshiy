@@ -162,8 +162,7 @@ pub fn mode_menu(caps: &Capabilities) -> Vec<ModeEntry> {
             mode: Mode::Vpn,
             label: "Full-device VPN via the helper",
             note: "same, but the privileged helper owns it — no sudo prompt",
-            blocked: (!caps.helper)
-                .then_some("leshiy-helper is not running (no /run/leshiy/helper.sock)"),
+            blocked: (!caps.helper).then_some("leshiy-helper is not running (no control socket)"),
         },
         ModeEntry {
             mode: Mode::Service { tun: false },

@@ -471,73 +471,76 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             lifecycle::update(&repo, &v, &dest, force, &host::RealHostOps)?
         }
         cli::Cmd::Remote { cmd, interactive } => remote_cli::run(cmd, interactive).await?,
-        cli::Cmd::Service { cmd, interactive } => match cmd {
-            cli::ServiceCmd::Start {
-                uri,
-                uri_file,
-                transport,
-                socks,
-                tun,
-                tun_name,
-                dns,
-                mtu,
-                ipv6,
-                no_socks,
-            } => {
-                if interactive {
-                    wizard::require_tty()?;
-                }
-                // `--tun` decides the unit's scope, so it has to be settled before the
-                // wizard can ask scope-dependent questions.
-                let tun = tun
-                    || (interactive
-                        && wizard::confirm(
-                            "Route the whole device (full tunnel, needs root)?",
-                            false,
-                        )?);
-                let mode = client_wizard::Mode::Service { tun };
-                let plan = client_plan(
-                    client_wizard::ClientFlags {
-                        uri,
-                        uri_file,
-                        transport,
-                        socks,
-                        no_socks,
-                        mtu,
-                        tun_name,
-                        dns,
-                        ipv6,
-                        ..Default::default()
-                    },
-                    mode,
-                    interactive,
-                )?;
-                if let Some(code) =
-                    run_client_plan(plan, mode, interactive, already_elevated).await?
-                {
-                    return Ok(code);
-                }
-            }
-            cli::ServiceCmd::Stop => {
-                // Stopping a system unit is polkit-gated, so escalate first rather than
-                // let systemctl fail with "Interactive authentication required".
-                if service::stop_needs_root()?
-                    && let Some(code) = elevate::ensure_root(already_elevated).await?
-                {
-                    return Ok(code);
-                }
-                service::stop()?
-            }
-            cli::ServiceCmd::Status => service::status()?,
-            cli::ServiceCmd::Logs { follow } => {
-                let follow = follow
-                    || (interactive && {
+        cli::Cmd::Service { cmd, interactive } => {
+            service::ensure_supported()?;
+            match cmd {
+                cli::ServiceCmd::Start {
+                    uri,
+                    uri_file,
+                    transport,
+                    socks,
+                    tun,
+                    tun_name,
+                    dns,
+                    mtu,
+                    ipv6,
+                    no_socks,
+                } => {
+                    if interactive {
                         wizard::require_tty()?;
-                        wizard::confirm("Follow the log as it grows?", true)?
-                    });
-                service::logs(follow)?
+                    }
+                    // `--tun` decides the unit's scope, so it has to be settled before the
+                    // wizard can ask scope-dependent questions.
+                    let tun = tun
+                        || (interactive
+                            && wizard::confirm(
+                                "Route the whole device (full tunnel, needs root)?",
+                                false,
+                            )?);
+                    let mode = client_wizard::Mode::Service { tun };
+                    let plan = client_plan(
+                        client_wizard::ClientFlags {
+                            uri,
+                            uri_file,
+                            transport,
+                            socks,
+                            no_socks,
+                            mtu,
+                            tun_name,
+                            dns,
+                            ipv6,
+                            ..Default::default()
+                        },
+                        mode,
+                        interactive,
+                    )?;
+                    if let Some(code) =
+                        run_client_plan(plan, mode, interactive, already_elevated).await?
+                    {
+                        return Ok(code);
+                    }
+                }
+                cli::ServiceCmd::Stop => {
+                    // Stopping a system unit is polkit-gated, so escalate first rather than
+                    // let systemctl fail with "Interactive authentication required".
+                    if service::stop_needs_root()?
+                        && let Some(code) = elevate::ensure_root(already_elevated).await?
+                    {
+                        return Ok(code);
+                    }
+                    service::stop()?
+                }
+                cli::ServiceCmd::Status => service::status()?,
+                cli::ServiceCmd::Logs { follow } => {
+                    let follow = follow
+                        || (interactive && {
+                            wizard::require_tty()?;
+                            wizard::confirm("Follow the log as it grows?", true)?
+                        });
+                    service::logs(follow)?
+                }
             }
-        },
+        }
         cli::Cmd::Boot => server::boot().await?,
     }
     Ok(std::process::ExitCode::SUCCESS)

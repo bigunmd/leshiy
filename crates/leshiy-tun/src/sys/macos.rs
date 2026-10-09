@@ -49,8 +49,10 @@ impl PrivilegedOps for MacOsOps {
         //    crate also installs the on-link route from address/netmask. No
         //    `ensure_root_privileges` here — that platform_config is Linux-only.
         let mut cfg = tun::Configuration::default();
-        cfg.tun_name(tun_name)
-            .address(tun4)
+        if let Some(name) = utun_name(tun_name) {
+            cfg.tun_name(name);
+        }
+        cfg.address(tun4)
             .netmask(std::net::Ipv4Addr::new(255, 255, 255, 0))
             .mtu(mtu)
             .up();
@@ -409,12 +411,31 @@ fn to_io<E: std::fmt::Display>(e: E) -> std::io::Error {
     std::io::Error::other(e.to_string())
 }
 
+/// Darwin only allows `utunN`; any other name lets the kernel pick one.
+fn utun_name(requested: &str) -> Option<&str> {
+    requested
+        .strip_prefix("utun")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(requested)
+}
+
 #[cfg(test)]
 mod tests {
     // Imported only where the macOS-gated smoke below uses it; on the host the smoke is
     // `cfg`-compiled out, so this would otherwise be an unused import.
     #[cfg(target_os = "macos")]
     use super::*;
+
+    #[test]
+    fn only_utun_names_are_requested() {
+        use super::utun_name;
+        assert_eq!(utun_name("utun9"), Some("utun9"));
+        assert_eq!(utun_name("utun12"), Some("utun12"));
+        assert_eq!(utun_name("leshiy0"), None);
+        assert_eq!(utun_name("utun"), None);
+        assert_eq!(utun_name("utunx"), None);
+        assert_eq!(utun_name(""), None);
+    }
 
     // Gated to macOS: the smoke needs root + a real utun on macOS, so it never runs (or even
     // compiles) on the Linux host. `#[ignore]`d so a macOS operator opts in explicitly.

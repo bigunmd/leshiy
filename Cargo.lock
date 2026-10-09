@@ -1914,6 +1914,7 @@ dependencies = [
  "leshiy-quic",
  "leshiy-reality",
  "leshiy-tun",
+ "nix 0.29.0",
  "qrcode",
  "rand 0.8.6",
  "rcgen",

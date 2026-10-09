@@ -129,6 +129,17 @@ pub(crate) fn systemd_available() -> bool {
     Path::new("/run/systemd/system").exists()
 }
 
+/// Fail before any wizard prompt: systemd is Linux-only.
+pub fn ensure_supported() -> Result<()> {
+    if cfg!(target_os = "macos") {
+        anyhow::bail!(
+            "`leshiy service` manages a systemd unit and is Linux-only; on macOS run \
+             `leshiy connect` (SOCKS5) or `sudo leshiy tun` (full tunnel) in the foreground."
+        );
+    }
+    Ok(())
+}
+
 fn preflight(scope: Scope) -> Result<()> {
     let booted = systemd_available();
     if !booted {
