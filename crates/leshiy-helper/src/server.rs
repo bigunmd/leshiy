@@ -292,12 +292,10 @@ mod tests {
         }
     }
 
-    fn uuid_like() -> u128 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+    /// A counter, not a timestamp: macOS's microsecond clock lets parallel tests collide.
+    fn uuid_like() -> u64 {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     // Regression: a StartVpn carrying a large community ruleset (here ~5000 CIDRs, well past

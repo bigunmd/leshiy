@@ -333,17 +333,20 @@ mod tests {
     /// The sticky bit restricts rename/delete to each entry's owner, so a shared
     /// directory carrying it is not a planting vector. `/tmp` is mode 1777 and every
     /// other test here lives under it — without this exemption they would all fail.
+    /// `/tmp` explicitly: on macOS `temp_dir()` is a private `0700` dir.
     #[test]
     fn accepts_sticky_shared_dir_such_as_tmp() {
-        let tmp = std::env::temp_dir();
-        let mode = std::fs::metadata(&tmp).unwrap().permissions().mode();
+        let tmp = Path::new("/tmp");
+        let mode = std::fs::metadata(tmp).unwrap().permissions().mode();
         assert!(
             mode & 0o1000 != 0,
             "expected {} to be sticky",
             tmp.display()
         );
 
-        let dir = unique_dir("sticky");
+        let dir = tmp.join(format!("leshiy-elev-{}-sticky", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         let exe = write_exe(&dir, 0o755);
         assert!(validate_elevation_target(&exe).is_ok());
         std::fs::remove_dir_all(&dir).ok();
