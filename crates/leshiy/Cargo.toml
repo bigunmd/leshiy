@@ -43,6 +43,9 @@ rpassword.workspace = true
 dialoguer.workspace = true
 socket2.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+nix = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 rustls.workspace = true

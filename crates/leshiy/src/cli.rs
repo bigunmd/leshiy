@@ -445,6 +445,10 @@ pub const DEFAULT_SOCKS: &str = "127.0.0.1:1080";
 pub const DEFAULT_MTU: u16 = 1400;
 pub const DEFAULT_TUN_NAME: &str = "leshiy0";
 pub const DEFAULT_DNS: &str = "1.1.1.1";
+/// Must match `leshiy_helper::default_socket_path()`.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_HELPER_SOCKET: &str = "/var/run/leshiy/helper.sock";
+#[cfg(not(target_os = "macos"))]
 pub const DEFAULT_HELPER_SOCKET: &str = "/run/leshiy/helper.sock";
 
 #[derive(Subcommand)]
@@ -789,7 +793,10 @@ mod tests {
         assert_eq!(DEFAULT_MTU, 1400);
         assert_eq!(DEFAULT_TUN_NAME, "leshiy0");
         assert_eq!(DEFAULT_DNS, "1.1.1.1");
-        assert_eq!(DEFAULT_HELPER_SOCKET, "/run/leshiy/helper.sock");
+        assert_eq!(
+            std::path::Path::new(DEFAULT_HELPER_SOCKET),
+            leshiy_helper::default_socket_path()
+        );
         assert_eq!(DEFAULT_LISTEN_PORT, 443);
         assert_eq!(DEFAULT_USER_LABEL, "self");
         assert_eq!(DEFAULT_CLIENT_LABEL, "client");

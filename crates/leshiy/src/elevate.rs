@@ -24,9 +24,11 @@ use anyhow::{Context, Result};
 pub const GUARD_FLAG: &str = "--already-elevated";
 
 /// `CAP_NET_ADMIN` is capability bit 12.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 const CAP_NET_ADMIN_BIT: u32 = 12;
 
 /// Parse a `/proc/self/status` field into its raw value.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn status_field<'a>(status: &'a str, name: &str) -> Option<&'a str> {
     status
         .lines()
@@ -35,6 +37,7 @@ fn status_field<'a>(status: &'a str, name: &str) -> Option<&'a str> {
 }
 
 /// Effective uid and effective capability mask, as reported by the kernel.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn euid_and_capeff(status: &str) -> (Option<u32>, Option<u64>) {
     // "Uid:\t<real>\t<effective>\t<saved>\t<fs>"
     let euid = status_field(status, "Uid")
@@ -45,6 +48,7 @@ fn euid_and_capeff(status: &str) -> (Option<u32>, Option<u64>) {
 }
 
 /// Does this process already have what TUN mode needs?
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn is_privileged(status: &str) -> bool {
     let (euid, capeff) = euid_and_capeff(status);
     if euid == Some(0) {
@@ -53,7 +57,13 @@ fn is_privileged(status: &str) -> bool {
     capeff.is_some_and(|c| c & (1 << CAP_NET_ADMIN_BIT) != 0)
 }
 
+#[cfg(target_os = "macos")]
+pub fn have_privileges() -> bool {
+    nix::unistd::geteuid().is_root()
+}
+
 /// True when the running process can open a TUN device and mutate routes.
+#[cfg(not(target_os = "macos"))]
 pub fn have_privileges() -> bool {
     match std::fs::read_to_string("/proc/self/status") {
         Ok(s) => is_privileged(&s),

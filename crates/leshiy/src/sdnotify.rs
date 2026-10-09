@@ -27,15 +27,31 @@ fn notify(payload: &str) {
     // abstract form is still legal and silently unsupported by `send_to`.
     let bytes = addr.as_os_str().as_encoded_bytes();
     let sent = if let Some(name) = bytes.strip_prefix(b"@") {
-        use std::os::linux::net::SocketAddrExt;
-        std::os::unix::net::SocketAddr::from_abstract_name(name)
-            .and_then(|a| sock.send_to_addr(payload.as_bytes(), &a))
+        send_abstract(&sock, name, payload)
     } else {
         sock.send_to(payload.as_bytes(), &addr)
     };
     if let Err(e) = sent {
         tracing::debug!(error = %e, "sd_notify failed");
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn send_abstract(sock: &UnixDatagram, name: &[u8], payload: &str) -> std::io::Result<usize> {
+    #[cfg(target_os = "android")]
+    use std::os::android::net::SocketAddrExt;
+    #[cfg(target_os = "linux")]
+    use std::os::linux::net::SocketAddrExt;
+    std::os::unix::net::SocketAddr::from_abstract_name(name)
+        .and_then(|a| sock.send_to_addr(payload.as_bytes(), &a))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn send_abstract(_sock: &UnixDatagram, _name: &[u8], _payload: &str) -> std::io::Result<usize> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "abstract unix sockets are Linux-only",
+    ))
 }
 
 /// Announce that start-up finished and the service is genuinely usable.
