@@ -6,7 +6,9 @@
 //! after one session for the on-demand GUI model); `install`/`uninstall` (Linux-only:
 //! `setcap`/systemd). On macOS/Windows the GUI launches `run --ephemeral` on demand, so no
 //! install step is needed.
-use anyhow::{Context, Result};
+#[cfg(any(target_os = "linux", windows))]
+use anyhow::Context;
+use anyhow::Result;
 use clap::Parser;
 use leshiy_helper::{Auth, Endpoint, EngineRunner, ServeMode, default_socket_path, serve_control};
 use std::sync::Arc;
