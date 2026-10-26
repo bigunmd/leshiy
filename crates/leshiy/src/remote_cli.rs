@@ -95,6 +95,7 @@ pub fn missing_required_arg(cmd: &crate::cli::RemoteCmd) -> Option<&'static str>
         R::Provision { host: None, .. } => Some("--host"),
         R::Provision { dest: None, .. } => Some("--dest"),
         R::Status { server: None }
+        | R::Credentials { server: None, .. }
         | R::Upgrade { server: None, .. }
         | R::Teardown { server: None, .. }
         | R::Backup { server: None, .. } => server,
@@ -108,6 +109,12 @@ pub fn missing_required_arg(cmd: &crate::cli::RemoteCmd) -> Option<&'static str>
         } => Some("a user short_id"),
         _ => None,
     }
+}
+
+fn replace_credentials(vault: &mut Vault, server: &str, secret: SshSecret) -> Result<()> {
+    let rec = vault.get_mut(server).context("no such saved server")?;
+    rec.ssh_secret = secret;
+    Ok(())
 }
 
 /// Resolve the server a day-2 subcommand acts on: the named one, a menu choice under
@@ -256,6 +263,52 @@ pub async fn run(cmd: crate::cli::RemoteCmd, interactive: bool) -> Result<()> {
         anyhow::bail!("{what} is required — pass it, or add -i to be asked for it");
     }
     match cmd {
+        RemoteCmd::Credentials { server, mut key } => {
+            let (pass, mut vault) = open_vault(interactive, false)?;
+            let server = pick_server(
+                &vault,
+                server,
+                interactive,
+                "Server to update credentials for",
+            )?;
+            vault.get(&server).context("no such saved server")?;
+            if interactive && key.is_none() {
+                let method = crate::wizard::select(
+                    "New SSH authentication method",
+                    &["Password".into(), "Private key".into()],
+                    0,
+                )?;
+                if method == 1 {
+                    key = Some(crate::wizard::text("Private key file", None)?);
+                }
+            }
+            let ask = secret_prompt(interactive);
+            let secret = if let Some(path) = key {
+                let pem = Zeroizing::new(
+                    std::fs::read_to_string(&path).with_context(|| format!("read key {path}"))?,
+                );
+                let passphrase = if leshiy_provision::ssh::key_needs_passphrase(&pem) {
+                    Some(ask("SSH key passphrase")?)
+                } else {
+                    None
+                };
+                leshiy_provision::ssh::validate_private_key(
+                    &pem,
+                    passphrase.as_ref().map(|p| p.as_str()),
+                )?;
+                SshSecret::PrivateKey { pem, passphrase }
+            } else {
+                let password = ask("New saved SSH password")?;
+                anyhow::ensure!(!password.is_empty(), "SSH password cannot be empty");
+                SshSecret::Password(password)
+            };
+            replace_credentials(&mut vault, &server, secret)?;
+            vault.save(&vault_path(), &pass).context("save vault")?;
+            crate::ui::hint(
+                "Saved SSH credentials updated locally; remote access was not checked.",
+            );
+            Ok(())
+        }
         RemoteCmd::Ls => {
             let (_pass, vault) = open_vault(interactive, false)?;
             for r in vault.list() {
@@ -800,7 +853,7 @@ mod tests {
             missing_for(&["leshiy", "remote", "provision", "--host", "root@h"]),
             Some("--dest")
         );
-        for sub in ["status", "upgrade", "teardown"] {
+        for sub in ["status", "upgrade", "teardown", "credentials"] {
             assert_eq!(missing_for(&["leshiy", "remote", sub]), Some("a server"));
         }
         assert_eq!(
@@ -950,12 +1003,8 @@ mod tests {
         assert!(parse_ssh_host("no-at-sign").is_err());
     }
 
-    #[test]
-    fn backup_then_restore_round_trips_via_vault() {
-        // Pure vault round-trip exercising the export/import the CLI arms use.
-        use leshiy_provision::vault::{ClientConfig, ServerRecord, SshSecret, Vault};
-        let mut v = Vault::new();
-        v.upsert(ServerRecord {
+    fn sample_record() -> ServerRecord {
+        ServerRecord {
             id: "s1".into(),
             label: "v".into(),
             host: "h".into(),
@@ -978,7 +1027,66 @@ mod tests {
             connector_uri: None,
             downstream: None,
             sudo: false,
-        });
+        }
+    }
+
+    #[test]
+    fn credentials_replace_only_secret_and_round_trip() {
+        let mut vault = Vault::new();
+        vault.upsert(sample_record());
+        let mut other = sample_record();
+        other.id = "other".into();
+        other.label = "other".into();
+        vault.upsert(other.clone());
+        let original = serde_json::to_value(sample_record()).unwrap();
+        for (lookup, secret) in [
+            (
+                "v",
+                SshSecret::PrivateKey {
+                    pem: "test fixture".to_string().into(),
+                    passphrase: Some("pp".to_string().into()),
+                },
+            ),
+            ("s1", SshSecret::Password("replacement".to_string().into())),
+        ] {
+            replace_credentials(&mut vault, lookup, secret.clone()).unwrap();
+            let blob = vault.export_all("test vault passphrase").unwrap();
+            let records = leshiy_provision::vault::open(&blob, "test vault passphrase").unwrap();
+            let mut expected = original.clone();
+            expected["ssh_secret"] = serde_json::to_value(secret).unwrap();
+            assert_eq!(serde_json::to_value(&records[0]).unwrap(), expected);
+            assert_eq!(
+                serde_json::to_value(&records[1]).unwrap(),
+                serde_json::to_value(&other).unwrap()
+            );
+        }
+        let before = serde_json::to_value(vault.list()).unwrap();
+        assert!(replace_credentials(&mut vault, "missing", SshSecret::None).is_err());
+        assert_eq!(serde_json::to_value(vault.list()).unwrap(), before);
+    }
+
+    #[test]
+    fn credentials_cli_accepts_key_and_interactive() {
+        use clap::Parser;
+        for args in [
+            vec![
+                "leshiy",
+                "remote",
+                "credentials",
+                "srv",
+                "--key",
+                "/tmp/key",
+            ],
+            vec!["leshiy", "remote", "credentials", "-i"],
+        ] {
+            assert!(crate::cli::Cli::try_parse_from(args).is_ok());
+        }
+    }
+
+    #[test]
+    fn backup_then_restore_round_trips_via_vault() {
+        let mut v = Vault::new();
+        v.upsert(sample_record());
         let blob = v.export_one("s1", false, "share").unwrap();
         let recs = leshiy_provision::vault::open(&blob, "share").unwrap();
         assert_eq!(recs[0].id, "s1");

@@ -651,6 +651,15 @@ pub enum RemoteCmd {
         #[arg(long)]
         mtproxy: bool,
     },
+    /// Replace saved SSH credentials locally; does not connect to or modify the server.
+    Credentials {
+        /// Saved server ID or label (pick interactively with -i).
+        server: Option<String>,
+        /// Private key file; prompts for its passphrase if encrypted. Without this,
+        /// prompts for a password (or selects the authentication method with -i).
+        #[arg(long)]
+        key: Option<String>,
+    },
     /// List saved servers.
     Ls,
     /// Manage users on a saved server.

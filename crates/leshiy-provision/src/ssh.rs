@@ -16,6 +16,13 @@ pub fn key_needs_passphrase(pem: &str) -> bool {
     russh::keys::decode_secret_key(pem, None).is_err()
 }
 
+/// Validate a private key offline with the same decoder used for SSH connections.
+pub fn validate_private_key(pem: &str, passphrase: Option<&str>) -> Result<()> {
+    russh::keys::decode_secret_key(pem, passphrase)
+        .map(|_| ())
+        .map_err(|_| Error::Ssh("invalid private key or incorrect key passphrase".into()))
+}
+
 /// Format a raw SHA-256 digest as an OpenSSH-style `SHA256:<base64-nopad>` string.
 pub fn format_fp_sha256(digest: &[u8; 32]) -> String {
     use base64::Engine;
@@ -181,6 +188,15 @@ DVDe8dQbh7Yei35g==\n\
     fn encrypted_key_decodes_with_correct_passphrase() {
         assert!(russh::keys::decode_secret_key(ENC, Some("testpass")).is_ok());
         assert!(russh::keys::decode_secret_key(ENC, Some("wrong")).is_err());
+    }
+
+    #[test]
+    fn credential_key_validation() {
+        assert!(validate_private_key(UNENC, None).is_ok());
+        assert!(validate_private_key(ENC, Some("testpass")).is_ok());
+        assert!(validate_private_key(ENC, Some("wrong")).is_err());
+        assert!(validate_private_key(ENC, None).is_err());
+        assert!(validate_private_key("not a key", None).is_err());
     }
 
     #[test]

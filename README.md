@@ -211,6 +211,19 @@ For servers you provisioned remotely: `leshiy remote ls`, `status`, `upgrade`, `
 (add `--connection-only` to share without SSH credentials), `restore` and `teardown` —
 all of them take `-i`.
 
+To replace a saved server's SSH credentials after changing them on the server:
+
+```sh
+leshiy remote credentials my-server                      # hidden password prompt
+leshiy remote credentials my-server --key ~/.ssh/id_ed25519
+leshiy remote credentials -i                             # pick server and auth method
+```
+
+Use the server's ID or label. Encrypted private keys prompt for their passphrase and
+are validated before saving. This updates **only the local encrypted vault**, preserving
+server settings and client configs; it does not connect to the server, change its password
+or authorized keys, or change the vault passphrase. Remote acceptance is not checked.
+
 **Scripting.** Every wizard has a flag-only equivalent: run it once with `-i` and copy the
 command it prints. Credentials are never echoed into that line — keep a `leshiy://` link
 in a `0600` file and pass `--uri-file` to stay out of shell history and `ps`.
