@@ -36,6 +36,12 @@ ignore = [
     # upgrade is available (uniffi 0.28.x pins bincode 1.x), and it runs only in
     # uniffi's build-time codegen. Revisit when uniffi moves off bincode.
     "RUSTSEC-2025-0141",
+    # basic-toml 0.1.10 (unmaintained), via uniffi_bindgen -> askama ->
+    # askama_derive. Used for binding-generation configuration parsing; this
+    # advisory reports unmaintained status, not a known vulnerability.
+    # shortcut: accept maintenance risk temporarily; remove this exception when
+    # UniFFI/Askama replaces basic-toml. No patched release is available.
+    "RUSTSEC-2026-0374",
 ]
 
 [bans]
