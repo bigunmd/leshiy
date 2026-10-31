@@ -111,7 +111,7 @@ async fn try_once(saddr: &str, server_public: [u8; 32]) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     // A bare IP: ICMP has no ports.
-    let mut flow = conn
+    let flow = conn
         .open_icmp("127.0.0.1")
         .await
         .map_err(|e| e.to_string())?;
@@ -201,7 +201,7 @@ async fn non_echo_icmp_is_not_relayed() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let conn = conn.expect("server never came up");
-    let mut flow = conn.open_icmp("127.0.0.1").await.unwrap();
+    let flow = conn.open_icmp("127.0.0.1").await.unwrap();
 
     // An ICMP Redirect (type 5) — well-formed, but not echo.
     let mut redirect = vec![5u8, 0, 0, 0, 0, 0, 0, 0];

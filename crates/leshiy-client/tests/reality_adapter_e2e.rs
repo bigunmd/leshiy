@@ -82,7 +82,7 @@ async fn round_trip_once(uri: &str, echo: &str) -> Result<(), String> {
         .dial(uri, TransportPref::Tcp)
         .await
         .map_err(|e| e.to_string())?;
-    let mut stream = tunnel.open(echo).await.map_err(|e| e.to_string())?;
+    let stream = tunnel.open(echo).await.map_err(|e| e.to_string())?;
     stream
         .send(bytes::Bytes::from_static(b"leshiy-adapter-e2e"))
         .await

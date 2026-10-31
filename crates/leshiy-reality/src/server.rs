@@ -347,50 +347,73 @@ async fn relay_stream(
     // (which a trickle of small streams may never reach).
     let mut revoke_tick = tokio::time::interval(std::time::Duration::from_secs(2));
     revoke_tick.tick().await; // consume the immediate first tick
-    loop {
-        tokio::select! {
-            _ = revoke_tick.tick() => {
-                if !store.still_allowed(&short_id, now_secs()) { break; }
-            }
-            inbound = stream.recv() => match inbound {           // client → target = UP
-                Ok(b) => {
-                    if let Some(tb) = &limits.up { tb.consume(b.len() as u64).await; }
-                    uw.write_all(&b).await.map_err(crate::RealityError::Io)?;
-                    acc_up += b.len() as u64;
-                    if acc_up >= FLUSH {
-                        store.add_usage(&short_id, acc_up, 0);
-                        acc_up = 0;
-                        let now = now_secs();
-                        if !store.still_allowed(&short_id, now) { break; }
+    let stream = &*stream;
+    let result = {
+        let upload = async {
+            // client → target = UP
+            while let Ok(b) = stream.recv().await {
+                if let Some(tb) = &limits.up {
+                    tb.consume(b.len() as u64).await;
+                }
+                uw.write_all(&b).await.map_err(crate::RealityError::Io)?;
+                acc_up += b.len() as u64;
+                if acc_up >= FLUSH {
+                    store.add_usage(&short_id, acc_up, 0);
+                    acc_up = 0;
+                    let now = now_secs();
+                    if !store.still_allowed(&short_id, now) {
+                        break;
                     }
                 }
-                Err(_) => break,
-            },
-            res = async {
+            }
+            crate::Result::Ok(())
+        };
+        let download = async {
+            loop {
                 // Read at most one frame's worth so each read → one full TLS record.
                 let mut b = vec![0u8; leshiy_core::frame::MAX_FRAME_PAYLOAD];
                 let n = ur.read(&mut b).await.map_err(crate::RealityError::Io)?;
                 b.truncate(n);
-                crate::Result::Ok(b)
-            } => {
-                let b = res?;
-                if b.is_empty() { break; }
+                if b.is_empty() {
+                    break;
+                }
                 let blen = b.len() as u64;
-                if let Some(tb) = &limits.down { tb.consume(blen).await; }  // target → client = DOWN
-                stream.send(b.into()).await.map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
+                if let Some(tb) = &limits.down {
+                    tb.consume(blen).await;
+                } // target → client = DOWN
+                stream
+                    .send(b.into())
+                    .await
+                    .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
                 acc_down += blen;
                 if acc_down >= FLUSH {
                     store.add_usage(&short_id, 0, acc_down);
                     acc_down = 0;
                     let now = now_secs();
-                    if !store.still_allowed(&short_id, now) { break; }
+                    if !store.still_allowed(&short_id, now) {
+                        break;
+                    }
                 }
             }
+            crate::Result::Ok(())
+        };
+        let revoked = async {
+            loop {
+                revoke_tick.tick().await;
+                if !store.still_allowed(&short_id, now_secs()) {
+                    break;
+                }
+            }
+        };
+        tokio::select! {
+            result = upload => result,
+            result = download => result,
+            () = revoked => Ok(()),
         }
-    }
-    uw.shutdown().await.ok();
-    store.add_usage(&short_id, acc_up, acc_down); // final flush of the tail
-    Ok(())
+    };
+    // Dropping the egress halves terminates both directions, even under backpressure.
+    store.add_usage(&short_id, acc_up, acc_down); // final flush, including error exits
+    result
 }
 
 /// Relay UDP datagrams between a mux datagram stream and a UDP egress socket.
@@ -787,6 +810,128 @@ mod tests {
             classify(&ch, &server_cfg([0x55; 32]), 1000),
             Classification::Unauthed
         ));
+    }
+
+    #[tokio::test]
+    async fn relay_receives_while_target_to_client_credit_is_exhausted() {
+        use bytes::Bytes;
+        use leshiy_core::{
+            frame::Frame,
+            mux::{Mux, Role},
+            transport::{FrameRead, FrameWrite},
+            version::Hello,
+        };
+        struct Reader(tokio::sync::mpsc::UnboundedReceiver<Frame>);
+        impl FrameRead for Reader {
+            async fn read_frame(&mut self) -> leshiy_core::Result<Frame> {
+                self.0.recv().await.ok_or(leshiy_core::Error::Closed)
+            }
+        }
+        struct Writer(tokio::sync::mpsc::UnboundedSender<Frame>);
+        impl FrameWrite for Writer {
+            async fn write_frame(&mut self, frame: &Frame) -> leshiy_core::Result<()> {
+                self.0
+                    .send(frame.clone())
+                    .map_err(|_| leshiy_core::Error::Closed)
+            }
+        }
+        struct Source {
+            reads: usize,
+            exhausted: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait::async_trait]
+        impl crate::egress::EgressRead for Source {
+            async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                if self.reads == 17 {
+                    self.exhausted.notify_one();
+                }
+                buf.fill(7);
+                Ok(buf.len())
+            }
+        }
+        struct Sink(Arc<tokio::sync::Notify>);
+        #[async_trait::async_trait]
+        impl crate::egress::EgressWrite for Sink {
+            async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+                assert_eq!(buf, b"reverse-progress");
+                self.0.notify_one();
+                Ok(())
+            }
+            async fn shutdown(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        struct TestEgress {
+            received: Arc<tokio::sync::Notify>,
+            exhausted: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait::async_trait]
+        impl Egress for TestEgress {
+            async fn open(
+                &self,
+                _: &str,
+            ) -> crate::Result<(
+                Box<dyn crate::egress::EgressRead>,
+                Box<dyn crate::egress::EgressWrite>,
+            )> {
+                Ok((
+                    Box::new(Source {
+                        reads: 0,
+                        exhausted: self.exhausted.clone(),
+                    }),
+                    Box::new(Sink(self.received.clone())),
+                ))
+            }
+        }
+        let (a_tx, a_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (b_tx, b_rx) = tokio::sync::mpsc::unbounded_channel();
+        let hello = Hello::new(1, 1, leshiy_core::version::CAP_FLOWCONTROL);
+        let (a, b) = tokio::join!(
+            Mux::start(Reader(a_rx), Writer(b_tx), hello, Role::Client),
+            Mux::start(Reader(b_rx), Writer(a_tx), hello, Role::Server),
+        );
+        let mut a = a.unwrap();
+        let mut b = b.unwrap();
+        let client = a.open("target:443").await.unwrap();
+        let mut server = b.accept().await.unwrap();
+        let received = Arc::new(tokio::sync::Notify::new());
+        let store = Arc::new(InMemoryUserStore::from_short_ids([[1; 8]]));
+        let exhausted = Arc::new(tokio::sync::Notify::new());
+        let egress = Arc::new(TestEgress {
+            received: received.clone(),
+            exhausted: exhausted.clone(),
+        });
+        let relay = tokio::spawn(async move {
+            relay_stream(
+                &mut server,
+                [1; 8],
+                UserLimits {
+                    up: None,
+                    down: None,
+                },
+                store,
+                egress,
+            )
+            .await
+        });
+        // Drain less than the 128KiB credit-update threshold, then stop receiving.
+        // The continuously readable target exhausts its initial 256KiB credit.
+        client.recv().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), exhausted.notified())
+            .await
+            .unwrap();
+        client
+            .send(Bytes::from_static(b"reverse-progress"))
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(1), received.notified()).await;
+        relay.abort();
+        let _ = relay.await;
+        assert!(
+            result.is_ok(),
+            "exhausted download credit must not suppress upload receive"
+        );
     }
 
     #[tokio::test]

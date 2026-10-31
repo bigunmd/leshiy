@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, timeout};
+use tokio::time::{Instant, sleep_until, timeout_at};
 
 /// Default reconnect tuning, matching the SOCKS supervisor's backoff
 /// ([`crate::runtime::SupervisorConfig`]).
@@ -33,8 +33,8 @@ pub struct ReconnectParams {
     pub base: Duration,
     /// Backoff cap (`min(base * 2^attempt, max)`).
     pub max: Duration,
-    /// How long `open`/`open_datagram` wait for a live tunnel during a reconnect before
-    /// failing closed.
+    /// Total deadline for TCP/UDP/ICMP opens, including attempts on the live tunnel and
+    /// waiting for replacements, before failing closed.
     pub hold: Duration,
 }
 
@@ -162,23 +162,31 @@ impl Tunnel for ReconnectingTunnel {
         let deadline = Instant::now() + self.hold;
         let mut rx = self.current.clone();
         loop {
+            if Instant::now() >= deadline {
+                return Err(ClientError::ConnectFailed);
+            }
             // `borrow_and_update` marks the current version seen, so a later `changed()` waits
             // for the *next* publish (no missed wakeup if the supervisor swaps mid-call).
             let cur = rx.borrow_and_update().clone();
-            // A live tunnel whose open succeeds → done. Otherwise (no tunnel, or a stale/closed
-            // one) fall through and wait for the supervisor to publish a fresh one.
-            if let Some(tunnel) = cur
-                && let Ok(stream) = tunnel.open(target).await
-            {
-                return Ok(stream);
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(ClientError::ConnectFailed);
+            if let Some(tunnel) = cur {
+                tokio::select! {
+                    // Prefer expiry/replacement over a simultaneously ready stale open.
+                    biased;
+                    () = sleep_until(deadline) => return Err(ClientError::ConnectFailed),
+                    changed = rx.changed() => {
+                        changed.map_err(|_| ClientError::ConnectFailed)?;
+                        continue;
+                    }
+                    result = tunnel.open(target) => {
+                        if let Ok(stream) = result {
+                            return Ok(stream);
+                        }
+                    }
+                }
             }
             // Wait (bounded) for the supervisor to republish. Timed out, or the sender dropped
             // (wrapper gone) → fail closed.
-            match timeout(remaining, rx.changed()).await {
+            match timeout_at(deadline, rx.changed()).await {
                 Ok(Ok(())) => continue,
                 _ => return Err(ClientError::ConnectFailed),
             }
@@ -189,17 +197,26 @@ impl Tunnel for ReconnectingTunnel {
         let deadline = Instant::now() + self.hold;
         let mut rx = self.current.clone();
         loop {
-            let cur = rx.borrow_and_update().clone();
-            if let Some(tunnel) = cur
-                && let Ok(flow) = tunnel.open_datagram(target).await
-            {
-                return Ok(flow);
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            if Instant::now() >= deadline {
                 return Err(ClientError::ConnectFailed);
             }
-            match timeout(remaining, rx.changed()).await {
+            let cur = rx.borrow_and_update().clone();
+            if let Some(tunnel) = cur {
+                tokio::select! {
+                    biased;
+                    () = sleep_until(deadline) => return Err(ClientError::ConnectFailed),
+                    changed = rx.changed() => {
+                        changed.map_err(|_| ClientError::ConnectFailed)?;
+                        continue;
+                    }
+                    result = tunnel.open_datagram(target) => {
+                        if let Ok(flow) = result {
+                            return Ok(flow);
+                        }
+                    }
+                }
+            }
+            match timeout_at(deadline, rx.changed()).await {
                 Ok(Ok(())) => continue,
                 _ => return Err(ClientError::ConnectFailed),
             }
@@ -210,17 +227,26 @@ impl Tunnel for ReconnectingTunnel {
         let deadline = Instant::now() + self.hold;
         let mut rx = self.current.clone();
         loop {
-            let cur = rx.borrow_and_update().clone();
-            if let Some(tunnel) = cur
-                && let Ok(flow) = tunnel.open_icmp(target).await
-            {
-                return Ok(flow);
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            if Instant::now() >= deadline {
                 return Err(ClientError::ConnectFailed);
             }
-            match timeout(remaining, rx.changed()).await {
+            let cur = rx.borrow_and_update().clone();
+            if let Some(tunnel) = cur {
+                tokio::select! {
+                    biased;
+                    () = sleep_until(deadline) => return Err(ClientError::ConnectFailed),
+                    changed = rx.changed() => {
+                        changed.map_err(|_| ClientError::ConnectFailed)?;
+                        continue;
+                    }
+                    result = tunnel.open_icmp(target) => {
+                        if let Ok(flow) = result {
+                            return Ok(flow);
+                        }
+                    }
+                }
+            }
+            match timeout_at(deadline, rx.changed()).await {
                 Ok(Ok(())) => continue,
                 _ => return Err(ClientError::ConnectFailed),
             }
@@ -243,6 +269,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Notify;
+    use tokio::time::timeout;
 
     /// A fake tunnel. `open` succeeds while `alive` is true and fails once it's cleared (like a
     /// real tunnel whose mux has closed). `closed()` resolves when `drop_signal` fires. Each
@@ -260,14 +287,132 @@ mod tests {
                 Err(ClientError::ConnectFailed)
             }
         }
+        async fn open_datagram(&self, _target: &str) -> Result<Box<dyn DatagramFlow>> {
+            if self.alive.load(Ordering::SeqCst) {
+                Ok(Box::new(OkStream))
+            } else {
+                Err(ClientError::ConnectFailed)
+            }
+        }
+        async fn open_icmp(&self, target: &str) -> Result<Box<dyn DatagramFlow>> {
+            self.open_datagram(target).await
+        }
         async fn closed(&self) {
             self.drop_signal.notified().await;
         }
     }
 
+    struct PendingTunnel {
+        started: Arc<Notify>,
+        cancelled: Arc<AtomicUsize>,
+    }
+
+    struct CancelledOpen(Arc<AtomicUsize>);
+    impl Drop for CancelledOpen {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl PendingTunnel {
+        async fn wait<T>(&self) -> Result<T> {
+            let _cancelled = CancelledOpen(self.cancelled.clone());
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[async_trait]
+    impl Tunnel for PendingTunnel {
+        async fn open(&self, _target: &str) -> Result<Box<dyn ProxyStream>> {
+            self.wait().await
+        }
+        async fn open_datagram(&self, _target: &str) -> Result<Box<dyn DatagramFlow>> {
+            self.wait().await
+        }
+        async fn open_icmp(&self, _target: &str) -> Result<Box<dyn DatagramFlow>> {
+            self.wait().await
+        }
+        async fn closed(&self) {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum OpenKind {
+        Tcp,
+        Udp,
+        Icmp,
+    }
+
+    impl OpenKind {
+        async fn open(self, tunnel: &dyn Tunnel) -> Result<()> {
+            match self {
+                Self::Tcp => tunnel.open("example.com:443").await.map(|_| ()),
+                Self::Udp => tunnel.open_datagram("example.com:53").await.map(|_| ()),
+                Self::Icmp => tunnel.open_icmp("1.1.1.1").await.map(|_| ()),
+            }
+        }
+    }
+
+    async fn pending_open_obeys_hold(kind: OpenKind) {
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let tunnel = ReconnectingTunnel::spawn(
+            CountingTransport {
+                dials: Arc::new(AtomicUsize::new(0)),
+                dial_ok: false,
+            },
+            "leshiy://x",
+            TransportPref::Tcp,
+            Arc::new(PendingTunnel {
+                started: Arc::new(Notify::new()),
+                cancelled: cancelled.clone(),
+            }),
+            ReconnectParams {
+                hold: Duration::from_millis(50),
+                ..fast_params()
+            },
+        );
+        let result = timeout(Duration::from_millis(300), kind.open(tunnel.as_ref())).await;
+        assert!(
+            result.is_ok(),
+            "{kind:?} inner open exceeded the hold deadline"
+        );
+        assert!(matches!(result.unwrap(), Err(ClientError::ConnectFailed)));
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_tcp_open_obeys_hold() {
+        pending_open_obeys_hold(OpenKind::Tcp).await;
+    }
+
+    #[tokio::test]
+    async fn pending_udp_open_obeys_hold() {
+        pending_open_obeys_hold(OpenKind::Udp).await;
+    }
+
+    #[tokio::test]
+    async fn pending_icmp_open_obeys_hold() {
+        pending_open_obeys_hold(OpenKind::Icmp).await;
+    }
+
     struct OkStream;
     #[async_trait]
     impl ProxyStream for OkStream {
+        async fn send(&self, _data: bytes::Bytes) -> Result<()> {
+            Ok(())
+        }
+        async fn recv(&self) -> Result<bytes::Bytes> {
+            Ok(bytes::Bytes::new())
+        }
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl DatagramFlow for OkStream {
         async fn send(&mut self, _data: bytes::Bytes) -> Result<()> {
             Ok(())
         }
@@ -276,6 +421,109 @@ mod tests {
         }
         async fn close(&mut self) -> Result<()> {
             Ok(())
+        }
+    }
+
+    struct QueuedTransport(std::sync::Mutex<std::collections::VecDeque<Box<dyn Tunnel>>>);
+
+    #[async_trait]
+    impl Transport for QueuedTransport {
+        async fn dial(&self, _uri: &str, _pref: TransportPref) -> Result<Box<dyn Tunnel>> {
+            self.0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or(ClientError::ConnectFailed)
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_opens_retry_across_two_generation_changes() {
+        for kind in [OpenKind::Tcp, OpenKind::Udp, OpenKind::Icmp] {
+            let first_started = Arc::new(Notify::new());
+            let second_started = Arc::new(Notify::new());
+            let cancelled = Arc::new(AtomicUsize::new(0));
+            let transport =
+                QueuedTransport(std::sync::Mutex::new(std::collections::VecDeque::from([
+                    Box::new(PendingTunnel {
+                        started: second_started.clone(),
+                        cancelled: cancelled.clone(),
+                    }) as Box<dyn Tunnel>,
+                    Box::new(FakeTunnel {
+                        drop_signal: Arc::new(Notify::new()),
+                        alive: Arc::new(AtomicBool::new(true)),
+                    }),
+                ])));
+            let kick = Arc::new(Notify::new());
+            let tunnel = ReconnectingTunnel::spawn_with_kick(
+                transport,
+                "leshiy://x",
+                TransportPref::Tcp,
+                Arc::new(PendingTunnel {
+                    started: first_started.clone(),
+                    cancelled: cancelled.clone(),
+                }),
+                fast_params(),
+                kick.clone(),
+            );
+            let changes = async {
+                first_started.notified().await;
+                kick.notify_one();
+                second_started.notified().await;
+                assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+                kick.notify_one();
+            };
+            timeout(Duration::from_secs(1), async {
+                let (result, ()) = tokio::join!(kind.open(tunnel.as_ref()), changes);
+                assert!(result.is_ok(), "{kind:?} must open on the fresh generation");
+            })
+            .await
+            .expect("generation changes must cancel pending opens");
+            assert_eq!(cancelled.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn generation_change_does_not_restart_hold_deadline() {
+        for kind in [OpenKind::Tcp, OpenKind::Udp, OpenKind::Icmp] {
+            let started = Arc::new(Notify::new());
+            let cancelled = Arc::new(AtomicUsize::new(0));
+            let second_started = Arc::new(Notify::new());
+            let transport =
+                QueuedTransport(std::sync::Mutex::new(std::collections::VecDeque::from([
+                    Box::new(PendingTunnel {
+                        started: second_started.clone(),
+                        cancelled: cancelled.clone(),
+                    }) as Box<dyn Tunnel>,
+                ])));
+            let kick = Arc::new(Notify::new());
+            let tunnel = ReconnectingTunnel::spawn_with_kick(
+                transport,
+                "leshiy://x",
+                TransportPref::Tcp,
+                Arc::new(PendingTunnel {
+                    started: started.clone(),
+                    cancelled: cancelled.clone(),
+                }),
+                ReconnectParams {
+                    hold: Duration::from_millis(300),
+                    ..fast_params()
+                },
+                kick.clone(),
+            );
+            let change = async {
+                started.notified().await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                kick.notify_one();
+                second_started.notified().await;
+            };
+            timeout(Duration::from_millis(450), async {
+                let (result, ()) = tokio::join!(kind.open(tunnel.as_ref()), change);
+                assert!(matches!(result, Err(ClientError::ConnectFailed)));
+            })
+            .await
+            .expect("replacement must retain the original hold deadline");
+            assert_eq!(cancelled.load(Ordering::SeqCst), 2);
         }
     }
 

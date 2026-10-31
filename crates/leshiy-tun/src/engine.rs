@@ -481,37 +481,50 @@ async fn pump_tcp(
 /// device→tunnel counts as **up**, tunnel→device as **down**. Generic over the flow so the
 /// counting is unit-testable with an in-memory duplex.
 async fn relay_tcp<F>(
-    mut flow: F,
-    mut stream: Box<dyn ProxyStream>,
+    flow: F,
+    stream: Box<dyn ProxyStream>,
     counters: &ByteCounters,
 ) -> std::io::Result<()>
 where
     F: AsyncRead + AsyncWrite + Unpin,
 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut buf = vec![0u8; 16384];
-    loop {
-        tokio::select! {
-            inbound = stream.recv() => match inbound {
-                Ok(b) if !b.is_empty() => {
-                    counters.add_down(b.len() as u64);
-                    flow.write_all(&b).await?;
+    let (mut reader, mut writer) = tokio::io::split(flow);
+    // Bound each direction to one chunk; never cancel/retry a partial send merely
+    // because the other direction became ready. EOF still terminates the relay.
+    let result = {
+        let upload = async {
+            let mut buf = vec![0u8; 16384];
+            loop {
+                let n = reader.read(&mut buf).await?;
+                if n == 0 {
+                    return Ok(());
                 }
-                _ => break,
-            },
-            r = flow.read(&mut buf) => {
-                let n = r?;
-                if n == 0 { break; }
                 counters.add_up(n as u64);
                 stream
                     .send(bytes::Bytes::copy_from_slice(&buf[..n]))
                     .await
                     .map_err(to_io)?;
             }
+        };
+        let download = async {
+            loop {
+                match stream.recv().await {
+                    Ok(b) if !b.is_empty() => {
+                        counters.add_down(b.len() as u64);
+                        writer.write_all(&b).await?;
+                    }
+                    _ => return Ok(()),
+                }
+            }
+        };
+        tokio::select! {
+            result = upload => result,
+            result = download => result,
         }
-    }
+    };
     let _ = stream.close().await;
-    Ok(())
+    result
 }
 
 async fn pump_udp(
@@ -629,26 +642,143 @@ mod tests {
 
     /// Fake tunnel stream: `recv` yields `to_return` once (then EOF), `send` is discarded.
     struct FakeStream {
-        to_return: Option<bytes::Bytes>,
+        to_return: std::sync::Mutex<Option<bytes::Bytes>>,
         /// When true, `recv` never resolves — used to isolate the upload direction.
         recv_pends: bool,
     }
 
     #[async_trait]
     impl ProxyStream for FakeStream {
-        async fn send(&mut self, _data: bytes::Bytes) -> ClientResult<()> {
+        async fn send(&self, _data: bytes::Bytes) -> ClientResult<()> {
             Ok(())
         }
-        async fn recv(&mut self) -> ClientResult<bytes::Bytes> {
+        async fn recv(&self) -> ClientResult<bytes::Bytes> {
             if self.recv_pends {
                 std::future::pending::<()>().await;
             }
             // Some(bytes) once, then an empty chunk which callers treat as EOF.
-            Ok(self.to_return.take().unwrap_or_default())
+            Ok(self.to_return.lock().unwrap().take().unwrap_or_default())
         }
-        async fn close(&mut self) -> ClientResult<()> {
+        async fn close(&self) -> ClientResult<()> {
             Ok(())
         }
+    }
+
+    use std::sync::Mutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct BlockedSend {
+        sending: tokio::sync::Notify,
+        release: Arc<tokio::sync::Notify>,
+        sent: Arc<Mutex<Vec<u8>>>,
+    }
+
+    #[async_trait]
+    impl ProxyStream for BlockedSend {
+        async fn send(&self, data: bytes::Bytes) -> ClientResult<()> {
+            // A partial write before blocking catches accidental cancellation/retry.
+            self.sent.lock().unwrap().extend_from_slice(&data[..1]);
+            self.sending.notify_one();
+            self.release.notified().await;
+            self.sent.lock().unwrap().extend_from_slice(&data[1..]);
+            Ok(())
+        }
+        async fn recv(&self) -> ClientResult<bytes::Bytes> {
+            self.sending.notified().await;
+            Ok(bytes::Bytes::from_static(b"reply"))
+        }
+        async fn close(&self) -> ClientResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn blocked_upload_does_not_block_download() {
+        let (client, mut peer) = tokio::io::duplex(64);
+        let release = Arc::new(tokio::sync::Notify::new());
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let stream = BlockedSend {
+            sending: tokio::sync::Notify::new(),
+            release: release.clone(),
+            sent: sent.clone(),
+        };
+        let counters = Arc::new(ByteCounters::new());
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let peer = async {
+                peer.write_all(b"request").await.unwrap();
+                let mut reply = [0; 5];
+                peer.read_exact(&mut reply).await.unwrap();
+                assert_eq!(&reply, b"reply");
+                assert_eq!(&*sent.lock().unwrap(), b"r");
+                release.notify_one();
+                peer.shutdown().await.unwrap();
+            };
+            let (result, ()) = tokio::join!(relay_tcp(client, Box::new(stream), &counters), peer);
+            result.unwrap();
+        })
+        .await
+        .expect("blocked upload prevented reverse progress");
+        assert_eq!(counters.totals(), (7, 5));
+        assert_eq!(&*sent.lock().unwrap(), b"request");
+    }
+
+    struct DownloadBlocked {
+        incoming: Mutex<Option<bytes::Bytes>>,
+        sent: Arc<Mutex<Vec<u8>>>,
+    }
+    #[async_trait]
+    impl ProxyStream for DownloadBlocked {
+        async fn send(&self, data: bytes::Bytes) -> ClientResult<()> {
+            self.sent.lock().unwrap().extend_from_slice(&data);
+            Ok(())
+        }
+        async fn recv(&self) -> ClientResult<bytes::Bytes> {
+            let chunk = self.incoming.lock().unwrap().take();
+            if let Some(chunk) = chunk {
+                return Ok(chunk);
+            }
+            std::future::pending().await
+        }
+        async fn close(&self) -> ClientResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn blocked_download_does_not_block_upload() {
+        // The download chunk exceeds the entire local socket capacity. Do not drain
+        // it until the upload has crossed the tunnel boundary.
+        let (client, mut peer) = tokio::io::duplex(8);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let fake = DownloadBlocked {
+            incoming: Mutex::new(Some(bytes::Bytes::from_static(
+                b"download larger than socket",
+            ))),
+            sent: sent.clone(),
+        };
+        let counters = Arc::new(ByteCounters::new());
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let peer_work = async {
+                while counters.totals().1 == 0 {
+                    tokio::task::yield_now().await;
+                }
+                peer.write_all(b"request").await.unwrap();
+                while sent.lock().unwrap().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(&*sent.lock().unwrap(), b"request");
+                let mut data = [0; 27];
+                peer.read_exact(&mut data).await.unwrap();
+                assert_eq!(&data, b"download larger than socket");
+                peer.shutdown().await.unwrap();
+            };
+            let (result, ()) =
+                tokio::join!(relay_tcp(client, Box::new(fake), &counters), peer_work);
+            result.unwrap();
+        })
+        .await
+        .expect("blocked download prevented reverse progress");
+        assert_eq!(counters.totals(), (7, 27));
     }
 
     #[tokio::test]
@@ -660,7 +790,7 @@ mod tests {
         near.write_all(b"hello").await.unwrap(); // 5 bytes device→tunnel (up)
         near.shutdown().await.unwrap(); // EOF so the relay's flow.read returns 0 → break
         let stream = Box::new(FakeStream {
-            to_return: None,
+            to_return: std::sync::Mutex::new(None),
             recv_pends: true, // no download traffic in this test
         });
         relay_tcp(far, stream, &counters).await.unwrap();
@@ -674,7 +804,7 @@ mod tests {
         // when the fake stream returns its one chunk and then an empty (EOF) Vec.
         let (_near, far) = tokio::io::duplex(64);
         let stream = Box::new(FakeStream {
-            to_return: Some(bytes::Bytes::from_static(b"world!")), // 6 bytes tunnel→device (down)
+            to_return: std::sync::Mutex::new(Some(bytes::Bytes::from_static(b"world!"))), // 6 bytes tunnel→device (down)
             recv_pends: false,
         });
         relay_tcp(far, stream, &counters).await.unwrap();

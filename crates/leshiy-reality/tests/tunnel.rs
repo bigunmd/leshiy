@@ -57,7 +57,7 @@ async fn run(suite_u16: u16) {
             .unwrap();
         let (tr, tw) = into_transport(&session, Role::Server, r, w);
         let mut mux = Mux::start(tr, tw, hello(), Role::Server).await.unwrap();
-        let mut stream = mux.accept().await.unwrap();
+        let stream = mux.accept().await.unwrap();
         let data = stream.recv().await.unwrap();
         stream.send(data).await.unwrap(); // echo
     });
@@ -78,7 +78,7 @@ async fn run(suite_u16: u16) {
         .unwrap();
     let (tr, tw) = into_transport(&session, Role::Client, r, w);
     let mut mux = Mux::start(tr, tw, hello(), Role::Client).await.unwrap();
-    let mut s = mux.open("echo").await.unwrap();
+    let s = mux.open("echo").await.unwrap();
     // Largest payload the mux puts in ONE frame (MAX_FRAME_PAYLOAD): exercises the TLS
     // record-size boundary — a max-size frame must seal into a single readable app-data
     // record. A larger frame would be writable but rejected by read_record (>2^14+slack),

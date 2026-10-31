@@ -201,6 +201,7 @@ pub struct RealityConn {
     pub(crate) mux: Arc<Mutex<Mux>>,
     /// Lock-free view of the mux's last keepalive round-trip latency.
     rtt: leshiy_core::mux::RttHandle,
+    closed: tokio::sync::watch::Receiver<bool>,
 }
 
 impl RealityConn {
@@ -242,7 +243,8 @@ impl RealityConn {
     /// Resolves once the underlying tunnel has dropped (the mux's reader or writer
     /// task exited). Used by the supervisor to trigger reconnect.
     pub async fn closed(&self) {
-        let mut rx = self.mux.lock().await.closed_receiver();
+        // Never wait behind an open blocked on the mux command queue.
+        let mut rx = self.closed.clone();
         let _ = rx.wait_for(|v| *v).await;
     }
 }
@@ -338,9 +340,10 @@ pub async fn connect_reality(
         .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
     // Grab the lock-free RTT handle before the mux moves behind the async mutex.
     let rtt = started.rtt_handle();
+    let closed = started.closed_receiver();
     let mux = Arc::new(Mutex::new(started));
 
-    Ok(RealityConn { mux, rtt })
+    Ok(RealityConn { mux, rtt, closed })
 }
 
 /// Bind a SOCKS5 listener on `socks_addr` and serve tunneled connections over `conn`.
@@ -455,7 +458,7 @@ where
 /// wrap DOWN datagrams from the tunnel in a SOCKS UDP header (echoing the request's target address)
 /// and send them back to the client. Ends when either side closes.
 async fn udp_assoc_flow(
-    mut stream: leshiy_core::mux::Stream,
+    stream: leshiy_core::mux::Stream,
     mut up_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     relay: Arc<tokio::net::UdpSocket>,
     client_addr: std::net::SocketAddr,
@@ -555,29 +558,36 @@ pub async fn run_reality_client(
 
 /// Bidirectional copy between a SOCKS5 TCP socket and a mux Stream.
 /// Mirror of v0 `leshiy::client::pipe`.
-async fn pipe(cli: TcpStream, mut stream: leshiy_core::mux::Stream) -> crate::Result<()> {
+async fn pipe(cli: TcpStream, stream: leshiy_core::mux::Stream) -> crate::Result<()> {
     let (mut r, mut w) = cli.into_split();
-    loop {
-        tokio::select! {
-            inbound = stream.recv() => match inbound {
-                Ok(b) => w.write_all(&b).await.map_err(crate::RealityError::Io)?,
-                Err(_) => break,
-            },
-            res = async {
-                // Read at most one frame's worth so each read → one full TLS record.
-                let mut b = vec![0u8; leshiy_core::frame::MAX_FRAME_PAYLOAD];
-                let n = r.read(&mut b).await.map_err(crate::RealityError::Io)?;
-                b.truncate(n);
-                crate::Result::Ok(b)
-            } => {
-                let b = res?;
-                if b.is_empty() { break; }
-                stream.send(b.into()).await.map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
-            }
+    let download = async {
+        while let Ok(b) = stream.recv().await {
+            w.write_all(&b).await.map_err(crate::RealityError::Io)?;
         }
-    }
+        crate::Result::Ok(())
+    };
+    let upload = async {
+        loop {
+            // Preserve the single-record payload ceiling.
+            let mut b = vec![0u8; leshiy_core::frame::MAX_FRAME_PAYLOAD];
+            let n = r.read(&mut b).await.map_err(crate::RealityError::Io)?;
+            if n == 0 {
+                break;
+            }
+            b.truncate(n);
+            stream
+                .send(b.into())
+                .await
+                .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
+        }
+        crate::Result::Ok(())
+    };
+    let result = tokio::select! {
+        result = download => result,
+        result = upload => result,
+    };
     let _ = stream.close().await;
-    Ok(())
+    result
 }
 
 #[cfg(test)]

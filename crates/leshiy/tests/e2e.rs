@@ -69,7 +69,7 @@ async fn end_to_end_socks5_echo() {
         .await
         .unwrap();
 
-        let mut stream = mux.accept().await.unwrap();
+        let stream = mux.accept().await.unwrap();
         let up = TcpStream::connect(&stream.target).await.unwrap();
         let (mut ur, mut uw) = up.into_split();
         loop {
@@ -112,7 +112,7 @@ async fn end_to_end_socks5_echo() {
     .await
     .unwrap();
 
-    let mut s = mux.open(&echo).await.unwrap();
+    let s = mux.open(&echo).await.unwrap();
     s.send(b"leshiy-roundtrip".to_vec().into()).await.unwrap();
     let got = tokio::time::timeout(Duration::from_secs(5), s.recv())
         .await

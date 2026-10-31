@@ -18,35 +18,39 @@ where
     S: ProxyStream + ?Sized,
 {
     let (mut cr, mut cw) = tokio::io::split(client);
-    // Reused read buffer: `read_buf` fills its spare capacity, `split().freeze()`
-    // hands the bytes downstream zero-copy, and the allocation is reclaimed once
-    // the frozen chunk is consumed by the tunnel.
-    let mut rbuf = BytesMut::with_capacity(READ_CHUNK);
-    loop {
-        tokio::select! {
-            inbound = stream.recv() => {
-                match inbound {
-                    Ok(b) if !b.is_empty() => {
-                        counters.add_down(b.len() as u64);
-                        cw.write_all(&b).await?;
-                    }
-                    _ => break, // empty chunk or error => EOF
-                }
-            }
-            res = cr.read_buf(&mut rbuf) => {
-                let n = res?;
-                if n == 0 {
-                    break; // client closed
+    // Each direction owns at most one chunk and keeps its send alive while the
+    // reverse direction progresses. Only whole-relay termination cancels a send.
+    let result = {
+        let upload = async {
+            let mut rbuf = BytesMut::with_capacity(READ_CHUNK);
+            loop {
+                if cr.read_buf(&mut rbuf).await? == 0 {
+                    return Ok(());
                 }
                 let chunk = rbuf.split().freeze();
                 counters.add_up(chunk.len() as u64);
                 stream.send(chunk).await?;
                 rbuf.reserve(READ_CHUNK);
             }
+        };
+        let download = async {
+            loop {
+                match stream.recv().await {
+                    Ok(b) if !b.is_empty() => {
+                        counters.add_down(b.len() as u64);
+                        cw.write_all(&b).await?;
+                    }
+                    _ => return Ok(()),
+                }
+            }
+        };
+        tokio::select! {
+            result = upload => result,
+            result = download => result,
         }
-    }
+    };
     let _ = stream.close().await;
-    Ok(())
+    result
 }
 
 #[cfg(test)]
@@ -61,19 +65,19 @@ mod tests {
     /// `recv_pends` makes `recv` hang forever once the queue empties (so the upload
     /// direction can be tested in isolation without the recv arm ever firing).
     struct FakeStream {
-        incoming: VecDeque<bytes::Bytes>,
+        incoming: Mutex<VecDeque<bytes::Bytes>>,
         recv_pends: bool,
         sent: Arc<Mutex<Vec<u8>>>,
     }
 
     #[async_trait]
     impl ProxyStream for FakeStream {
-        async fn send(&mut self, data: bytes::Bytes) -> Result<()> {
+        async fn send(&self, data: bytes::Bytes) -> Result<()> {
             self.sent.lock().unwrap().extend_from_slice(&data);
             Ok(())
         }
-        async fn recv(&mut self) -> Result<bytes::Bytes> {
-            if let Some(chunk) = self.incoming.pop_front() {
+        async fn recv(&self) -> Result<bytes::Bytes> {
+            if let Some(chunk) = { self.incoming.lock().unwrap().pop_front() } {
                 Ok(chunk)
             } else if self.recv_pends {
                 std::future::pending::<()>().await;
@@ -82,9 +86,101 @@ mod tests {
                 Err(ClientError::ConnectFailed)
             }
         }
-        async fn close(&mut self) -> Result<()> {
+        async fn close(&self) -> Result<()> {
             Ok(())
         }
+    }
+
+    struct BlockedSend {
+        sending: tokio::sync::Notify,
+        release: Arc<tokio::sync::Notify>,
+        sent: Arc<Mutex<Vec<u8>>>,
+    }
+
+    #[async_trait]
+    impl ProxyStream for BlockedSend {
+        async fn send(&self, data: bytes::Bytes) -> Result<()> {
+            // A partial write before blocking catches accidental cancellation/retry.
+            self.sent.lock().unwrap().extend_from_slice(&data[..1]);
+            self.sending.notify_one();
+            self.release.notified().await;
+            self.sent.lock().unwrap().extend_from_slice(&data[1..]);
+            Ok(())
+        }
+        async fn recv(&self) -> Result<bytes::Bytes> {
+            self.sending.notified().await;
+            Ok(bytes::Bytes::from_static(b"reply"))
+        }
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn blocked_upload_does_not_block_download() {
+        let (client, mut peer) = tokio::io::duplex(64);
+        let release = Arc::new(tokio::sync::Notify::new());
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut stream = BlockedSend {
+            sending: tokio::sync::Notify::new(),
+            release: release.clone(),
+            sent: sent.clone(),
+        };
+        let counters = Arc::new(ByteCounters::new());
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let peer = async {
+                peer.write_all(b"request").await.unwrap();
+                let mut reply = [0; 5];
+                peer.read_exact(&mut reply).await.unwrap();
+                assert_eq!(&reply, b"reply");
+                assert_eq!(&*sent.lock().unwrap(), b"r");
+                release.notify_one();
+                peer.shutdown().await.unwrap();
+            };
+            let (result, ()) = tokio::join!(pump(client, &mut stream, counters.clone()), peer);
+            result.unwrap();
+        })
+        .await
+        .expect("blocked upload prevented reverse progress");
+        assert_eq!(counters.totals(), (7, 5));
+        assert_eq!(&*sent.lock().unwrap(), b"request");
+    }
+
+    #[tokio::test]
+    async fn blocked_download_does_not_block_upload() {
+        // The download chunk exceeds the entire local socket capacity. Do not drain
+        // it until the upload has crossed the tunnel boundary.
+        let (client, mut peer) = tokio::io::duplex(8);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut fake = FakeStream {
+            incoming: Mutex::new(VecDeque::from([bytes::Bytes::from_static(
+                b"download larger than socket",
+            )])),
+            recv_pends: true,
+            sent: sent.clone(),
+        };
+        let counters = Arc::new(ByteCounters::new());
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let peer_work = async {
+                while counters.totals().1 == 0 {
+                    tokio::task::yield_now().await;
+                }
+                peer.write_all(b"request").await.unwrap();
+                while sent.lock().unwrap().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(&*sent.lock().unwrap(), b"request");
+                let mut data = [0; 27];
+                peer.read_exact(&mut data).await.unwrap();
+                assert_eq!(&data, b"download larger than socket");
+                peer.shutdown().await.unwrap();
+            };
+            let (result, ()) = tokio::join!(pump(client, &mut fake, counters.clone()), peer_work);
+            result.unwrap();
+        })
+        .await
+        .expect("blocked download prevented reverse progress");
+        assert_eq!(counters.totals(), (7, 27));
     }
 
     #[tokio::test]
@@ -92,7 +188,7 @@ mod tests {
         let (client, mut peer) = tokio::io::duplex(1024);
         let sent = Arc::new(Mutex::new(Vec::new()));
         let mut fake = FakeStream {
-            incoming: VecDeque::new(),
+            incoming: Mutex::new(VecDeque::new()),
             recv_pends: true, // recv never fires; isolate the upload path
             sent: sent.clone(),
         };
@@ -119,7 +215,7 @@ mod tests {
         let mut incoming = VecDeque::new();
         incoming.push_back(bytes::Bytes::from_static(b"world!!")); // 7 bytes
         let mut fake = FakeStream {
-            incoming,
+            incoming: Mutex::new(incoming),
             recv_pends: false, // after the one chunk, recv errors => EOF
             sent: sent.clone(),
         };

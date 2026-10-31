@@ -7,15 +7,19 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 /// A bidirectional byte stream to one target ("host:port") inside a tunnel.
+/// One sender and one receiver may run concurrently; implementations must not hold
+/// a shared directional lock across I/O. Sends may make partial progress: callers
+/// must keep them alive until completion or terminate the whole relay, not retry
+/// a cancelled send. Serialize multiple senders/receivers at the caller.
 #[async_trait]
-pub trait ProxyStream: Send {
+pub trait ProxyStream: Send + Sync {
     /// Send payload bytes toward the target.
-    async fn send(&mut self, data: Bytes) -> Result<()>;
+    async fn send(&self, data: Bytes) -> Result<()>;
     /// Receive the next chunk from the target. An empty chunk **or** an `Err`
     /// is treated by callers as end-of-stream.
-    async fn recv(&mut self) -> Result<Bytes>;
+    async fn recv(&self) -> Result<Bytes>;
     /// Close the stream (best effort).
-    async fn close(&mut self) -> Result<()>;
+    async fn close(&self) -> Result<()>;
 }
 
 /// A bidirectional UDP datagram association to one target inside a tunnel.
@@ -37,20 +41,27 @@ mod tests {
 
     /// Minimal fake: yields queued chunks, then errors (EOF). Records what was sent.
     struct EchoOnce {
-        outgoing_recorded: Vec<u8>,
-        to_return: Option<Bytes>,
+        outgoing_recorded: std::sync::Mutex<Vec<u8>>,
+        to_return: std::sync::Mutex<Option<Bytes>>,
     }
 
     #[async_trait]
     impl ProxyStream for EchoOnce {
-        async fn send(&mut self, data: Bytes) -> Result<()> {
-            self.outgoing_recorded.extend_from_slice(&data);
+        async fn send(&self, data: Bytes) -> Result<()> {
+            self.outgoing_recorded
+                .lock()
+                .unwrap()
+                .extend_from_slice(&data);
             Ok(())
         }
-        async fn recv(&mut self) -> Result<Bytes> {
-            self.to_return.take().ok_or(ClientError::ConnectFailed)
+        async fn recv(&self) -> Result<Bytes> {
+            self.to_return
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or(ClientError::ConnectFailed)
         }
-        async fn close(&mut self) -> Result<()> {
+        async fn close(&self) -> Result<()> {
             Ok(())
         }
     }
@@ -86,12 +97,12 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_stream_roundtrip() {
-        let mut s = EchoOnce {
-            outgoing_recorded: Vec::new(),
-            to_return: Some(Bytes::from_static(b"down")),
+        let s = EchoOnce {
+            outgoing_recorded: std::sync::Mutex::new(Vec::new()),
+            to_return: std::sync::Mutex::new(Some(Bytes::from_static(b"down"))),
         };
         s.send(Bytes::from_static(b"up")).await.unwrap();
-        assert_eq!(s.outgoing_recorded, b"up");
+        assert_eq!(*s.outgoing_recorded.lock().unwrap(), b"up");
         assert_eq!(s.recv().await.unwrap().as_ref(), b"down");
         // Second recv => EOF (Err).
         assert!(s.recv().await.is_err());

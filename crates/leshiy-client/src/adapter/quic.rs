@@ -8,21 +8,23 @@ use leshiy_quic::client::{QuicConn, QuicDatagramFlow, open_connect};
 
 /// `ProxyStream` over an h3 CONNECT stream pair.
 struct QuicProxyStream {
-    send: h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>,
-    recv: h3::client::RequestStream<h3_quinn::RecvStream, Bytes>,
+    send: tokio::sync::Mutex<h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>>,
+    recv: tokio::sync::Mutex<h3::client::RequestStream<h3_quinn::RecvStream, Bytes>>,
 }
 
 #[async_trait]
 impl ProxyStream for QuicProxyStream {
-    async fn send(&mut self, data: Bytes) -> Result<()> {
+    async fn send(&self, data: Bytes) -> Result<()> {
         self.send
+            .lock()
+            .await
             .send_data(data)
             .await
             .map_err(|_| ClientError::ConnectFailed)
     }
 
-    async fn recv(&mut self) -> Result<Bytes> {
-        match self.recv.recv_data().await {
+    async fn recv(&self) -> Result<Bytes> {
+        match self.recv.lock().await.recv_data().await {
             Ok(Some(mut chunk)) => {
                 // h3 yields a `Buf`; the common single-chunk case returns its
                 // backing `Bytes` without an extra copy.
@@ -34,8 +36,8 @@ impl ProxyStream for QuicProxyStream {
         }
     }
 
-    async fn close(&mut self) -> Result<()> {
-        let _ = self.send.finish().await;
+    async fn close(&self) -> Result<()> {
+        let _ = self.send.lock().await.finish().await;
         Ok(())
     }
 }
@@ -51,7 +53,10 @@ impl Tunnel for QuicTunnel {
         let (send, recv) = open_connect(&self.conn, target)
             .await
             .map_err(|_| ClientError::ConnectFailed)?;
-        Ok(Box::new(QuicProxyStream { send, recv }))
+        Ok(Box::new(QuicProxyStream {
+            send: tokio::sync::Mutex::new(send),
+            recv: tokio::sync::Mutex::new(recv),
+        }))
     }
     async fn open_datagram(&self, target: &str) -> Result<Box<dyn DatagramFlow>> {
         let flow = self

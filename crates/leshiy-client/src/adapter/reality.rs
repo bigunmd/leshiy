@@ -29,16 +29,16 @@ impl DatagramFlow for MuxDatagramFlow {
 
 #[async_trait]
 impl ProxyStream for MuxProxyStream {
-    async fn send(&mut self, data: bytes::Bytes) -> Result<()> {
+    async fn send(&self, data: bytes::Bytes) -> Result<()> {
         self.0
             .send(data)
             .await
             .map_err(|_| ClientError::ConnectFailed)
     }
-    async fn recv(&mut self) -> Result<bytes::Bytes> {
+    async fn recv(&self) -> Result<bytes::Bytes> {
         self.0.recv().await.map_err(|_| ClientError::ConnectFailed)
     }
-    async fn close(&mut self) -> Result<()> {
+    async fn close(&self) -> Result<()> {
         self.0.close().await.map_err(|_| ClientError::ConnectFailed)
     }
 }

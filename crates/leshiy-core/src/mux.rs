@@ -199,10 +199,13 @@ fn new_stream(
         kind,
         id,
         tx: cmd_tx,
-        rx,
+        receive: tokio::sync::Mutex::new(ReceiveState {
+            rx,
+            consumed: 0,
+            pending: None,
+        }),
         buffered,
         send_window,
-        consumed: 0,
     };
     (stream, sink)
 }
@@ -215,15 +218,20 @@ pub struct Stream {
     pub kind: StreamKind,
     id: u32,
     tx: mpsc::Sender<Command>,
-    rx: mpsc::UnboundedReceiver<Bytes>,
+    receive: tokio::sync::Mutex<ReceiveState>,
     /// Bytes queued for this stream but not yet `recv`'d. Decremented on consume; shared with the
     /// reader, which increments it and enforces [`MAX_BUFFERED`].
     buffered: Arc<AtomicUsize>,
     /// Our send credit (flow control on), or `None`. Drained by `send`, refilled by inbound
     /// `WindowUpdate`s (applied by the reader).
     send_window: Option<Arc<Semaphore>>,
-    /// Bytes consumed since the last `WindowUpdate` we emitted (flow control on).
+}
+
+struct ReceiveState {
+    rx: mpsc::UnboundedReceiver<Bytes>,
     consumed: usize,
+    // Retain a dequeued chunk if recv is cancelled while waiting for command capacity.
+    pending: Option<Bytes>,
 }
 
 impl Stream {
@@ -290,24 +298,25 @@ impl Stream {
     }
 
     /// Receive the next payload chunk from the peer.
-    pub async fn recv(&mut self) -> Result<Bytes> {
-        let chunk = self.rx.recv().await.ok_or(Error::Closed)?;
-        // Release the buffer this chunk occupied, and (flow control on) credit the peer once we've
-        // drained at least half the window, so a fast, well-behaved transfer keeps flowing.
-        self.buffered.fetch_sub(chunk.len(), Ordering::SeqCst);
-        if self.send_window.is_some() {
-            self.consumed += chunk.len();
-            if self.consumed >= WINDOW_THRESHOLD {
-                let credit = self.consumed.min(u32::MAX as usize) as u32;
-                self.consumed = 0;
-                // Best-effort: if the writer is gone the session is already dying.
-                let _ = self
-                    .tx
-                    .send(Command::Write(window_update_frame(self.id, credit)))
-                    .await;
+    pub async fn recv(&self) -> Result<Bytes> {
+        let mut receive = self.receive.lock().await;
+        if receive.pending.is_none() {
+            let chunk = receive.rx.recv().await.ok_or(Error::Closed)?;
+            self.buffered.fetch_sub(chunk.len(), Ordering::SeqCst);
+            if self.send_window.is_some() {
+                receive.consumed += chunk.len();
             }
+            receive.pending = Some(chunk);
         }
-        Ok(chunk)
+        if receive.consumed >= WINDOW_THRESHOLD {
+            let credit = receive.consumed.min(u32::MAX as usize) as u32;
+            // Reserve first: cancellation must not lose the payload or its credit update.
+            if let Ok(permit) = self.tx.reserve().await {
+                permit.send(Command::Write(window_update_frame(self.id, credit)));
+            }
+            receive.consumed = 0;
+        }
+        Ok(receive.pending.take().expect("pending receive chunk"))
     }
 
     /// Send a CLOSE frame and remove the stream from the registry.
@@ -365,9 +374,8 @@ fn wall_clock_stale(last_millis: u64, now_millis: u64, idle_timeout: Duration) -
 /// Only meaningful with [`CAP_KEEPALIVE`] negotiated; without it a live-but-idle link legitimately
 /// produces no frames and this would false-positive continuously.
 ///
-/// The reader is left to notice the death on its own schedule and exit, so the socket and tasks
-/// are still torn down exactly as before — this only makes `closed()`, and therefore the
-/// supervisor's re-dial, prompt.
+/// Publishing closure cancels both transport loops, including a blocked write or read.
+/// Their cleanup releases registered and queued streams, and lets the supervisor re-dial.
 async fn suspend_watchdog(
     last_seen: Arc<AtomicU64>,
     streams: Streams,
@@ -491,42 +499,61 @@ impl Mux {
         {
             let w_streams = streams.clone();
             let w_closed = closed_tx.clone();
+            let mut writer_closed = closed_rx.clone();
             tokio::spawn(async move {
-                while let Some(cmd) = cmd_rx.recv().await {
-                    match cmd {
-                        Command::Open(id, target, sink) => {
-                            w_streams
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .insert(id, sink);
-                            if writer
-                                .write_frame(&Frame {
-                                    stream_id: id,
-                                    ftype: FrameType::Open as u8,
-                                    payload: Bytes::from(target.into_bytes()),
-                                })
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        Command::Write(f) => {
-                            if base_type(f.ftype) == FrameType::Close as u8
-                                && let Some(sink) = w_streams
+                // A cancelled frame write retires the transport; it must never be resumed.
+                let write_loop = async {
+                    while let Some(cmd) = cmd_rx.recv().await {
+                        match cmd {
+                            Command::Open(id, target, sink) => {
+                                w_streams
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner())
-                                    .remove(&f.stream_id)
-                            {
-                                sink.close();
+                                    .insert(id, sink);
+                                if writer
+                                    .write_frame(&Frame {
+                                        stream_id: id,
+                                        ftype: FrameType::Open as u8,
+                                        payload: Bytes::from(target.into_bytes()),
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
                             }
-                            if writer.write_frame(&f).await.is_err() {
-                                break;
+                            Command::Write(f) => {
+                                if base_type(f.ftype) == FrameType::Close as u8
+                                    && let Some(sink) = w_streams
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .remove(&f.stream_id)
+                                {
+                                    sink.close();
+                                }
+                                if writer.write_frame(&f).await.is_err() {
+                                    break;
+                                }
                             }
                         }
                     }
+                };
+                tokio::select! {
+                    biased;
+                    _ = writer_closed.wait_for(|closed| *closed) => {}
+                    () = write_loop => {}
                 }
-                // The transport write side died: tear down every stream so no sender hangs.
+                // Queued opens have not entered the registry yet, but already expose a
+                // send window to their caller. Close those windows too.
+                cmd_rx.close();
+                while let Some(command) = cmd_rx.recv().await {
+                    if let Command::Open(_, _, sink) = command {
+                        sink.close();
+                    }
+                }
+                // Release queue waiters as well as send-credit waiters.
+                drop(cmd_rx);
+                drop(writer);
                 close_all_streams(&w_streams);
                 let _ = w_closed.send(true);
             });
@@ -568,127 +595,140 @@ impl Mux {
             let r_closed = closed_tx.clone();
             let r_last_seen = last_seen.clone();
             let idle_timeout = local_idle_timeout;
+            let mut reader_closed = closed_rx.clone();
             tokio::spawn(async move {
-                loop {
-                    // With keepalive negotiated, bound each read by the idle timeout: a
-                    // silently blackholed link (no FIN/RST) delivers no frame, so the read
-                    // never returns — the timeout fires, we exit, and `closed()` flips so
-                    // the supervisor reconnects. Without keepalive, read as before (the peer
-                    // won't echo our pings, so an idle timeout would false-positive).
-                    let read = reader.read_frame();
-                    let f = if keepalive_on {
-                        match tokio::time::timeout(idle_timeout, read).await {
-                            Ok(Ok(f)) => f,
-                            Ok(Err(_)) | Err(_) => break, // I/O error OR idle timeout → dead
-                        }
-                    } else {
-                        match read.await {
-                            Ok(f) => f,
-                            Err(_) => break,
-                        }
-                    };
-                    // Any frame proves the link was alive just now. Stamped in wall-clock terms
-                    // so `suspend_watchdog` can tell real silence from a frozen monotonic timer.
-                    r_last_seen.store(now_millis(), Ordering::Relaxed);
-                    let bt = base_type(f.ftype);
-                    if bt == FrameType::Ping as u8 {
-                        // Echo a Pong so the peer can confirm our liveness. Best-effort:
-                        // if the writer is gone the session is already dying.
-                        let _ = r_cmd_tx
-                            .send(Command::Write(Frame {
-                                stream_id: 0,
-                                ftype: FrameType::Pong as u8,
-                                payload: Bytes::new(),
-                            }))
-                            .await;
-                        continue;
-                    } else if bt == FrameType::Pong as u8 {
-                        // Receipt already reset the idle timer above; record the round-trip.
-                        r_rtt.note_pong_recv();
-                        continue;
-                    } else if bt == FrameType::Open as u8 {
-                        let raw = String::from_utf8_lossy(&f.payload).into_owned();
-                        let (kind, target) = parse_open_target(raw);
-                        let (stream, sink) =
-                            new_stream(f.stream_id, target, kind, r_cmd_tx.clone(), flowcontrol_on);
-                        {
-                            let mut map = r_streams.lock().unwrap_or_else(|e| e.into_inner());
-                            if map.len() >= MAX_CONCURRENT_PEER_STREAMS {
-                                break; // peer opened too many concurrent streams → abort (L3)
+                let read_loop = async {
+                    loop {
+                        // With keepalive negotiated, bound each read by the idle timeout: a
+                        // silently blackholed link (no FIN/RST) delivers no frame, so the read
+                        // never returns — the timeout fires, we exit, and `closed()` flips so
+                        // the supervisor reconnects. Without keepalive, read as before (the peer
+                        // won't echo our pings, so an idle timeout would false-positive).
+                        let read = reader.read_frame();
+                        let f = if keepalive_on {
+                            match tokio::time::timeout(idle_timeout, read).await {
+                                Ok(Ok(f)) => f,
+                                Ok(Err(_)) | Err(_) => break, // I/O error OR idle timeout → dead
                             }
-                            map.insert(f.stream_id, sink);
-                        }
-                        if inc_tx.send(stream).await.is_err() {
-                            break;
-                        }
-                    } else if bt == FrameType::Data as u8 || bt == FrameType::Datagram as u8 {
-                        // DATA (stream) and DATAGRAM (one packet) both route to the per-stream
-                        // channel. The channel is UNBOUNDED, so a slow consumer can never block the
-                        // shared reader and head-of-line-block other streams; flow control bounds how
-                        // much the peer may have in flight. Clone the sink out of the map first so we
-                        // never hold the Mutex guard across an .await.
-                        let sink = r_streams
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .get(&f.stream_id)
-                            .cloned();
-                        if let Some(sink) = sink {
-                            let n = f.payload.len();
-                            let buffered = sink.buffered.fetch_add(n, Ordering::SeqCst) + n;
-                            if buffered > MAX_BUFFERED {
-                                // The peer is ignoring its window (or there is none): reset just this
-                                // stream instead of buffering without bound or stalling the mux.
-                                sink.buffered.fetch_sub(n, Ordering::SeqCst);
-                                if let Some(sink) = r_streams
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .remove(&f.stream_id)
-                                {
-                                    sink.close();
+                        } else {
+                            match read.await {
+                                Ok(f) => f,
+                                Err(_) => break,
+                            }
+                        };
+                        // Any frame proves the link was alive just now. Stamped in wall-clock terms
+                        // so `suspend_watchdog` can tell real silence from a frozen monotonic timer.
+                        r_last_seen.store(now_millis(), Ordering::Relaxed);
+                        let bt = base_type(f.ftype);
+                        if bt == FrameType::Ping as u8 {
+                            // Echo a Pong so the peer can confirm our liveness. Best-effort:
+                            // if the writer is gone the session is already dying.
+                            let _ = r_cmd_tx
+                                .send(Command::Write(Frame {
+                                    stream_id: 0,
+                                    ftype: FrameType::Pong as u8,
+                                    payload: Bytes::new(),
+                                }))
+                                .await;
+                            continue;
+                        } else if bt == FrameType::Pong as u8 {
+                            // Receipt already reset the idle timer above; record the round-trip.
+                            r_rtt.note_pong_recv();
+                            continue;
+                        } else if bt == FrameType::Open as u8 {
+                            let raw = String::from_utf8_lossy(&f.payload).into_owned();
+                            let (kind, target) = parse_open_target(raw);
+                            let (stream, sink) = new_stream(
+                                f.stream_id,
+                                target,
+                                kind,
+                                r_cmd_tx.clone(),
+                                flowcontrol_on,
+                            );
+                            {
+                                let mut map = r_streams.lock().unwrap_or_else(|e| e.into_inner());
+                                if map.len() >= MAX_CONCURRENT_PEER_STREAMS {
+                                    break; // peer opened too many concurrent streams → abort (L3)
                                 }
-                                let _ = r_cmd_tx
-                                    .send(Command::Write(Frame {
-                                        stream_id: f.stream_id,
-                                        ftype: FrameType::Close as u8,
-                                        payload: Bytes::new(),
-                                    }))
-                                    .await;
-                            } else {
-                                // Unbounded send: only fails if the consumer dropped its receiver.
-                                let _ = sink.data_tx.send(f.payload);
+                                map.insert(f.stream_id, sink);
                             }
-                        }
-                    } else if bt == FrameType::WindowUpdate as u8 {
-                        // The peer drained `credit` bytes we sent: refill our send window for this
-                        // stream so we may send more. Clamp to keep the semaphore from overflowing.
-                        if f.payload.len() >= 4 {
-                            let credit = u32::from_be_bytes([
-                                f.payload[0],
-                                f.payload[1],
-                                f.payload[2],
-                                f.payload[3],
-                            ]) as usize;
-                            if let Some(sink) = r_streams
+                            if inc_tx.send(stream).await.is_err() {
+                                break;
+                            }
+                        } else if bt == FrameType::Data as u8 || bt == FrameType::Datagram as u8 {
+                            // DATA (stream) and DATAGRAM (one packet) both route to the per-stream
+                            // channel. The channel is UNBOUNDED, so a slow consumer can never block the
+                            // shared reader and head-of-line-block other streams; flow control bounds how
+                            // much the peer may have in flight. Clone the sink out of the map first so we
+                            // never hold the Mutex guard across an .await.
+                            let sink = r_streams
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .get(&f.stream_id)
-                                && let Some(sem) = &sink.send_window
-                            {
-                                sem.add_permits(credit.min(MAX_CREDIT));
+                                .cloned();
+                            if let Some(sink) = sink {
+                                let n = f.payload.len();
+                                let buffered = sink.buffered.fetch_add(n, Ordering::SeqCst) + n;
+                                if buffered > MAX_BUFFERED {
+                                    // The peer is ignoring its window (or there is none): reset just this
+                                    // stream instead of buffering without bound or stalling the mux.
+                                    sink.buffered.fetch_sub(n, Ordering::SeqCst);
+                                    if let Some(sink) = r_streams
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .remove(&f.stream_id)
+                                    {
+                                        sink.close();
+                                    }
+                                    let _ = r_cmd_tx
+                                        .send(Command::Write(Frame {
+                                            stream_id: f.stream_id,
+                                            ftype: FrameType::Close as u8,
+                                            payload: Bytes::new(),
+                                        }))
+                                        .await;
+                                } else {
+                                    // Unbounded send: only fails if the consumer dropped its receiver.
+                                    let _ = sink.data_tx.send(f.payload);
+                                }
                             }
+                        } else if bt == FrameType::WindowUpdate as u8 {
+                            // The peer drained `credit` bytes we sent: refill our send window for this
+                            // stream so we may send more. Clamp to keep the semaphore from overflowing.
+                            if f.payload.len() >= 4 {
+                                let credit = u32::from_be_bytes([
+                                    f.payload[0],
+                                    f.payload[1],
+                                    f.payload[2],
+                                    f.payload[3],
+                                ]) as usize;
+                                if let Some(sink) = r_streams
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .get(&f.stream_id)
+                                    && let Some(sem) = &sink.send_window
+                                {
+                                    sem.add_permits(credit.min(MAX_CREDIT));
+                                }
+                            }
+                        } else if bt == FrameType::Close as u8 {
+                            if let Some(sink) = r_streams
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .remove(&f.stream_id)
+                            {
+                                sink.close();
+                            }
+                        } else if is_critical(f.ftype) {
+                            break; // unknown critical frame → abort session
                         }
-                    } else if bt == FrameType::Close as u8 {
-                        if let Some(sink) = r_streams
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .remove(&f.stream_id)
-                        {
-                            sink.close();
-                        }
-                    } else if is_critical(f.ftype) {
-                        break; // unknown critical frame → abort session
+                        // unknown non-critical frame → silently ignore (continue)
                     }
-                    // unknown non-critical frame → silently ignore (continue)
+                };
+                tokio::select! {
+                    biased;
+                    _ = reader_closed.wait_for(|closed| *closed) => {}
+                    () = read_loop => {}
                 }
                 // The transport read side died: tear down every stream so no sender hangs.
                 close_all_streams(&r_streams);
@@ -911,7 +951,7 @@ mod tests {
                 .unwrap();
             let (r, w) = sess.into_halves();
             let mut mux = Mux::start(r, w, hello_dg(), Role::Server).await.unwrap();
-            let mut stream = mux.accept().await.unwrap();
+            let stream = mux.accept().await.unwrap();
             assert_eq!(stream.kind, StreamKind::Udp);
             assert_eq!(stream.target, "1.2.3.4:53"); // scheme stripped
             let dgram = stream.recv().await.unwrap();
@@ -924,7 +964,7 @@ mod tests {
             .unwrap();
         let (r, w) = sess.into_halves();
         let mut mux = Mux::start(r, w, hello_dg(), Role::Client).await.unwrap();
-        let mut s = mux.open_datagram("1.2.3.4:53").await.unwrap();
+        let s = mux.open_datagram("1.2.3.4:53").await.unwrap();
         assert_eq!(s.kind, StreamKind::Udp);
         s.send(Bytes::from_static(b"\x00\x01\x02")).await.unwrap();
         let echoed = s.recv().await.unwrap();
@@ -1062,6 +1102,133 @@ mod tests {
             ftype: FrameType::Hello as u8,
             payload: Bytes::from(h.encode()),
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_credit_update_preserves_received_payload() {
+        let (tx, mut commands) = mpsc::channel(1);
+        let (stream, sink) = new_stream(1, "target:443".into(), StreamKind::Tcp, tx.clone(), true);
+        tx.send(Command::Write(window_update_frame(99, 1)))
+            .await
+            .unwrap();
+        let payload = Bytes::from(vec![42; WINDOW_THRESHOLD]);
+        sink.buffered.store(payload.len(), Ordering::SeqCst);
+        sink.data_tx.send(payload.clone()).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), stream.recv())
+                .await
+                .is_err()
+        );
+        commands.recv().await.unwrap();
+        assert_eq!(stream.recv().await.unwrap(), payload);
+        match commands.recv().await.unwrap() {
+            Command::Write(frame) => assert_eq!(
+                frame.payload,
+                window_update_frame(1, WINDOW_THRESHOLD as u32).payload
+            ),
+            _ => panic!("expected credit update"),
+        }
+        assert_eq!(sink.buffered.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn reader_close_releases_a_full_queue_and_blocked_writer() {
+        struct Reader {
+            hello: bool,
+            fail: Arc<tokio::sync::Notify>,
+        }
+        impl FrameRead for Reader {
+            async fn read_frame(&mut self) -> crate::Result<Frame> {
+                if !self.hello {
+                    self.hello = true;
+                    return Ok(hello_frame(Hello::new(1, 1, CAP_FLOWCONTROL)));
+                }
+                self.fail.notified().await;
+                Err(Error::Closed)
+            }
+        }
+        struct Writer {
+            blocked: Arc<tokio::sync::Notify>,
+            dropped: Arc<tokio::sync::Notify>,
+        }
+        impl Drop for Writer {
+            fn drop(&mut self) {
+                self.dropped.notify_one();
+            }
+        }
+        impl FrameWrite for Writer {
+            async fn write_frame(&mut self, frame: &Frame) -> crate::Result<()> {
+                if frame.ftype == FrameType::Hello as u8 {
+                    return Ok(());
+                }
+                self.blocked.notify_one();
+                std::future::pending().await
+            }
+        }
+        let fail = Arc::new(tokio::sync::Notify::new());
+        let blocked = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(tokio::sync::Notify::new());
+        let mut mux = Mux::start(
+            Reader {
+                hello: false,
+                fail: fail.clone(),
+            },
+            Writer {
+                blocked: blocked.clone(),
+                dropped: dropped.clone(),
+            },
+            Hello::new(1, 1, CAP_FLOWCONTROL),
+            Role::Client,
+        )
+        .await
+        .unwrap();
+        let stream = mux.open("target:443").await.unwrap();
+        blocked.notified().await;
+        // This stream's Open is queued, not registered by the blocked writer.
+        let queued = mux.open("queued:443").await.unwrap();
+        let window = queued.send_window.as_ref().unwrap();
+        window
+            .acquire_many(INIT_WINDOW as u32)
+            .await
+            .unwrap()
+            .forget();
+        let mut queued_send = Box::pin(queued.send(Bytes::from_static(b"blocked credit")));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut queued_send)
+                .await
+                .is_err()
+        );
+        for _ in 0..255 {
+            stream.send(Bytes::from_static(b"x")).await.unwrap();
+        }
+        let mut open = Box::pin(mux.open("next:443"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut open)
+                .await
+                .is_err()
+        );
+        fail.notify_one();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), &mut open)
+                .await
+                .expect("reader closure must release queued opens")
+                .is_err()
+        );
+        tokio::time::timeout(Duration::from_secs(1), dropped.notified())
+            .await
+            .expect("closure must drop the blocked transport writer");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), queued_send)
+                .await
+                .expect("queued opens must release send-credit waiters")
+                .is_err()
+        );
+        assert!(
+            stream
+                .send(Bytes::from_static(b"after close"))
+                .await
+                .is_err()
+        );
     }
 
     // --- `Open` scheme prefixes (ADR-0030) --------------------------------------------
@@ -1569,7 +1736,7 @@ mod tests {
         .unwrap();
 
         let a = mux.accept().await.unwrap(); // stream A: id 1, intentionally never drained
-        let mut b = mux.accept().await.unwrap(); // stream B: id 3
+        let b = mux.accept().await.unwrap(); // stream B: id 3
         assert_eq!(a.target, "echo:a");
         assert_eq!(b.target, "echo:b");
 
@@ -1598,7 +1765,7 @@ mod tests {
                 .unwrap();
             let (r, w) = sess.into_halves();
             let mut mux = Mux::start(r, w, hello_fc(), Role::Server).await.unwrap();
-            let mut stream = mux.accept().await.unwrap();
+            let stream = mux.accept().await.unwrap();
             let mut got = 0usize;
             while got < TOTAL {
                 match stream.recv().await {
@@ -1644,7 +1811,7 @@ mod tests {
                 .unwrap();
             let (r, w) = sess.into_halves();
             let mut mux = Mux::start(r, w, hello(), Role::Server).await.unwrap();
-            let mut stream = mux.accept().await.unwrap();
+            let stream = mux.accept().await.unwrap();
             assert_eq!(stream.target, "echo:0");
             let data = stream.recv().await.unwrap();
             stream.send(data).await.unwrap();
@@ -1657,7 +1824,7 @@ mod tests {
             .unwrap();
         let (r, w) = sess.into_halves();
         let mut mux = Mux::start(r, w, hello(), Role::Client).await.unwrap();
-        let mut s = mux.open("echo:0").await.unwrap();
+        let s = mux.open("echo:0").await.unwrap();
         s.send(Bytes::from_static(b"ping")).await.unwrap();
         let echoed = s.recv().await.unwrap();
         assert_eq!(echoed.as_ref(), b"ping");

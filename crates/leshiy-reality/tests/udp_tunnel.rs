@@ -90,7 +90,7 @@ async fn try_once(saddr: &str, server_public: [u8; 32], echo: &str) -> Result<()
         .map_err(|e| e.to_string())?;
     // `open_datagram` returns a mux `Stream` (kind = Udp); its inherent send/recv
     // map onto Datagram frames.
-    let mut flow = conn.open_datagram(echo).await.map_err(|e| e.to_string())?;
+    let flow = conn.open_datagram(echo).await.map_err(|e| e.to_string())?;
     flow.send(bytes::Bytes::from_static(b"udp-e2e"))
         .await
         .map_err(|e| e.to_string())?;

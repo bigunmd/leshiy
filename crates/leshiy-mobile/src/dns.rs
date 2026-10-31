@@ -75,7 +75,7 @@ async fn exchange(
     queries: &[Vec<u8>],
     ids: &[u16],
 ) -> leshiy_client::Result<Vec<IpAddr>> {
-    let mut stream = tunnel.open(RESOLVER).await?;
+    let stream = tunnel.open(RESOLVER).await?;
     let mut wire = Vec::new();
     for q in queries {
         wire.extend_from_slice(&(q.len() as u16).to_be_bytes());
@@ -275,12 +275,12 @@ mod tests {
     struct FakeStream {
         v4: [u8; 4],
         v6: [u8; 16],
-        out: VecDeque<Bytes>,
+        out: std::sync::Mutex<VecDeque<Bytes>>,
     }
 
     #[async_trait]
     impl ProxyStream for FakeStream {
-        async fn send(&mut self, data: Bytes) -> leshiy_client::Result<()> {
+        async fn send(&self, data: Bytes) -> leshiy_client::Result<()> {
             let mut wire = Vec::new();
             let mut rest = &data[..];
             while let Some(len) = u16_at(rest, 0).map(usize::from) {
@@ -295,13 +295,17 @@ mod tests {
                 wire.extend_from_slice(&a);
                 rest = &rest[2 + len..];
             }
-            self.out = wire.chunks(7).map(Bytes::copy_from_slice).collect();
+            *self.out.lock().unwrap() = wire.chunks(7).map(Bytes::copy_from_slice).collect();
             Ok(())
         }
-        async fn recv(&mut self) -> leshiy_client::Result<Bytes> {
-            self.out.pop_front().ok_or(ClientError::ConnectFailed)
+        async fn recv(&self) -> leshiy_client::Result<Bytes> {
+            self.out
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or(ClientError::ConnectFailed)
         }
-        async fn close(&mut self) -> leshiy_client::Result<()> {
+        async fn close(&self) -> leshiy_client::Result<()> {
             Ok(())
         }
     }
@@ -313,7 +317,7 @@ mod tests {
             Ok(Box::new(FakeStream {
                 v4: self.v4,
                 v6: self.v6,
-                out: VecDeque::new(),
+                out: std::sync::Mutex::new(VecDeque::new()),
             }))
         }
         async fn closed(&self) {
