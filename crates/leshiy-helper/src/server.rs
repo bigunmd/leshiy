@@ -210,7 +210,12 @@ where
         state: Some(*state_rx.borrow_and_update()),
         rates: Some(*stats_rx.borrow_and_update()),
     };
-    write_line(stream, &Response::Event(snapshot)).await?;
+    if write_line(stream, &Response::Event(snapshot))
+        .await
+        .is_err()
+    {
+        return Ok(()); // A lost subscriber owns teardown even before its first snapshot.
+    }
     loop {
         let evt = tokio::select! {
             changed = state_rx.changed() => match changed {
@@ -278,6 +283,24 @@ mod tests {
         let mut out = String::new();
         r.read_line(&mut out).await.unwrap();
         out
+    }
+
+    #[tokio::test]
+    async fn initial_subscribe_write_failure_stops_before_ephemeral_exit() {
+        let runner = Arc::new(FakeRunner::new());
+        runner.start(&params()).await.unwrap();
+        let (mut client, server) = tokio::io::duplex(256);
+        client
+            .write_all(b"{\"cmd\":\"subscribe\"}\n")
+            .await
+            .unwrap();
+        drop(client);
+        let exit = Arc::new(tokio::sync::Notify::new());
+        spawn_conn(server, runner.clone(), ServeMode::Ephemeral, exit.clone());
+        tokio::time::timeout(std::time::Duration::from_secs(1), exit.notified())
+            .await
+            .expect("subscription failure must stop and exit");
+        assert_eq!(runner.state(), State::Disconnected);
     }
 
     fn params() -> StartParams {

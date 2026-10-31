@@ -287,7 +287,7 @@ pub async fn connect(state: &AppState, uri: String, settings: Settings) -> Resul
     // user-requested stop apart from a transient tunnel drop (network change).
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let app_task = app.clone();
-    let first_fd = est.fd;
+    let first_fd = leshiy_tun::sys::PendingTunFd::new(est.fd);
     let task = engine_runtime().spawn(async move {
         run_session_with_reconnect(app_task, uri, cfg, establish_args, first_fd, stop_rx).await;
     });
@@ -310,7 +310,7 @@ async fn run_session_with_reconnect(
     uri: String,
     cfg: TunConfig,
     establish_args: EstablishArgs,
-    first_fd: i32,
+    first_fd: leshiy_tun::sys::PendingTunFd,
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     const BACKOFF_BASE: Duration = Duration::from_millis(500);
@@ -319,7 +319,7 @@ async fn run_session_with_reconnect(
     let mut online = crate::online_rx();
     let counters = Arc::new(ByteCounters::new());
     let sampler = tokio::spawn(sample_throughput(app.clone(), counters.clone()));
-    let mut fd = first_fd; // first interface already established by `connect`
+    let mut fd = Some(first_fd); // owns the detached interface until injection
     let mut need_establish = false; // re-establish only after a drop
     let mut backoff = BACKOFF_BASE;
 
@@ -338,7 +338,10 @@ async fn run_session_with_reconnect(
         // After a drop the engine closed the old TUN fd, so re-establish to get a fresh interface.
         if need_establish {
             match establish_tun(&establish_args) {
-                Ok(new_fd) => fd = new_fd,
+                Ok(new_fd) => {
+                    fd = Some(leshiy_tun::sys::PendingTunFd::new(new_fd));
+                    need_establish = false;
+                }
                 Err(e) => {
                     tracing::warn!("android re-establish failed: {e}");
                     let _ = app.emit("tunnel:state", "Reconnecting");
@@ -366,7 +369,10 @@ async fn run_session_with_reconnect(
             }
         };
         backoff = BACKOFF_BASE;
-        leshiy_tun::sys::set_tun_fd(fd);
+        let Some(pending) = fd.take() else {
+            break;
+        };
+        leshiy_tun::sys::set_tun_fd(pending.into_raw());
         let _ = app.emit("tunnel:state", State::Connected);
 
         // Run the engine until the tunnel dies OR the user stops. The bridge task fans either
@@ -388,6 +394,8 @@ async fn run_session_with_reconnect(
             tracing::warn!("android tun engine exited: {e}");
         }
         bridge.abort();
+        // Engine setup may fail before consuming the injected descriptor.
+        leshiy_tun::sys::clear_tun_fd();
 
         if *stop_rx.borrow() {
             break; // user-requested disconnect

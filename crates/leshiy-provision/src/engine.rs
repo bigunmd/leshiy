@@ -481,12 +481,18 @@ pub async fn upgrade<T: Transport>(
     if !valid_image_ref(image_ref) {
         return Err(Error::Parse(format!("invalid image ref: {image_ref}")));
     }
+    if !valid_image_ref(&rec.container) {
+        return Err(Error::Parse("invalid saved container name".into()));
+    }
 
     // Carry the running container's own env across. `boot` *requires* LESHIY_HOST/LESHIY_DEST and
     // errors before it checks whether config generation is even needed, so a container recreated
     // without them crash-loops under --restart=unless-stopped. `dest_sni` was never stored on the
     // record, so this is the only place it exists.
-    let env_out = t.run(&docker::inspect_env_cmd(&rec.container)).await?;
+    let env_out = t
+        .run(&docker::inspect_env_cmd(&rec.container))
+        .await?
+        .ok()?;
     let envs = docker::leshiy_envs(&docker::parse_json_string_list(&env_out.stdout));
     if envs.is_empty() {
         // No container, or one carrying no LESHIY_* env — nothing safe to preserve. Provision
@@ -500,7 +506,10 @@ pub async fn upgrade<T: Transport>(
     }
     // Preserve --dns too: an operator's explicit override must not be silently swapped for a
     // re-detected default just because they upgraded.
-    let dns_out = t.run(&docker::inspect_dns_cmd(&rec.container)).await?;
+    let dns_out = t
+        .run(&docker::inspect_dns_cmd(&rec.container))
+        .await?
+        .ok()?;
     let dns = docker::parse_json_string_list(&dns_out.stdout);
     let dns_refs: Vec<&str> = dns.iter().map(String::as_str).collect();
 
@@ -548,8 +557,50 @@ pub async fn upgrade<T: Transport>(
         &dns_refs,
         &envs,
     );
-    run_container(t, &rec.container, &run).await?;
-    on_event(ev(Step::RunContainer, Status::Done, ""));
+    let backup = format!("{}-rollback-{:016x}", rec.container, rand::random::<u64>());
+    t.run(&format!("sudo docker rename {} {backup}", rec.container))
+        .await?
+        .ok()?;
+    let replacement = async {
+        t.run(&format!("sudo docker stop {backup}")).await?.ok()?;
+        run_container(t, &rec.container, &run).await?;
+        wait_ready(t, &rec.container).await
+    }
+    .await;
+    if let Err(error) = replacement {
+        let rollback = async {
+            removed_or_absent(
+                t.run(&docker::container_rm_cmd(&rec.container)).await?,
+                "Error response from daemon: No such container:",
+            )?;
+            t.run(&format!("sudo docker rename {backup} {}", rec.container))
+                .await?
+                .ok()?;
+            t.run(&format!("sudo docker start {}", rec.container))
+                .await?
+                .ok()?;
+            wait_ready(t, &rec.container).await
+        }
+        .await;
+        return match rollback {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(Error::Parse(format!(
+                "upgrade failed: {error}; rollback failed: {rollback}; retained recovery container may be {backup}"
+            ))),
+        };
+    }
+    // The replacement is ready: failure to remove the stopped recovery copy must
+    // not prevent persisting the image that is now serving traffic.
+    let cleanup = t
+        .run(&docker::container_rm_cmd(&backup))
+        .await
+        .and_then(|out| out.ok());
+    let detail = if cleanup.is_err() {
+        format!("ready; stopped recovery container retained: {backup}")
+    } else {
+        String::new()
+    };
+    on_event(ev(Step::RunContainer, Status::Done, &detail));
 
     // Only after the new container is actually up — a failed upgrade must leave the record
     // describing what is really running.
@@ -558,6 +609,21 @@ pub async fn upgrade<T: Transport>(
     // the next upgrade starts from the truth even if the volume is later read-protected.
     rec.public_host = docker::with_port(&rec.public_host, listen_port);
     Ok(())
+}
+
+/// Require the server's control socket to answer, not merely a detached Docker PID.
+async fn wait_ready<T: Transport>(t: &mut T, container: &str) -> Result<()> {
+    for attempt in 0..USER_ADD_ATTEMPTS {
+        let out = t.run(&docker::exec_user_list_json_cmd(container)).await?;
+        if out.code == 0 {
+            return Ok(());
+        }
+        if !is_control_socket_unready(&out.stderr) || attempt + 1 == USER_ADD_ATTEMPTS {
+            return out.ok().map(|_| ());
+        }
+        tokio::time::sleep(USER_ADD_RETRY_DELAY).await;
+    }
+    unreachable!()
 }
 
 /// Whether the server container is currently running.
@@ -599,22 +665,33 @@ pub async fn mtproxy_link<T: Transport>(
 
 /// Remove the server container (and optionally purge its config dir).
 ///
-/// Best-effort: `docker rm -f` is allowed to fail (the container may not exist
-/// when tearing down a half-built server). The purge step, when requested, runs
-/// regardless. Only transport-level errors (SSH connection failures, etc.) are
-/// propagated via `?`; the remote command's exit code is intentionally ignored.
+/// Only Docker's explicit missing-object response is idempotent success.
+fn removed_or_absent(out: crate::ssh::CommandOutput, absent: &str) -> Result<()> {
+    if out.code != 0 && out.stderr.trim().starts_with(absent) {
+        return Ok(());
+    }
+    out.ok().map(|_| ())
+}
 pub async fn teardown<T: Transport>(t: &mut T, rec: &ServerRecord, purge: bool) -> Result<()> {
-    t.run(&format!("sudo docker rm -f {}", rec.container))
-        .await?;
+    if !valid_image_ref(&rec.container) {
+        return Err(Error::Parse("invalid saved container name".into()));
+    }
+    removed_or_absent(
+        t.run(&docker::container_rm_cmd(&rec.container)).await?,
+        "Error response from daemon: No such container:",
+    )?;
     if purge {
         // Remove the persistent data volume (server identity + config) so a
         // subsequent provision regenerates from scratch — the container's `boot`
         // skips config generation whenever server.toml already exists on the
         // volume, so a surviving volume silently reuses the old dest/keys.
-        t.run(&docker::volume_rm_cmd()).await?;
+        removed_or_absent(
+            t.run(&docker::volume_rm_cmd()).await?,
+            "Error response from daemon: get leshiy-data: no such volume",
+        )?;
         // Also clear the native/install.sh bind-mount path, harmless for the
         // docker path (nonexistent → no-op).
-        t.run("sudo rm -rf /etc/leshiy").await?;
+        t.run("sudo rm -rf /etc/leshiy").await?.ok()?;
     }
     Ok(())
 }
@@ -1379,6 +1456,100 @@ mod tests {
                 .is_err()
         );
         assert_eq!(rec.image_ref, "ghcr.io/o/r:v1.8.0");
+        assert!(
+            t.calls().iter().any(|c| c.contains("docker start")),
+            "failed replacement must restore the old container"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn upgrade_immediate_exit_restores_old_container_before_returning() {
+        let mut t = upgrade_transport();
+        t.on_seq(
+            "user list",
+            vec![
+                CommandOutput {
+                    code: 1,
+                    stdout: String::new(),
+                    stderr: "container is not running".into(),
+                },
+                ok("[]"),
+            ],
+        );
+        let mut rec = upgradable_rec();
+        assert!(
+            upgrade(&mut t, &mut rec, "ghcr.io/o/r:v1.9.0", |_| {})
+                .await
+                .is_err()
+        );
+        assert_eq!(rec.image_ref, "ghcr.io/o/r:v1.8.0");
+        let calls = t.calls();
+        let start = calls
+            .iter()
+            .position(|c| c.contains("docker start"))
+            .unwrap();
+        assert!(calls[start + 1..].iter().any(|c| c.contains("user list")));
+        assert!(
+            calls[0..start]
+                .iter()
+                .any(|c| c.contains("docker rename leshiy "))
+        );
+    }
+
+    #[tokio::test]
+    async fn saved_container_validation_precedes_upgrade_and_teardown() {
+        let mut rec = upgradable_rec();
+        rec.container = "leshiy; touch /tmp/unwanted".into();
+        let mut t = FakeTransport::new();
+        assert!(upgrade(&mut t, &mut rec, "image:v2", |_| {}).await.is_err());
+        assert!(teardown(&mut t, &rec, true).await.is_err());
+        assert!(t.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn teardown_purge_failure_is_not_success() {
+        for command in ["volume rm", "rm -rf /etc/leshiy"] {
+            let mut t = FakeTransport::new();
+            t.on(
+                command,
+                CommandOutput {
+                    code: 1,
+                    stdout: String::new(),
+                    stderr: "permission denied".into(),
+                },
+            );
+            assert!(teardown(&mut t, &upgradable_rec(), true).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn teardown_absent_container_still_purges() {
+        let mut t = FakeTransport::new();
+        t.on(
+            "docker rm",
+            CommandOutput {
+                code: 1,
+                stdout: String::new(),
+                stderr: "Error response from daemon: No such container: leshiy".into(),
+            },
+        );
+        teardown(&mut t, &upgradable_rec(), true).await.unwrap();
+        assert!(t.calls().iter().any(|c| c.contains("volume rm")));
+    }
+
+    #[tokio::test]
+    async fn teardown_propagates_remote_failure() {
+        let mut t = FakeTransport::new();
+        t.on(
+            "docker rm",
+            CommandOutput {
+                code: 1,
+                stdout: String::new(),
+                stderr: "permission denied".into(),
+            },
+        );
+        assert!(teardown(&mut t, &upgradable_rec(), true).await.is_err());
+        assert!(!t.calls().iter().any(|c| c.contains("volume rm")));
     }
 
     #[tokio::test(start_paused = true)]

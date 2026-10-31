@@ -145,12 +145,12 @@ enum Command {
 }
 
 /// The receiver-side handle to a stream, stored in the shared [`Streams`] map. The reader pushes
-/// inbound payloads into `data_tx` (unbounded, so a slow consumer never blocks the shared reader),
+/// inbound payloads into `data_tx` without waiting (overflow resets only that stream),
 /// tracks queued bytes in `buffered`, and credits `send_window` when a `WindowUpdate` for this
 /// stream arrives.
 #[derive(Clone)]
 struct StreamSink {
-    data_tx: mpsc::UnboundedSender<Bytes>,
+    data_tx: mpsc::Sender<Bytes>,
     buffered: Arc<AtomicUsize>,
     /// Our credit to *send* on this stream (bytes), or `None` when flow control isn't negotiated.
     send_window: Option<Arc<Semaphore>>,
@@ -175,8 +175,8 @@ fn window_update_frame(stream_id: u32, credit: u32) -> Frame {
     }
 }
 
-/// Create the receiver/sender halves of a new stream: an unbounded data channel (so the shared
-/// reader never blocks delivering to it), a shared buffered-bytes counter, and — when flow control
+/// Create the receiver/sender halves of a new stream: a message-bounded data channel (the shared
+/// reader uses try_send, never waiting), a shared buffered-bytes counter, and — when flow control
 /// is on — a send window seeded with [`INIT_WINDOW`] credit. `target` is the stream's display
 /// target; the OPEN frame's wire payload is sent separately by the caller.
 fn new_stream(
@@ -186,7 +186,7 @@ fn new_stream(
     cmd_tx: mpsc::Sender<Command>,
     flowcontrol: bool,
 ) -> (Stream, StreamSink) {
-    let (data_tx, rx) = mpsc::unbounded_channel::<Bytes>();
+    let (data_tx, rx) = mpsc::channel::<Bytes>(1024);
     let buffered = Arc::new(AtomicUsize::new(0));
     let send_window = flowcontrol.then(|| Arc::new(Semaphore::new(INIT_WINDOW)));
     let sink = StreamSink {
@@ -228,7 +228,7 @@ pub struct Stream {
 }
 
 struct ReceiveState {
-    rx: mpsc::UnboundedReceiver<Bytes>,
+    rx: mpsc::Receiver<Bytes>,
     consumed: usize,
     // Retain a dequeued chunk if recv is cancelled while waiting for command capacity.
     pending: Option<Bytes>,
@@ -475,15 +475,18 @@ impl Mux {
         W: FrameWrite + Send + 'static,
     {
         // --- HELLO exchange (before spawning tasks) ---
-        writer
-            .write_frame(&Frame {
-                stream_id: 0,
-                ftype: FrameType::Hello as u8,
-                payload: Bytes::from(local_hello.encode()),
-            })
-            .await?;
-
-        let peer_frame = reader.read_frame().await?;
+        let peer_frame = tokio::time::timeout(Duration::from_secs(10), async {
+            writer
+                .write_frame(&Frame {
+                    stream_id: 0,
+                    ftype: FrameType::Hello as u8,
+                    payload: Bytes::from(local_hello.encode()),
+                })
+                .await?;
+            reader.read_frame().await
+        })
+        .await
+        .map_err(|_| Error::Closed)??;
         if base_type(peer_frame.ftype) != FrameType::Hello as u8 {
             return Err(Error::Version("expected HELLO first".into()));
         }
@@ -657,9 +660,9 @@ impl Mux {
                             }
                         } else if bt == FrameType::Data as u8 || bt == FrameType::Datagram as u8 {
                             // DATA (stream) and DATAGRAM (one packet) both route to the per-stream
-                            // channel. The channel is UNBOUNDED, so a slow consumer can never block the
-                            // shared reader and head-of-line-block other streams; flow control bounds how
-                            // much the peer may have in flight. Clone the sink out of the map first so we
+                            // channel. Nonblocking enqueue bounds both message count (including empty
+                            // datagrams) and payload bytes, without head-of-line blocking another stream.
+                            // Clone the sink out of the map first so we
                             // never hold the Mutex guard across an .await.
                             let sink = r_streams
                                 .lock()
@@ -669,7 +672,9 @@ impl Mux {
                             if let Some(sink) = sink {
                                 let n = f.payload.len();
                                 let buffered = sink.buffered.fetch_add(n, Ordering::SeqCst) + n;
-                                if buffered > MAX_BUFFERED {
+                                if buffered > MAX_BUFFERED
+                                    || sink.data_tx.try_send(f.payload).is_err()
+                                {
                                     // The peer is ignoring its window (or there is none): reset just this
                                     // stream instead of buffering without bound or stalling the mux.
                                     sink.buffered.fetch_sub(n, Ordering::SeqCst);
@@ -687,9 +692,6 @@ impl Mux {
                                             payload: Bytes::new(),
                                         }))
                                         .await;
-                                } else {
-                                    // Unbounded send: only fails if the consumer dropped its receiver.
-                                    let _ = sink.data_tx.send(f.payload);
                                 }
                             }
                         } else if bt == FrameType::WindowUpdate as u8 {
@@ -1104,6 +1106,105 @@ mod tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn blocked_hello_write_is_bounded() {
+        struct BlockedWriter;
+        impl FrameWrite for BlockedWriter {
+            async fn write_frame(&mut self, _: &Frame) -> crate::Result<()> {
+                std::future::pending().await
+            }
+        }
+        let result = tokio::time::timeout(
+            Duration::from_secs(11),
+            Mux::start(
+                ScriptedThenSilent {
+                    frames: Default::default(),
+                },
+                BlockedWriter,
+                hello(),
+                Role::Server,
+            ),
+        )
+        .await;
+        assert!(matches!(result, Ok(Err(_))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_hello_is_bounded() {
+        let result = tokio::time::timeout(
+            Duration::from_secs(11),
+            Mux::start(
+                ScriptedThenSilent {
+                    frames: Default::default(),
+                },
+                RecordingWriter {
+                    sent: Default::default(),
+                },
+                hello(),
+                Role::Server,
+            ),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "mux must enforce its own negotiation deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_frame_flood_resets_only_stalled_stream() {
+        let mut frames = std::collections::VecDeque::from([hello_frame(hello_dg())]);
+        for id in [1, 3] {
+            frames.push_back(Frame {
+                stream_id: id,
+                ftype: FrameType::Open as u8,
+                payload: Bytes::from_static(b"udp:echo:0"),
+            });
+        }
+        for _ in 0..1025 {
+            frames.push_back(Frame {
+                stream_id: 1,
+                ftype: FrameType::Datagram as u8,
+                payload: Bytes::new(),
+            });
+        }
+        frames.push_back(Frame {
+            stream_id: 3,
+            ftype: FrameType::Datagram as u8,
+            payload: Bytes::from_static(b"alive"),
+        });
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut mux = Mux::start(
+            ScriptedThenSilent { frames },
+            RecordingWriter { sent: sent.clone() },
+            hello_dg(),
+            Role::Server,
+        )
+        .await
+        .unwrap();
+        let stalled = mux.accept().await.unwrap();
+        let other = mux.accept().await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), other.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            b"alive"[..]
+        );
+        tokio::task::yield_now().await;
+        assert!(
+            sent.lock()
+                .unwrap()
+                .iter()
+                .any(|f| f.stream_id == 1 && f.ftype == FrameType::Close as u8),
+            "empty frames must hit a message-count bound"
+        );
+        assert!(
+            stalled.recv().await.unwrap().is_empty(),
+            "valid empty UDP remains deliverable"
+        );
+    }
+
     #[tokio::test]
     async fn cancelled_credit_update_preserves_received_payload() {
         let (tx, mut commands) = mpsc::channel(1);
@@ -1113,7 +1214,7 @@ mod tests {
             .unwrap();
         let payload = Bytes::from(vec![42; WINDOW_THRESHOLD]);
         sink.buffered.store(payload.len(), Ordering::SeqCst);
-        sink.data_tx.send(payload.clone()).unwrap();
+        sink.data_tx.try_send(payload.clone()).unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(10), stream.recv())
                 .await

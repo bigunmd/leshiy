@@ -32,13 +32,17 @@ pub use windows::WindowsOps as PlatformOps;
 mod android;
 #[cfg(target_os = "android")]
 pub use android::AndroidOps as PlatformOps;
+#[cfg(any(target_os = "android", all(test, unix)))]
+mod pending_fd;
 #[cfg(target_os = "android")]
-pub use android::{set_tun_fd, take_tun_fd};
+pub use pending_fd::{PendingTunFd, clear_tun_fd, set_tun_fd, take_tun_fd};
 
 // Shared command runner + pure argument-builders for the macOS + Windows backends.
 // Gated to also compile under `test` so the pure builders (and their unit tests) run on
 // the Linux host via `cargo test` — the privileged glue in macos.rs/windows.rs stays
 // OS-gated, but the OS-independent argument construction is host-verifiable.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+mod cleanup;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod cmd;
 

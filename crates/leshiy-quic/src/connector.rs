@@ -166,21 +166,24 @@ struct ConnectorUdpEgress {
 
 #[async_trait::async_trait]
 impl UdpEgress for ConnectorUdpEgress {
-    async fn send(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    async fn send(&self, buf: &[u8]) -> std::io::Result<usize> {
         self.flow
             .send(Bytes::copy_from_slice(buf))
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         Ok(buf.len())
     }
-    async fn recv(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    async fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self.flow.recv().await {
             Some(b) => {
                 let n = buf.len().min(b.len());
                 buf[..n].copy_from_slice(&b[..n]);
                 Ok(n)
             }
-            None => Ok(0), // association/connection closed
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "UDP association closed",
+            )), // association/connection closed
         }
     }
 }

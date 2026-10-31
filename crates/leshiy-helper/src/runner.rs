@@ -20,9 +20,8 @@ use tokio::task::JoinHandle;
 /// `start` can reset the state to `Disconnected` rather than leave the GUI spinning forever.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Upper bound on the graceful engine teardown (route/DNS restore). Generous because a large
-/// split-tunnel ruleset removes many routes; if it's exceeded we proceed anyway (the helper is
-/// either staying alive for a fresh session or about to exit, which the OS cleans up).
+/// Warn when graceful teardown takes this long, but keep owning and awaiting cleanup.
+/// Process exit or a new session before route/DNS restoration is unsafe.
 const STOP_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Zeroed rates — the resting value published before connecting and after disconnect.
@@ -98,7 +97,7 @@ struct Session {
 pub struct EngineRunner {
     state_tx: watch::Sender<State>,
     stats_tx: watch::Sender<Rates>,
-    session: Mutex<Option<Session>>,
+    session: tokio::sync::Mutex<Option<Session>>,
 }
 
 impl Default for EngineRunner {
@@ -114,7 +113,7 @@ impl EngineRunner {
         EngineRunner {
             state_tx,
             stats_tx,
-            session: Mutex::new(None),
+            session: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -125,10 +124,8 @@ impl EngineRunner {
         t
     }
 
-    /// The fallible body of `start`: resolve the server, dial the tunnel, and spawn the engine.
-    /// Kept separate so `start` can uniformly reset the published state to `Disconnected` if any
-    /// of these steps fails (rather than leaving the GUI wedged on "Connecting").
-    async fn start_session(&self, params: &StartParams) -> Result<(), HelperError> {
+    /// Preparation has no TUN/route mutations and may be cancelled by Stop.
+    async fn prepare(params: &StartParams) -> Result<(Arc<dyn Tunnel>, TunConfig), HelperError> {
         // Validate the client-supplied interface name before it can reach any
         // privileged command construction (H5).
         validate_tun_name(&params.tun_name)?;
@@ -198,65 +195,92 @@ impl EngineRunner {
             ..TunConfig::default()
         };
 
-        let state_tx = self.state_tx.clone();
-        let stats_tx = self.stats_tx.clone();
-        let counters = Arc::new(ByteCounters::new());
-        // Cooperative-stop signal: `stop` fires this and the engine returns gracefully (see
-        // `TunEngine::run`). We never `abort` the task — that wedges the Wintun teardown.
+        Ok((tunnel, cfg))
+    }
+
+    /// Own the worker before polling preparation. The same seam drives hermetic lifecycle tests.
+    async fn start_prepared<P, T, R, F>(&self, prepare: P, run: R) -> Result<(), HelperError>
+    where
+        P: std::future::Future<Output = Result<T, HelperError>> + Send + 'static,
+        T: Send + 'static,
+        R: FnOnce(T, Arc<tokio::sync::Notify>) -> F + Send + 'static,
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut slot = self
+            .session
+            .try_lock()
+            .map_err(|_| HelperError::AlreadyRunning)?;
+        if slot.as_ref().is_some_and(|s| !s.task.is_finished()) {
+            return Err(HelperError::AlreadyRunning);
+        }
         let cancel = Arc::new(tokio::sync::Notify::new());
-        let engine_cancel = cancel.clone();
-        state_tx.send_replace(State::Connected);
-        let handle = tokio::spawn(async move {
-            // Publish live throughput while the engine runs; abort the sampler on exit.
-            let sampler = tokio::spawn(sample_throughput(counters.clone(), stats_tx.clone()));
-            if let Err(e) = TunEngine::run(tunnel, cfg, counters, engine_cancel).await {
-                tracing::warn!("tun engine exited: {e}");
+        let worker_cancel = cancel.clone();
+        let state = self.state_tx.clone();
+        let stats = self.stats_tx.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        state.send_replace(State::Connecting);
+        let task = tokio::spawn(async move {
+            let prepared = tokio::select! {
+                biased;
+                () = worker_cancel.notified() => Err(HelperError::Engine("startup cancelled".into())),
+                result = prepare => result,
+            };
+            match prepared {
+                Ok(prepared) => {
+                    state.send_replace(State::Connected);
+                    let _ = ready_tx.send(Ok(()));
+                    // Never select cancellation against the running engine: it owns OS cleanup.
+                    run(prepared, worker_cancel).await;
+                }
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e));
+                }
             }
-            sampler.abort();
-            // Reset the rates so the GUI doesn't display a frozen speed after disconnect.
-            stats_tx.send_replace(zero_rates());
-            state_tx.send_replace(State::Disconnected);
+            stats.send_replace(zero_rates());
+            state.send_replace(State::Disconnected);
         });
-        *self.session.lock().unwrap() = Some(Session {
-            task: handle,
-            cancel,
-        });
-        Ok(())
+        *slot = Some(Session { task, cancel });
+        drop(slot);
+        ready_rx
+            .await
+            .unwrap_or_else(|_| Err(HelperError::Engine("startup worker exited".into())))
     }
 }
 
 #[async_trait::async_trait]
 impl VpnRunner for EngineRunner {
     async fn start(&self, params: &StartParams) -> Result<(), HelperError> {
-        if matches!(self.state(), State::Connecting | State::Connected) {
-            return Err(HelperError::AlreadyRunning);
-        }
-        self.state_tx.send_replace(State::Connecting);
-        // If ANY setup step below fails, reset to Disconnected before returning — otherwise the
-        // state stays "Connecting" forever and the GUI hangs on the spinner with no way back.
-        let result = self.start_session(params).await;
-        if result.is_err() {
-            self.state_tx.send_replace(State::Disconnected);
-        }
-        result
+        let params = params.clone();
+        let stats = self.stats_tx.clone();
+        self.start_prepared(
+            async move { Self::prepare(&params).await },
+            move |(tunnel, cfg), cancel| async move {
+                let counters = Arc::new(ByteCounters::new());
+                let sampler = tokio::spawn(sample_throughput(counters.clone(), stats));
+                if let Err(e) = TunEngine::run(tunnel, cfg, counters, cancel).await {
+                    tracing::warn!("tun engine exited: {e}");
+                }
+                sampler.abort();
+            },
+        )
+        .await
     }
 
     async fn stop(&self) {
-        // Take the session out (drop the lock before awaiting). Ask the engine to stop
-        // GRACEFULLY (`cancel`) rather than aborting the task: an aborted task drops the netstack
-        // from a cancellation context, which can't release the Wintun reader's blocking wait, so
-        // the device drop hangs and the adapter is never freed (next session → 0x4DF). The
-        // graceful path returns from `TunEngine::run` after the route/DNS restore completes. Bound
-        // the wait so a pathological teardown can't hang the helper forever.
-        let session = self.session.lock().unwrap().take();
-        if let Some(Session { task, cancel }) = session {
-            tracing::info!("stop: signalling engine cancel and awaiting graceful teardown");
+        // Keep the handle in the slot even if this stop future is cancelled. Holding the lock
+        // serializes concurrent stops; start uses try_lock and rejects while we drain.
+        let mut slot = self.session.lock().await;
+        if let Some(Session { task, cancel }) = slot.as_mut() {
             cancel.notify_one();
-            match tokio::time::timeout(STOP_TIMEOUT, task).await {
-                Ok(_) => tracing::info!("stop: engine teardown complete"),
-                Err(_) => tracing::warn!("stop: engine teardown timed out; proceeding"),
+            if tokio::time::timeout(STOP_TIMEOUT, &mut *task)
+                .await
+                .is_err()
+            {
+                tracing::warn!("stop: engine teardown is slow; awaiting route/DNS restoration");
+                let _ = task.await;
             }
         }
+        *slot = None;
         self.state_tx.send_replace(State::Disconnected);
     }
 
@@ -340,6 +364,112 @@ mod tests {
             split_tunnel: Default::default(),
             ipv6: false,
         }
+    }
+
+    #[tokio::test]
+    async fn stop_cancels_pending_startup_before_engine_install() {
+        let runner = Arc::new(EngineRunner::new());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (_release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let installed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let installed_worker = installed.clone();
+        let r = runner.clone();
+        let start = tokio::spawn(async move {
+            r.start_prepared(
+                async move {
+                    let _ = entered_tx.send(());
+                    let _ = release_rx.await;
+                    Ok(())
+                },
+                move |(), _| async move {
+                    installed_worker.store(true, std::sync::atomic::Ordering::SeqCst);
+                },
+            )
+            .await
+        });
+        entered_rx.await.unwrap();
+        runner.stop().await;
+        assert!(start.await.unwrap().is_err());
+        assert!(!installed.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(runner.state(), State::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn stop_timeout_and_cancelled_wait_keep_draining_owned() {
+        let runner = Arc::new(EngineRunner::new());
+        let (stopping_tx, stopping_rx) = tokio::sync::oneshot::channel();
+        let (cleanup_tx, cleanup_rx) = tokio::sync::oneshot::channel();
+        runner
+            .start_prepared(async { Ok(()) }, move |(), cancel| async move {
+                cancel.notified().await;
+                let _ = stopping_tx.send(());
+                let _ = cleanup_rx.await;
+            })
+            .await
+            .unwrap();
+        let r = runner.clone();
+        let stop = tokio::spawn(async move { r.stop().await });
+        stopping_rx.await.unwrap();
+        tokio::time::sleep(STOP_TIMEOUT + Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !stop.is_finished(),
+            "stop must not acknowledge incomplete cleanup"
+        );
+        assert_ne!(runner.state(), State::Disconnected);
+        assert!(matches!(
+            runner
+                .start_prepared(async { Ok(()) }, |(), _| async {})
+                .await,
+            Err(HelperError::AlreadyRunning)
+        ));
+        stop.abort(); // cancel the waiter, never the engine
+        assert!(stop.await.unwrap_err().is_cancelled());
+        assert!(
+            runner
+                .session
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|s| !s.task.is_finished())
+        );
+        assert!(matches!(
+            runner
+                .start_prepared(async { Ok(()) }, |(), _| async {})
+                .await,
+            Err(HelperError::AlreadyRunning)
+        ));
+        let r = runner.clone();
+        let final_stop = tokio::spawn(async move { r.stop().await });
+        cleanup_tx.send(()).unwrap();
+        final_stop.await.unwrap();
+        assert_eq!(runner.state(), State::Disconnected);
+        assert!(runner.session.lock().await.is_none());
+        runner
+            .start_prepared(async { Ok(()) }, |(), _| async {})
+            .await
+            .unwrap();
+        runner.stop().await;
+    }
+
+    #[tokio::test]
+    async fn startup_failure_allows_retry() {
+        let runner = EngineRunner::new();
+        assert!(
+            runner
+                .start_prepared(
+                    async { Err::<(), _>(HelperError::Engine("test failure".into())) },
+                    |(), _| async {}
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(runner.state(), State::Disconnected);
+        runner
+            .start_prepared(async { Ok(()) }, |(), _| async {})
+            .await
+            .unwrap();
+        runner.stop().await;
     }
 
     #[test]

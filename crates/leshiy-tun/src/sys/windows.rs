@@ -331,10 +331,9 @@ impl RouteController for WindowsController {
         let Some(gw) = self.bypass_gateway(c) else {
             return Ok(());
         };
-        let _ = self
-            .handle
+        self.handle
             .delete(&gateway_route(c.addr, c.prefix, gw, self.orig_idx))
-            .await;
+            .await?;
         self.installed_bypass
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -353,28 +352,15 @@ impl RouteController for WindowsController {
         if c.addr.is_ipv6() && (!self.carry_v6 || self.tun_idx.is_none()) {
             return Ok(());
         }
-        let _ = self.handle.delete(&self.via_tun_route(c)).await;
-        Ok(())
+        self.handle.delete(&self.via_tun_route(c)).await
     }
     async fn teardown_bypass(&self) {
-        // Drain the shared list so the guard's `Drop` (which shares the same Arc) finds it empty
-        // and skips its slow per-route `netsh` fallback. Delete each route in-process via the
-        // net_route Handle (IP Helper API) — orders of magnitude faster than a subprocess per CIDR.
-        let routes: Vec<Cidr> = std::mem::take(
-            &mut *self
-                .installed_bypass
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()),
-        );
-        for c in &routes {
-            let Some(gw) = self.bypass_gateway(c) else {
-                continue;
-            };
-            let _ = self
-                .handle
-                .delete(&gateway_route(c.addr, c.prefix, gw, self.orig_idx))
-                .await;
-        }
+        // Keep fallback ownership across errors and cancellation. Successful removals
+        // clear their entries through remove_bypass; Drop retries anything left behind.
+        super::cleanup::remove_owned(&self.installed_bypass, |c| async move {
+            self.remove_bypass(&c).await
+        })
+        .await;
     }
 }
 

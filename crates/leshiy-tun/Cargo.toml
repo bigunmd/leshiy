@@ -18,6 +18,10 @@ tun = { workspace = true }
 ipstack = { workspace = true }
 bytes = { workspace = true }
 
+# Safe close for descriptors transferred by Android; host tests exercise pending ownership.
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
 # Route-table manipulation + gateway discovery — desktop-only. On Android the routing is owned
 # by VpnService.Builder (and `net-route`/its `nix`/libc plumbing doesn't target the Android NDK),
 # so it's gated to the desktop OSes. The host build (incl. `cfg(test)` which compiles the macOS

@@ -80,6 +80,13 @@ impl PrivilegedOps for MacOsOps {
         // 2. Routes: server host-exception FIRST (escape the tunnel via the original
         //    gateway), then the default-override halves via the utun interface.
         let handle = Handle::new()?;
+        let services = list_network_services()?;
+        let installed_bypass: Arc<Mutex<Vec<Cidr>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut guard = MacOsTeardown {
+            dns_backup: Vec::new(),
+            v6_services: Vec::new(),
+            installed_bypass: installed_bypass.clone(),
+        };
         // Physical NIC ifindex (from the current default route). net_route may need the egress
         // interface to install a gateway route, so attach it to the exception + bypass routes.
         let orig_idx = handle
@@ -89,22 +96,16 @@ impl PrivilegedOps for MacOsOps {
             .flatten()
             .and_then(|r| r.ifindex);
         let exc = &plan.server_exception;
-        // Attach the v4 egress ifindex only for a v4 exception; let the OS pick for v6.
-        let exc_idx = if exc.dest.addr.is_ipv4() {
-            orig_idx
-        } else {
-            None
-        };
-        let exc_route = gateway_route(exc.dest.addr, exc.dest.prefix, exc.gateway, exc_idx);
-        if handle.add(&exc_route).await.is_err() && exc.dest.addr.is_ipv4() {
-            // Fallback to BSD `route` if net-route's gateway add is rejected (v4 syntax only).
-            let args = cmd::mac_route_add_via_gateway_args(
-                &exc.dest.addr.to_string(),
-                exc.dest.prefix,
-                &exc.gateway.to_string(),
-            );
+        // One synchronous command avoids cancellation between the kernel add and
+        // recording ownership. Failed/duplicate adds must never become ours to delete.
+        if let Some(args) = exception_add_args(&exc.dest, exc.gateway) {
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-            let _ = cmd::run(ROUTE, &argv); // best-effort: an identical host route already existing is fine
+            if cmd::run(ROUTE, &argv).is_ok() {
+                installed_bypass
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(exc.dest.clone());
+            }
         }
         // via_tun + bypass go through the net_route `Handle` (PF_ROUTE socket) — thousands of
         // fast in-process messages, NOT a `route` subprocess per CIDR (a subscription can carry
@@ -155,7 +156,6 @@ impl PrivilegedOps for MacOsOps {
         // 2b. Split-tunnel bypass routes (Exclude): each CIDR escapes via the original gateway.
         //     Tracked in `installed_bypass` (shared with the controller + teardown) — gateway
         //     routes persist after the utun drops, so they're deleted explicitly.
-        let installed_bypass: Arc<Mutex<Vec<Cidr>>> = Arc::new(Mutex::new(Vec::new()));
         for b in &plan.bypass {
             // A v6 bypass needs IPv6 carried; otherwise skip (it then rides the tunnel — safe).
             if b.dest.addr.is_ipv6() && !carry_v6 {
@@ -166,23 +166,21 @@ impl PrivilegedOps for MacOsOps {
             } else {
                 None
             };
-            let _ = handle
-                .add(&gateway_route(b.dest.addr, b.dest.prefix, b.gateway, idx))
-                .await; // best-effort, fast (PF_ROUTE socket)
             installed_bypass
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(b.dest.clone());
+            let _ = handle
+                .add(&gateway_route(b.dest.addr, b.dest.prefix, b.gateway, idx))
+                .await; // recorded before await so cancellation retains rollback ownership
         }
 
         // 3. DNS: set the configured resolver(s) on every active network service, backing up
         //    the prior servers so teardown can restore them. Skipped in Include mode.
-        let services = list_network_services()?;
-        let mut dns_backup: Vec<(String, Vec<String>)> = Vec::new();
         if force_dns {
             for svc in &services {
-                let prior = current_dns(svc).unwrap_or_default();
-                dns_backup.push((svc.clone(), prior));
+                let prior = current_dns(svc)?;
+                guard.dns_backup.push((svc.clone(), prior));
                 let args = cmd::mac_dns_set_args(svc, dns);
                 let argv: Vec<&str> = args.iter().map(String::as_str).collect();
                 let _ = cmd::run(NETWORKSETUP, &argv);
@@ -194,17 +192,16 @@ impl PrivilegedOps for MacOsOps {
         //    meant to carry v6 but couldn't assign the address. Skipped when v6 is genuinely
         //    carried, and in Include mode.
         let apply_v6off = ipv6_killswitch || (plan.tun_addr6.is_some() && !carry_v6);
-        let mut v6_services: Vec<String> = Vec::new();
         if apply_v6off {
             for svc in &services {
                 if cmd::run(NETWORKSETUP, &["-setv6off", svc]).is_ok() {
-                    v6_services.push(svc.clone());
+                    guard.v6_services.push(svc.clone());
                 }
             }
         }
 
         let controller = Arc::new(MacOsController {
-            handle: Handle::new()?,
+            handle,
             tun_idx,
             tun_addr: tun4,
             gateway: plan.server_exception.gateway,
@@ -213,11 +210,6 @@ impl PrivilegedOps for MacOsOps {
             carry_v6,
             installed_bypass: installed_bypass.clone(),
         });
-        let guard = MacOsTeardown {
-            dns_backup,
-            v6_services,
-            installed_bypass,
-        };
         Ok(TunSession {
             device,
             guard: Box::new(guard),
@@ -288,10 +280,9 @@ impl RouteController for MacOsController {
         let Some(gw) = self.bypass_gateway(c) else {
             return Ok(());
         };
-        let _ = self
-            .handle
+        self.handle
             .delete(&gateway_route(c.addr, c.prefix, gw, self.orig_idx))
-            .await;
+            .await?;
         self.installed_bypass
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -310,29 +301,76 @@ impl RouteController for MacOsController {
         if c.addr.is_ipv6() && (!self.carry_v6 || self.tun_idx.is_none()) {
             return Ok(());
         }
-        let _ = self.handle.delete(&self.via_tun_route(c)).await;
-        Ok(())
+        self.handle.delete(&self.via_tun_route(c)).await
     }
     async fn teardown_bypass(&self) {
-        // Drain the shared list so the guard's `Drop` (same Arc) finds it empty and skips its slow
-        // per-route `route delete` subprocess fallback. Delete each in-process via net_route —
-        // far faster than a subprocess per CIDR for a large rule set.
-        let routes: Vec<Cidr> = std::mem::take(
-            &mut *self
-                .installed_bypass
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()),
-        );
-        for c in &routes {
-            let Some(gw) = self.bypass_gateway(c) else {
-                continue;
-            };
-            let _ = self
-                .handle
-                .delete(&gateway_route(c.addr, c.prefix, gw, self.orig_idx))
-                .await;
-        }
+        // Keep fallback ownership across errors and cancellation. Successful removals
+        // clear their entries through remove_bypass; Drop retries anything left behind.
+        super::cleanup::remove_owned(&self.installed_bypass, |c| async move {
+            // The server exception can be IPv6 even when IPv6 payload is disabled.
+            // Keep it for Drop rather than treating the controller's no-op as deletion.
+            if self.bypass_gateway(&c).is_none() {
+                return Err(std::io::Error::other("route requires fallback teardown"));
+            }
+            self.remove_bypass(&c).await
+        })
+        .await;
     }
+}
+
+/// The server exception is a single synchronous route operation, including IPv6.
+fn exception_add_args(dest: &Cidr, gateway: IpAddr) -> Option<Vec<String>> {
+    if dest.addr.is_ipv4() != gateway.is_ipv4() {
+        return None;
+    }
+    if dest.addr.is_ipv4() {
+        Some(cmd::mac_route_add_via_gateway_args(
+            &dest.addr.to_string(),
+            dest.prefix,
+            &gateway.to_string(),
+        ))
+    } else {
+        Some(vec![
+            "-n".into(),
+            "add".into(),
+            "-inet6".into(),
+            "-net".into(),
+            format!("{}/{}", dest.addr, dest.prefix),
+            gateway.to_string(),
+        ])
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn exception_commands_keep_address_families_separate() {
+    let v4 = Cidr {
+        addr: "192.0.2.1".parse().unwrap(),
+        prefix: 32,
+    };
+    let v6 = Cidr {
+        addr: "2001:db8::1".parse().unwrap(),
+        prefix: 128,
+    };
+    let gw4 = "192.0.2.254".parse().unwrap();
+    let gw6 = "2001:db8::ffff".parse().unwrap();
+    assert_eq!(
+        exception_add_args(&v4, gw4).unwrap(),
+        ["-n", "add", "-net", "192.0.2.1/32", "192.0.2.254"]
+    );
+    assert_eq!(
+        exception_add_args(&v6, gw6).unwrap(),
+        [
+            "-n",
+            "add",
+            "-inet6",
+            "-net",
+            "2001:db8::1/128",
+            "2001:db8::ffff"
+        ]
+    );
+    assert!(exception_add_args(&v6, gw4).is_none());
+    assert!(exception_add_args(&v4, gw6).is_none());
 }
 
 /// Build a next-hop (gateway) route, attaching the egress interface index when known —
@@ -373,8 +411,8 @@ fn current_dns(service: &str) -> std::io::Result<Vec<String>> {
 }
 
 /// Restores DNS + IPv6 on drop and removes any split-tunnel `bypass` routes. The
-/// override/exception/via-tun routes auto-clear when the utun device is dropped; the `bypass`
-/// gateway routes do not, so they're deleted explicitly here.
+/// override/via-tun routes auto-clear when the utun device is dropped; the exception and
+/// bypass gateway routes do not, so they're deleted explicitly here.
 struct MacOsTeardown {
     dns_backup: Vec<(String, Vec<String>)>,
     v6_services: Vec<String>,
@@ -391,7 +429,10 @@ impl Drop for MacOsTeardown {
             .unwrap_or_else(|e| e.into_inner())
             .iter()
         {
-            let args = cmd::mac_route_del_args(&c.addr.to_string(), c.prefix);
+            let mut args = cmd::mac_route_del_args(&c.addr.to_string(), c.prefix);
+            if c.addr.is_ipv6() {
+                args.insert(2, "-inet6".into());
+            }
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
             let _ = cmd::run(ROUTE, &argv);
         }

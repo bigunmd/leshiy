@@ -6,28 +6,13 @@
 //! here — `RoutePlan`/`dns`/`force_dns`/`ipv6_killswitch` are owned by the Kotlin service and
 //! ignored. There is also no privileged route mutation, so the controller is a `NullController`.
 //!
-//! The fd is injected out-of-band via [`set_tun_fd`] by the mobile bridge immediately before the
+//! The fd is injected out-of-band via [`super::set_tun_fd`] by the mobile bridge immediately before the
 //! engine starts (one session per process), and consumed once by [`AndroidOps::start`].
+use super::pending_fd::take_tun_fd;
 use super::{NullController, PrivilegedOps, TunSession};
 use crate::route_plan::RoutePlan;
 use std::net::IpAddr;
-use std::os::fd::RawFd;
-use std::sync::{Arc, Mutex};
-
-/// The TUN fd from `VpnService.establish()`, parked here by the bridge for `AndroidOps::start`.
-/// The Kotlin side transfers ownership (`ParcelFileDescriptor.detachFd()`), so Rust closes it
-/// when the device drops (`close_fd_on_drop(true)`).
-static TUN_FD: Mutex<Option<RawFd>> = Mutex::new(None);
-
-/// Inject the VpnService-provided TUN fd. Call exactly once, right before starting the engine.
-pub fn set_tun_fd(fd: RawFd) {
-    *TUN_FD.lock().unwrap() = Some(fd);
-}
-
-/// Take the injected TUN fd (consuming it). Returns `None` if none was set.
-pub fn take_tun_fd() -> Option<RawFd> {
-    TUN_FD.lock().unwrap().take()
-}
+use std::sync::Arc;
 
 pub struct AndroidOps;
 

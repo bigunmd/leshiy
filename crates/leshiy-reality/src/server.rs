@@ -427,45 +427,42 @@ async fn relay_datagram(
     store: Arc<dyn UserStore>,
     egress: Arc<dyn Egress>,
 ) -> crate::Result<()> {
-    let mut udp = egress
-        .open_udp(&stream.target)
-        .await
-        .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
-    const IDLE: std::time::Duration = std::time::Duration::from_secs(60);
-    let mut buf = vec![0u8; 65535];
-    // M4: the UDP relay previously never re-checked authorization at all, so a
-    // revoked/expired/over-cap user kept flowing until the idle timeout. Re-check
-    // on a 1s timer.
-    let mut revoke_tick = tokio::time::interval(std::time::Duration::from_secs(2));
-    revoke_tick.tick().await; // consume the immediate first tick
-    loop {
-        tokio::select! {
-            _ = revoke_tick.tick() => {
-                if !store.still_allowed(&short_id, now_secs()) { break; }
+    let udp = egress.open_udp(&stream.target).await?;
+    let stream = &*stream;
+    let activity = std::sync::Mutex::new(tokio::time::Instant::now());
+    let upload = async {
+        while let Ok(b) = stream.recv().await {
+            *activity.lock().unwrap() = tokio::time::Instant::now();
+            if let Some(tb) = &limits.up {
+                tb.consume(b.len() as u64).await;
             }
-            inbound = stream.recv() => match inbound {       // client → target = UP
-                Ok(b) => {
-                    if let Some(tb) = &limits.up { tb.consume(b.len() as u64).await; }
-                    let _ = udp.send(&b).await;
-                    store.add_usage(&short_id, b.len() as u64, 0);
-                }
-                Err(_) => break,
-            },
-            r = udp.recv(&mut buf) => match r {              // target → client = DOWN
-                Ok(n) => {
-                    if let Some(tb) = &limits.down { tb.consume(n as u64).await; }
-                    stream
-                        .send(buf[..n].to_vec().into())
-                        .await
-                        .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
-                    store.add_usage(&short_id, 0, n as u64);
-                }
-                Err(_) => break,
-            },
-            _ = tokio::time::sleep(IDLE) => break,
+            if let Ok(n) = udp.send(&b).await {
+                store.add_usage(&short_id, n as u64, 0);
+            }
         }
+        Ok(())
+    };
+    let download = async {
+        let mut buf = vec![0; 65535];
+        while let Ok(n) = udp.recv(&mut buf).await {
+            *activity.lock().unwrap() = tokio::time::Instant::now();
+            if let Some(tb) = &limits.down {
+                tb.consume(n as u64).await;
+            }
+            stream
+                .send(buf[..n].to_vec().into())
+                .await
+                .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
+            store.add_usage(&short_id, 0, n as u64);
+        }
+        Ok(())
+    };
+    // Cancellation ends this association; never retry a partially sent mux payload.
+    tokio::select! {
+        r = upload => r,
+        r = download => r,
+        () = datagram_expired(&activity, std::time::Duration::from_secs(60), &*store, &short_id) => Ok(()),
     }
-    Ok(())
 }
 
 /// Relay ICMP **echo** between a mux `icmp:` association and an unprivileged ping socket
@@ -493,58 +490,90 @@ async fn relay_icmp(
         .parse::<std::net::IpAddr>()
         .map(|ip| ip.is_ipv6())
         .unwrap_or(false);
-    let mut icmp = egress
-        .open_icmp(&stream.target)
-        .await
-        .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
-    const IDLE: std::time::Duration = std::time::Duration::from_secs(30);
-    let mut buf = vec![0u8; 65535];
-    let mut last_id: Option<u16> = None;
-    let mut revoke_tick = tokio::time::interval(std::time::Duration::from_secs(2));
-    revoke_tick.tick().await; // consume the immediate first tick
-    loop {
-        tokio::select! {
-            _ = revoke_tick.tick() => {
-                if !store.still_allowed(&short_id, now_secs()) { break; }
+    let icmp = egress.open_icmp(&stream.target).await?;
+    let stream = &*stream;
+    let activity = std::sync::Mutex::new(tokio::time::Instant::now());
+    let last_id = std::sync::Mutex::new(None);
+    let upload = async {
+        while let Ok(b) = stream.recv().await {
+            let Some(echo) = leshiy_core::icmp::parse_echo_request(&b, v6) else {
+                continue;
+            };
+            *activity.lock().unwrap() = tokio::time::Instant::now();
+            *last_id.lock().unwrap() = Some(echo.id);
+            if let Some(tb) = &limits.up {
+                tb.consume(b.len() as u64).await;
             }
-            inbound = stream.recv() => match inbound {       // client → target = UP
-                Ok(b) => {
-                    // Echo only. Everything else is dropped, not relayed.
-                    let Some(echo) = leshiy_core::icmp::parse_echo_request(&b, v6) else {
-                        tracing::debug!("non-echo icmp from client dropped");
-                        continue;
-                    };
-                    last_id = Some(echo.id);
-                    if let Some(tb) = &limits.up { tb.consume(b.len() as u64).await; }
-                    let _ = icmp.send(&b).await;
-                    store.add_usage(&short_id, b.len() as u64, 0);
-                }
-                Err(_) => break,
-            },
-            r = icmp.recv(&mut buf) => match r {             // target → client = DOWN
-                Ok(n) => {
-                    let mut msg = buf[..n].to_vec();
-                    // Put the user's identifier back so their ping correlates the reply.
-                    if let Some(id) = last_id
-                        && leshiy_core::icmp::set_id(&mut msg, id)
-                        && !v6
-                    {
-                        // v6 is left checksum-zeroed for the client to complete.
-                        let _ = leshiy_core::icmp::set_v4_checksum(&mut msg);
-                    }
-                    if let Some(tb) = &limits.down { tb.consume(n as u64).await; }
-                    stream
-                        .send(msg.into())
-                        .await
-                        .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
-                    store.add_usage(&short_id, 0, n as u64);
-                }
-                Err(_) => break,
-            },
-            _ = tokio::time::sleep(IDLE) => break,
+            if let Ok(n) = icmp.send(&b).await {
+                store.add_usage(&short_id, n as u64, 0);
+            }
+        }
+        Ok(())
+    };
+    let download = async {
+        let mut buf = vec![0; 65535];
+        while let Ok(n) = icmp.recv(&mut buf).await {
+            *activity.lock().unwrap() = tokio::time::Instant::now();
+            let mut msg = buf[..n].to_vec();
+            if let Some(id) = *last_id.lock().unwrap()
+                && leshiy_core::icmp::set_id(&mut msg, id)
+                && !v6
+            {
+                let _ = leshiy_core::icmp::set_v4_checksum(&mut msg);
+            }
+            if let Some(tb) = &limits.down {
+                tb.consume(n as u64).await;
+            }
+            stream
+                .send(msg.into())
+                .await
+                .map_err(|e| crate::RealityError::Malformed(e.to_string()))?;
+            store.add_usage(&short_id, 0, n as u64);
+        }
+        Ok(())
+    };
+    tokio::select! {
+        r = upload => r,
+        r = download => r,
+        () = datagram_expired(&activity, std::time::Duration::from_secs(30), &*store, &short_id) => Ok(()),
+    }
+}
+
+async fn datagram_expired(
+    activity: &std::sync::Mutex<tokio::time::Instant>,
+    idle: std::time::Duration,
+    store: &dyn UserStore,
+    sid: &[u8; 8],
+) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    loop {
+        let deadline = *activity.lock().unwrap() + idle;
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {
+                if activity.lock().unwrap().elapsed() >= idle { return; }
+            }
+            _ = tick.tick() => if !store.still_allowed(sid, now_secs()) { return; },
         }
     }
-    Ok(())
+}
+
+#[cfg(test)]
+#[tokio::test(start_paused = true)]
+async fn datagram_idle_deadline_ignores_auth_ticks() {
+    let sid = [1; 8];
+    let store = crate::user::InMemoryUserStore::from_short_ids([sid]);
+    for seconds in [30, 60] {
+        let start = tokio::time::Instant::now();
+        let activity = std::sync::Mutex::new(start);
+        datagram_expired(
+            &activity,
+            std::time::Duration::from_secs(seconds),
+            &store,
+            &sid,
+        )
+        .await;
+        assert_eq!(start.elapsed(), std::time::Duration::from_secs(seconds));
+    }
 }
 
 fn now_secs() -> u64 {
@@ -904,6 +933,130 @@ mod tests {
         });
         let relay = tokio::spawn(async move {
             relay_stream(
+                &mut server,
+                [1; 8],
+                UserLimits {
+                    up: None,
+                    down: None,
+                },
+                store,
+                egress,
+            )
+            .await
+        });
+        // Drain less than the 128KiB credit-update threshold, then stop receiving.
+        // The continuously readable target exhausts its initial 256KiB credit.
+        client.recv().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), exhausted.notified())
+            .await
+            .unwrap();
+        client
+            .send(Bytes::from_static(b"reverse-progress"))
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(1), received.notified()).await;
+        relay.abort();
+        let _ = relay.await;
+        assert!(
+            result.is_ok(),
+            "exhausted download credit must not suppress upload receive"
+        );
+    }
+
+    #[tokio::test]
+    async fn datagram_receives_while_target_to_client_credit_is_exhausted() {
+        use bytes::Bytes;
+        use leshiy_core::{
+            frame::Frame,
+            mux::{Mux, Role},
+            transport::{FrameRead, FrameWrite},
+            version::Hello,
+        };
+        struct Reader(tokio::sync::mpsc::UnboundedReceiver<Frame>);
+        impl FrameRead for Reader {
+            async fn read_frame(&mut self) -> leshiy_core::Result<Frame> {
+                self.0.recv().await.ok_or(leshiy_core::Error::Closed)
+            }
+        }
+        struct Writer(tokio::sync::mpsc::UnboundedSender<Frame>);
+        impl FrameWrite for Writer {
+            async fn write_frame(&mut self, frame: &Frame) -> leshiy_core::Result<()> {
+                self.0
+                    .send(frame.clone())
+                    .map_err(|_| leshiy_core::Error::Closed)
+            }
+        }
+        struct Datagram {
+            reads: std::sync::atomic::AtomicUsize,
+            received: Arc<tokio::sync::Notify>,
+            exhausted: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait::async_trait]
+        impl crate::egress::UdpEgress for Datagram {
+            async fn send(&self, buf: &[u8]) -> std::io::Result<usize> {
+                assert_eq!(buf, b"reverse-progress");
+                self.received.notify_one();
+                Ok(buf.len())
+            }
+            async fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self
+                    .reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    == 16
+                {
+                    self.exhausted.notify_one();
+                }
+                buf[..16000].fill(7);
+                Ok(16000)
+            }
+        }
+        struct TestEgress {
+            received: Arc<tokio::sync::Notify>,
+            exhausted: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait::async_trait]
+        impl Egress for TestEgress {
+            async fn open(
+                &self,
+                _: &str,
+            ) -> crate::Result<(
+                Box<dyn crate::egress::EgressRead>,
+                Box<dyn crate::egress::EgressWrite>,
+            )> {
+                unreachable!()
+            }
+            async fn open_udp(&self, _: &str) -> crate::Result<Box<dyn crate::egress::UdpEgress>> {
+                Ok(Box::new(Datagram {
+                    reads: Default::default(),
+                    received: self.received.clone(),
+                    exhausted: self.exhausted.clone(),
+                }))
+            }
+        }
+        let (a_tx, a_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (b_tx, b_rx) = tokio::sync::mpsc::unbounded_channel();
+        let hello = Hello::new(
+            1,
+            1,
+            leshiy_core::version::CAP_FLOWCONTROL | leshiy_core::version::CAP_DATAGRAM,
+        );
+        let (a, b) = tokio::join!(
+            Mux::start(Reader(a_rx), Writer(b_tx), hello, Role::Client),
+            Mux::start(Reader(b_rx), Writer(a_tx), hello, Role::Server),
+        );
+        let mut a = a.unwrap();
+        let mut b = b.unwrap();
+        let client = a.open_datagram("target:443").await.unwrap();
+        let mut server = b.accept().await.unwrap();
+        let received = Arc::new(tokio::sync::Notify::new());
+        let store = Arc::new(InMemoryUserStore::from_short_ids([[1; 8]]));
+        let exhausted = Arc::new(tokio::sync::Notify::new());
+        let egress = Arc::new(TestEgress {
+            received: received.clone(),
+            exhausted: exhausted.clone(),
+        });
+        let relay = tokio::spawn(async move {
+            relay_datagram(
                 &mut server,
                 [1; 8],
                 UserLimits {

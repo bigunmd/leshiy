@@ -53,6 +53,7 @@ pub(crate) async fn demux_loop(conn: quinn::Connection, registry: DatagramRegist
             let _ = tx.try_send(payload);
         }
     }
+    registry.lock().await.clear();
 }
 
 /// Register an association's inbound channel; returns the receiver the relay reads from. Bounded so

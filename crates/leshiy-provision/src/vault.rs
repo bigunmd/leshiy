@@ -161,6 +161,8 @@ use std::path::Path;
 #[derive(Default)]
 pub struct Vault {
     records: Vec<ServerRecord>,
+    snapshot: std::sync::Mutex<Option<Vec<u8>>>,
+    transaction_lock: Option<(std::path::PathBuf, std::fs::File)>,
 }
 
 /// Outcome of merging backup records into a vault.
@@ -180,10 +182,37 @@ impl Vault {
         match std::fs::read(path) {
             Ok(bytes) => Ok(Self {
                 records: open(&bytes, passphrase)?,
+                snapshot: std::sync::Mutex::new(Some(bytes)),
+                transaction_lock: None,
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::new()),
             Err(e) => Err(Error::Io(e)),
         }
+    }
+
+    /// Hold the cross-process write lock through remote work and persistence.
+    pub fn load_locked(path: &Path, passphrase: &str) -> Result<Self> {
+        let lock = Self::lock(path)?;
+        let mut vault = Self::load(path, passphrase)?;
+        vault.transaction_lock = Some((path.to_path_buf(), lock));
+        Ok(vault)
+    }
+
+    fn lock(path: &Path) -> Result<std::fs::File> {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut name = path.as_os_str().to_owned();
+        name.push(".lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(name)?;
+        lock.try_lock()
+            .map_err(|e| Error::Vault(format!("vault busy: {e}; retry after reloading")))?;
+        Ok(lock)
     }
 
     /// Encrypt and atomically write the vault to `path`.
@@ -192,14 +221,65 @@ impl Vault {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, &blob)?;
+        use std::io::Write;
+        if self
+            .transaction_lock
+            .as_ref()
+            .is_some_and(|(locked_path, _)| locked_path != path)
+        {
+            return Err(Error::Vault(
+                "cannot save transaction to a different path".into(),
+            ));
+        }
+        let _lock = if self.transaction_lock.is_none() {
+            Some(Self::lock(path)?)
+        } else {
+            None
+        };
+        let mut snapshot = self.snapshot.lock().unwrap();
+        let current = match std::fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        if current != *snapshot {
+            return Err(Error::Vault("vault changed concurrently; remote operations may already have succeeded; reload and reconcile before retrying".into()));
+        }
+        let tmp = path.with_extension(format!("{}.tmp", rand::random::<u128>()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        file.write_all(&blob)?;
+        file.sync_all()?;
+        drop(file);
         std::fs::rename(&tmp, path)?;
+        *snapshot = Some(blob);
+        #[cfg(unix)]
+        std::fs::File::open(
+            path.parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new(".")),
+        )?
+        .sync_all()?;
         Ok(())
     }
 
-    fn matches(rec: &ServerRecord, key: &str) -> bool {
-        rec.id == key || rec.label == key
+    fn index(&self, key: &str) -> Option<usize> {
+        if let Some(i) = self.records.iter().position(|r| r.id == key) {
+            return Some(i);
+        }
+        let mut matches = self
+            .records
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.label == key);
+        let (i, _) = matches.next()?;
+        matches.next().is_none().then_some(i)
     }
 
     /// Insert, or replace an existing record with the same `id`.
@@ -212,18 +292,25 @@ impl Vault {
     }
 
     pub fn get(&self, id_or_label: &str) -> Option<&ServerRecord> {
-        self.records.iter().find(|r| Self::matches(r, id_or_label))
+        self.index(id_or_label).map(|i| &self.records[i])
     }
 
     pub fn get_mut(&mut self, id_or_label: &str) -> Option<&mut ServerRecord> {
-        self.records
-            .iter_mut()
-            .find(|r| Self::matches(r, id_or_label))
+        self.index(id_or_label).map(|i| &mut self.records[i])
     }
 
     pub fn remove(&mut self, id_or_label: &str) -> bool {
+        let Some(i) = self.index(id_or_label) else {
+            return false;
+        };
+        self.records.remove(i);
+        true
+    }
+
+    /// Remove only an exact resolved ID, never a coinciding label.
+    pub fn remove_id(&mut self, id: &str) -> bool {
         let before = self.records.len();
-        self.records.retain(|r| !Self::matches(r, id_or_label));
+        self.records.retain(|r| r.id != id);
         self.records.len() != before
     }
 
@@ -280,6 +367,75 @@ impl Vault {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_save_is_rejected_and_original_survives() {
+        let path = std::env::temp_dir().join(format!(
+            "leshiy-vault-cas-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let mut first = Vault::load(&path, "test").unwrap();
+        let mut stale = Vault::load(&path, "test").unwrap();
+        first.upsert(sample());
+        first.save(&path, "test").unwrap();
+        let mut other = sample();
+        other.id = "other".into();
+        stale.upsert(other);
+        assert!(stale.save(&path, "test").is_err());
+        assert_eq!(Vault::load(&path, "test").unwrap().list()[0].id, "srv1");
+    }
+
+    #[test]
+    fn locked_transaction_excludes_other_process() {
+        const CHILD: &str = "LESHIY_VAULT_LOCK_TEST";
+        if let Some(path) = std::env::var_os(CHILD) {
+            assert!(Vault::load_locked(Path::new(&path), "test").is_err());
+            return;
+        }
+        let path = std::env::temp_dir().join(format!(
+            "leshiy-vault-lock-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let vault = Vault::load_locked(&path, "test").unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "vault::tests::locked_transaction_excludes_other_process",
+            ])
+            .env(CHILD, &path)
+            .status()
+            .unwrap();
+        assert!(result.success());
+        drop(vault);
+        assert!(Vault::load_locked(&path, "test").is_ok());
+    }
+
+    #[test]
+    fn exact_id_wins_over_another_records_label() {
+        let mut v = Vault::new();
+        let mut other = sample();
+        other.id = "other".into();
+        other.label = "srv1".into();
+        v.upsert(other);
+        v.upsert(sample());
+        assert_eq!(v.get("srv1").unwrap().id, "srv1");
+        assert!(v.remove_id("srv1"));
+        assert_eq!(v.list()[0].id, "other");
+    }
+
+    #[test]
+    fn ambiguous_label_cannot_delete_multiple_records() {
+        let mut v = Vault::new();
+        v.upsert(sample());
+        let mut other = sample();
+        other.id = "other".into();
+        v.upsert(other);
+        assert!(v.get("my-vps").is_none());
+        assert!(!v.remove("my-vps"));
+        assert_eq!(v.list().len(), 2);
+    }
 
     fn sample() -> ServerRecord {
         ServerRecord {

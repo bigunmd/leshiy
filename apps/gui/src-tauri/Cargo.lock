@@ -2928,6 +2928,7 @@ dependencies = [
  "leshiy-client",
  "leshiy-core",
  "net-route",
+ "nix 0.29.0",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

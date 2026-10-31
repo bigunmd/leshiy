@@ -14,6 +14,105 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
+#[tokio::test]
+async fn audit_udp_connection_close_wakes_receiver() {
+    let sid = [73; 8];
+    let (certs, key) = self_signed();
+    let pin = cert_sha256(certs[0].as_ref());
+    let endpoint = server_endpoint("127.0.0.1:0".parse().unwrap(), certs, key).unwrap();
+    let address = endpoint.local_addr().unwrap();
+    let server = tokio::spawn(serve_quic_on_endpoint(
+        endpoint.clone(),
+        Arc::new(InMemoryUserStore::from_short_ids([sid])),
+        Masquerade::default(),
+        Arc::new(DirectEgress::allowing_private()),
+    ));
+    let conn = connect_quic(address, "example.test", sid, CertVerification::Pinned(pin))
+        .await
+        .unwrap();
+    let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let flow = conn
+        .open_datagram(&udp.local_addr().unwrap().to_string())
+        .await
+        .unwrap();
+    endpoint.close(0u32.into(), b"test complete");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), flow.recv())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn audit_idle_tcp_and_udp_revocation_close_receivers() {
+    use leshiy_reality::user::UserAdmin;
+    let sid = [71; 8];
+    let store = Arc::new(InMemoryUserStore::from_short_ids([sid]));
+    let (server, pin) = start_server(store.clone()).await;
+    let conn = connect_quic(server, "example.test", sid, CertVerification::Pinned(pin))
+        .await
+        .unwrap();
+    let target = spawn_echo().await;
+    let (_send, mut recv) = leshiy_quic::client::open_connect(&conn, &target)
+        .await
+        .unwrap();
+    let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let flow = conn
+        .open_datagram(&udp.local_addr().unwrap().to_string())
+        .await
+        .unwrap();
+    store.set_enabled(&sid, false);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        assert!(!matches!(recv.recv_data().await, Ok(Some(_))));
+        assert!(flow.recv().await.is_none());
+        assert!(flow.recv().await.is_none());
+    })
+    .await
+    .expect("idle revocation must close both protocols");
+}
+
+#[tokio::test]
+async fn audit_tcp_reset_flushes_subthreshold_usage() {
+    use leshiy_reality::user::UserAdmin;
+    let sid = [72; 8];
+    let store = Arc::new(InMemoryUserStore::from_short_ids([sid]));
+    let (server, pin) = start_server(store.clone()).await;
+    let conn = connect_quic(server, "example.test", sid, CertVerification::Pinned(pin))
+        .await
+        .unwrap();
+    let target = spawn_echo().await;
+    for _ in 0..3 {
+        let (mut send, mut recv) = leshiy_quic::client::open_connect(&conn, &target)
+            .await
+            .unwrap();
+        send.send_data(Bytes::from_static(b"small-tail"))
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), recv.recv_data())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.remaining(), 10);
+        send.stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
+        drop(recv);
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = store.snapshot();
+            if snapshot[0].used_up == 30 && snapshot[0].used_down == 30 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("reset must flush each successfully relayed tail");
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -660,7 +759,7 @@ async fn connect_udp_datagram_echo() {
     )
     .await
     .expect("connect quic");
-    let mut flow = conn
+    let flow = conn
         .open_datagram(&udp_echo)
         .await
         .expect("open CONNECT-UDP association");

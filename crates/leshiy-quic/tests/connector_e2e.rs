@@ -559,7 +559,7 @@ async fn udp_roundtrip_through_egress(
     payload: &[u8],
 ) -> Result<(), String> {
     use leshiy_reality::egress::Egress;
-    let mut u = eg.open_udp(target).await.map_err(|e| e.to_string())?;
+    let u = eg.open_udp(target).await.map_err(|e| e.to_string())?;
     // Retry: the first datagram can race the far-side association setup.
     for attempt in 0..5 {
         u.send(payload).await.map_err(|e| e.to_string())?;

@@ -30,12 +30,16 @@ pub async fn serve_metered_on(
     listener: TcpListener,
     counters: Arc<ByteCounters>,
 ) -> Result<()> {
+    let mut sessions = tokio::task::JoinSet::new();
     loop {
-        let (cli, _) = listener.accept().await?;
+        let (cli, _) = tokio::select! {
+            accepted = listener.accept() => accepted?,
+            _ = sessions.join_next(), if !sessions.is_empty() => continue,
+        };
         cli.set_nodelay(true).ok();
         let tunnel = tunnel.clone();
         let counters = counters.clone();
-        tokio::spawn(async move {
+        sessions.spawn(async move {
             if let Ok((target, cli)) = socks5_accept(cli).await
                 && let Ok(mut stream) = tunnel.open(&target).await
             {

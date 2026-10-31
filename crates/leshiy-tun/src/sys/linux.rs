@@ -43,6 +43,8 @@ impl PrivilegedOps for LinuxOps {
         force_dns: bool,
         ipv6_killswitch: bool,
     ) -> std::io::Result<TunSession> {
+        // Startup has no suspension points: all installer children finish before rollback can
+        // run, even if the caller is cancelled or the runtime shuts down. This blocks one worker.
         // The TUN interface always carries an IPv4 address; IPv6 is dual-stacked on top when
         // `plan.tun_addr6` is set (else it stays fail-closed via the kill-switch below).
         let IpAddr::V4(tun4) = plan.tun_addr else {
@@ -68,7 +70,7 @@ impl PrivilegedOps for LinuxOps {
         //     if the host has IPv6 disabled the `ip -6 addr add` fails; we then fall closed to
         //     the kill-switch (below) rather than leave IPv6 leaking around a half-set-up tunnel.
         let carry_v6 = match plan.tun_addr6 {
-            Some(IpAddr::V6(v6)) => match add_v6_addr(tun_name, v6).await {
+            Some(IpAddr::V6(v6)) => match add_v6_addr(tun_name, v6) {
                 Ok(()) => true,
                 Err(e) => {
                     tracing::error!(%v6, "failed to assign IPv6 TUN address ({e}); failing closed to the IPv6 kill-switch");
@@ -90,53 +92,50 @@ impl PrivilegedOps for LinuxOps {
         let ifindex = ifindex_of(tun_name)?;
         let batch = build_route_batch(plan, tun_name, carry_v6);
         let installed_bypass: Arc<Mutex<Vec<Cidr>>> = Arc::new(Mutex::new(batch.bypass));
+        let handle = Handle::new()?;
+        // Own rollback before the first route mutation or cancellable batch wait.
+        let mut guard = LinuxTeardown {
+            resolv_backup: None,
+            ipv6_all_backup: None,
+            ipv6_default_backup: None,
+            installed_bypass: installed_bypass.clone(),
+            policy_rules_teardown: batch.teardown_rules,
+        };
         // Best-effort pre-clean of any policy rules a prior (hard-killed) session left behind.
         // Expected to no-op on a clean connect, so its stderr is ignored — counting it would fire
         // a spurious "traffic may not be routed" warning every time.
-        ip_batch_quiet(&batch.preclean).await;
-        ip_batch(&batch.install).await?;
+        ip_batch_quiet(&batch.preclean);
+        ip_batch(&batch.install)?;
 
         // 3. DNS: force the configured resolver(s) so queries ride the tunnel. Skipped in
         //    Include mode (most traffic is direct; the system resolver is left untouched).
-        let resolv_backup = if force_dns && !dns.is_empty() {
-            let prior = std::fs::read(RESOLV).ok();
+        if force_dns && !dns.is_empty() {
+            // Do not overwrite DNS unless its prior contents can be restored, even on a partial write.
+            guard.resolv_backup = Some(std::fs::read(RESOLV)?);
             let body: String = dns.iter().map(|ip| format!("nameserver {ip}\n")).collect();
             std::fs::write(RESOLV, body)?;
-            prior
-        } else {
-            None
-        };
+        }
 
         // 4. IPv6 kill-switch (fail-closed): disable v6 so it can't leak around the tunnel.
         //    Applied when the caller asked for it (IPv4-only session) OR when we intended to
         //    carry v6 but couldn't assign the address (so v6 would otherwise leak). Skipped when
         //    v6 is genuinely carried, and in Include mode (the un-tunneled majority stays direct).
         let apply_killswitch = ipv6_killswitch || (plan.tun_addr6.is_some() && !carry_v6);
-        let (ipv6_all_backup, ipv6_default_backup) = if apply_killswitch {
-            let all = std::fs::read_to_string(IPV6_ALL).ok();
-            let def = std::fs::read_to_string(IPV6_DEFAULT).ok();
-            let _ = std::fs::write(IPV6_ALL, "1");
-            let _ = std::fs::write(IPV6_DEFAULT, "1");
-            (all, def)
-        } else {
-            (None, None)
-        };
+        if apply_killswitch {
+            guard.ipv6_all_backup = Some(std::fs::read_to_string(IPV6_ALL)?);
+            guard.ipv6_default_backup = Some(std::fs::read_to_string(IPV6_DEFAULT)?);
+            std::fs::write(IPV6_ALL, "1")?;
+            std::fs::write(IPV6_DEFAULT, "1")?;
+        }
 
         let controller = Arc::new(LinuxController {
-            handle: Handle::new()?,
+            handle,
             gateway: plan.server_exception.gateway,
             gateway6: plan.orig_gateway6,
             ifindex,
             carry_v6,
             installed_bypass: installed_bypass.clone(),
         });
-        let guard = LinuxTeardown {
-            resolv_backup,
-            ipv6_all_backup,
-            ipv6_default_backup,
-            installed_bypass,
-            policy_rules_teardown: batch.teardown_rules,
-        };
         Ok(TunSession {
             device,
             guard: Box::new(guard),
@@ -201,10 +200,9 @@ impl RouteController for LinuxController {
         let Some(gw) = self.bypass_gateway(c) else {
             return Ok(());
         };
-        let _ = self
-            .handle
+        self.handle
             .delete(&Route::new(c.addr, c.prefix).with_gateway(gw))
-            .await;
+            .await?;
         self.installed_bypass
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -224,24 +222,21 @@ impl RouteController for LinuxController {
         if c.addr.is_ipv6() && !self.carry_v6 {
             return Ok(());
         }
-        let _ = self
-            .handle
+        self.handle
             .delete(&Route::new(c.addr, c.prefix).with_ifindex(self.ifindex))
-            .await;
-        Ok(())
+            .await
     }
 }
 
 /// Assign an IPv6 address to the TUN interface (`ip -6 addr add <v6>/64 dev <name>`). The
 /// interface's IPv4 address is set by rust-tun at creation; rust-tun's config carries only one
 /// address, so the v6 one is added out-of-band here. Fails if the host has IPv6 disabled.
-async fn add_v6_addr(tun_name: &str, v6: Ipv6Addr) -> std::io::Result<()> {
-    let status = tokio::process::Command::new(IP)
+fn add_v6_addr(tun_name: &str, v6: Ipv6Addr) -> std::io::Result<()> {
+    let status = std::process::Command::new(IP)
         .args(["-6", "addr", "add", &format!("{v6}/64"), "dev", tun_name])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .await?;
+        .status()?;
     if status.success() {
         Ok(())
     } else {
@@ -424,12 +419,11 @@ fn build_route_batch(plan: &RoutePlan, tun_name: &str, carry_v6: bool) -> RouteB
 /// e.g. `route add 1.2.3.0/24 dev leshiy0`). `-force` keeps going past per-line errors so a
 /// bad/duplicate entry in a large list can't fail the batch. One process for thousands of
 /// routes — vs. a netlink round-trip each — is what keeps connect fast with big subscriptions.
-async fn ip_batch(script: &str) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
+fn ip_batch(script: &str) -> std::io::Result<()> {
     if script.is_empty() {
         return Ok(());
     }
-    let mut child = tokio::process::Command::new(IP)
+    let child = std::process::Command::new(IP)
         .args(["-force", "-batch", "-"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -438,11 +432,7 @@ async fn ip_batch(script: &str) -> std::io::Result<()> {
         // via_tun) would silently not route, so count and warn instead of swallowing.
         .stderr(std::process::Stdio::piped())
         .spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(script.as_bytes()).await?;
-        // `stdin` is dropped at the end of this block → `ip` sees EOF and runs the batch.
-    }
-    let out = child.wait_with_output().await?;
+    let out = finish_batch(child, script)?;
     // Report WHICH lines failed, not just how many. `ip -batch` prefixes each diagnostic with
     // the failing line number ("Command failed -:3"), so pairing stderr against the script
     // recovers the exact command -- without that, a bare count says a route is missing but
@@ -470,12 +460,11 @@ async fn ip_batch(script: &str) -> std::io::Result<()> {
 /// Like [`ip_batch`] but for commands EXPECTED to fail harmlessly (the idempotency pre-clean
 /// `rule del`s): stderr is discarded and no warning is emitted. A missing rule is the normal
 /// case on a clean connect, so counting these would cry wolf about routing every time.
-async fn ip_batch_quiet(script: &str) {
-    use tokio::io::AsyncWriteExt;
+fn ip_batch_quiet(script: &str) {
     if script.is_empty() {
         return;
     }
-    let Ok(mut child) = tokio::process::Command::new(IP)
+    let Ok(child) = std::process::Command::new(IP)
         .args(["-force", "-batch", "-"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -484,10 +473,31 @@ async fn ip_batch_quiet(script: &str) {
     else {
         return;
     };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(script.as_bytes()).await;
-    }
-    let _ = child.wait().await;
+    let _ = finish_batch(child, script);
+}
+
+fn finish_batch(
+    mut child: std::process::Child,
+    script: &str,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Write;
+    // Feed concurrently with stderr draining: a large failing batch can fill both pipes.
+    std::thread::scope(|scope| {
+        let stdin = child.stdin.take();
+        let writer = scope.spawn(move || {
+            if let Some(mut stdin) = stdin {
+                stdin.write_all(script.as_bytes())
+            } else {
+                Ok(())
+            }
+        });
+        // wait_with_output drains stderr and reaps the installer before rollback can run.
+        let output = child.wait_with_output();
+        writer
+            .join()
+            .map_err(|_| std::io::Error::other("batch writer panicked"))??;
+        output
+    })
 }
 
 fn to_io<E: std::fmt::Display>(e: E) -> std::io::Error {
@@ -504,6 +514,55 @@ fn ifindex_of(name: &str) -> std::io::Result<u32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_batch_write_still_reaps_installer() {
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exec 0<&-; sleep 0.05"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let result = super::finish_batch(child, &"x".repeat(1024 * 1024));
+        assert!(result.is_err());
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "child must be reaped before returning write error"
+        );
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_installer_cannot_mutate_after_rollback() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let running = Arc::new(AtomicBool::new(false));
+        let signal = running.clone();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorded = events.clone();
+        let task = tokio::spawn(async move {
+            struct Rollback(Arc<Mutex<Vec<&'static str>>>);
+            impl Drop for Rollback {
+                fn drop(&mut self) {
+                    self.0.lock().unwrap().push("rollback");
+                }
+            }
+            let _guard = Rollback(recorded.clone());
+            let child = std::process::Command::new("sh")
+                .args(["-c", "sleep 0.1; printf late"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            signal.store(true, Ordering::SeqCst);
+            let output = super::finish_batch(child, "").unwrap();
+            assert_eq!(output.stdout, b"late");
+            recorded.lock().unwrap().push("installed");
+        });
+        while !running.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        task.abort();
+        let _ = task.await;
+        assert_eq!(*events.lock().unwrap(), ["installed", "rollback"]);
+    }
+
     use super::*;
     use crate::route_plan::RoutePlan;
     use leshiy_client::SplitMode;

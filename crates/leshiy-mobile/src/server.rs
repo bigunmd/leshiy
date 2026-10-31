@@ -102,10 +102,14 @@ impl ServerManager {
             .ok_or(BridgeError::NoSuchProfile)
     }
 
-    fn persist(&self, rec: ServerRecord) -> Result<(), BridgeError> {
-        let mut v = self.vault.lock().unwrap();
-        v.upsert(rec);
-        v.save(&self.path, &self.passphrase).map_err(err)
+    fn transaction(&self) -> Result<Vault, BridgeError> {
+        Vault::load_locked(&self.path, &self.passphrase).map_err(err)
+    }
+
+    fn persist(&self, v: &Vault) -> Result<(), BridgeError> {
+        v.save(&self.path, &self.passphrase).map_err(err)?;
+        *self.vault.lock().unwrap() = Vault::load(&self.path, &self.passphrase).map_err(err)?;
+        Ok(())
     }
 
     async fn connect(
@@ -113,6 +117,7 @@ impl ServerManager {
         sudo: Option<String>,
     ) -> Result<RusshTransport, BridgeError> {
         let mut t = RusshTransport::new();
+        t.set_expected_host_key(rec.host_key_fp.clone());
         let fp = t
             .connect(
                 &SshTarget {
@@ -187,13 +192,15 @@ impl ServerManager {
         listener: Box<dyn ProvisionListener>,
     ) -> Result<String, BridgeError> {
         let rt = Self::rt()?;
+        let mut vault = self.transaction()?;
         let rec = rt.block_on(provision_record(&cfg, &*listener))?;
         let uri = rec
             .clients
             .first()
             .map(|c| c.uri.clone())
             .ok_or_else(|| err("no client issued"))?;
-        self.persist(rec)?;
+        vault.upsert(rec);
+        self.persist(&vault)?;
         Ok(uri)
     }
 
@@ -204,7 +211,11 @@ impl ServerManager {
         label: String,
         sudo_password: Option<String>,
     ) -> Result<String, BridgeError> {
-        let mut rec = self.record(&server_id)?;
+        let mut vault = self.transaction()?;
+        let mut rec = vault
+            .get(&server_id)
+            .cloned()
+            .ok_or(BridgeError::NoSuchProfile)?;
         let rt = Self::rt()?;
         let cc = rt.block_on(async {
             let mut t = Self::connect(&rec, sudo_password).await?;
@@ -212,7 +223,8 @@ impl ServerManager {
                 .await
                 .map_err(err)
         })?;
-        self.persist(rec)?;
+        vault.upsert(rec);
+        self.persist(&vault)?;
         Ok(cc.uri)
     }
 
@@ -247,7 +259,11 @@ impl ServerManager {
         short_id: String,
         sudo_password: Option<String>,
     ) -> Result<(), BridgeError> {
-        let mut rec = self.record(&server_id)?;
+        let mut vault = self.transaction()?;
+        let mut rec = vault
+            .get(&server_id)
+            .cloned()
+            .ok_or(BridgeError::NoSuchProfile)?;
         let rt = Self::rt()?;
         rt.block_on(async {
             let mut t = Self::connect(&rec, sudo_password).await?;
@@ -255,7 +271,8 @@ impl ServerManager {
                 .await
                 .map_err(err)
         })?;
-        self.persist(rec)
+        vault.upsert(rec);
+        self.persist(&vault)
     }
 
     /// Whether the server's container is currently running.
@@ -291,7 +308,11 @@ impl ServerManager {
         enable_mtproxy: bool,
         listener: Box<dyn ProvisionListener>,
     ) -> Result<UpgradeOutcome, BridgeError> {
-        let mut rec = self.record(&server_id)?;
+        let mut vault = self.transaction()?;
+        let mut rec = vault
+            .get(&server_id)
+            .cloned()
+            .ok_or(BridgeError::NoSuchProfile)?;
         let image = resolve_image_ref(image_ref.as_deref());
         let rt = Self::rt()?;
         let mtproxy_link = rt.block_on(async {
@@ -310,7 +331,8 @@ impl ServerManager {
             // Only reached when the new container is actually up: `engine::upgrade` leaves the
             // record untouched on failure, so the vault can never name a version that isn't running.
             emit(&*listener, "Persist", "Started", "");
-            self.persist(rec.clone())?;
+            vault.upsert(rec.clone());
+            self.persist(&vault)?;
             emit(&*listener, "Persist", "Done", "");
             if !enable_mtproxy {
                 return Ok(None);
@@ -335,15 +357,18 @@ impl ServerManager {
         purge: bool,
         sudo_password: Option<String>,
     ) -> Result<(), BridgeError> {
-        let rec = self.record(&server_id)?;
+        let mut v = self.transaction()?;
+        let rec = v
+            .get(&server_id)
+            .cloned()
+            .ok_or(BridgeError::NoSuchProfile)?;
         let rt = Self::rt()?;
         rt.block_on(async {
             let mut t = Self::connect(&rec, sudo_password).await?;
             engine::teardown(&mut t, &rec, purge).await.map_err(err)
         })?;
-        let mut v = self.vault.lock().unwrap();
-        v.remove(&server_id);
-        v.save(&self.path, &self.passphrase).map_err(err)
+        v.remove_id(&rec.id);
+        self.persist(&v)
     }
 
     /// Seal every saved record under `backup_passphrase` — the whole-vault backup form, returned
@@ -369,9 +394,9 @@ impl ServerManager {
     ) -> Result<ImportReport, BridgeError> {
         let pass = Zeroizing::new(backup_passphrase);
         let recs = leshiy_provision::vault::open(&blob, &pass).map_err(err)?;
-        let mut v = self.vault.lock().unwrap();
+        let mut v = self.transaction()?;
         let summary = v.import_records(recs);
-        v.save(&self.path, &self.passphrase).map_err(err)?;
+        self.persist(&v)?;
         Ok(ImportReport {
             added: summary.added as u32,
             replaced: summary.replaced as u32,
@@ -533,6 +558,19 @@ mod tests {
         let mut v = sm.vault.lock().unwrap();
         v.upsert(rec(id));
         v.save(&sm.path, &sm.passphrase).unwrap();
+    }
+
+    #[test]
+    fn two_managers_import_without_losing_each_others_records() {
+        let path = tmp();
+        let a = ServerManager::open(path.clone(), "pw".into()).unwrap();
+        let b = ServerManager::open(path.clone(), "pw".into()).unwrap();
+        let first = leshiy_provision::vault::seal(&[rec("first")], "backup").unwrap();
+        let second = leshiy_provision::vault::seal(&[rec("second")], "backup").unwrap();
+        a.import_backup(first, "backup".into()).unwrap();
+        b.import_backup(second, "backup".into()).unwrap();
+        let current = ServerManager::open(path, "pw".into()).unwrap();
+        assert_eq!(current.servers().len(), 2);
     }
 
     #[test]

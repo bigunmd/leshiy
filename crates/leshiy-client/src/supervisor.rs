@@ -23,6 +23,8 @@ pub enum Input {
     DialSucceeded,
     /// A dial attempt failed.
     DialFailed,
+    /// Local listener/proxy setup or cleanup failed.
+    ServiceFailed,
     /// The live tunnel dropped unexpectedly.
     TunnelDropped,
     /// A scheduled backoff timer elapsed.
@@ -92,6 +94,17 @@ impl Machine {
         use State::*;
 
         match (self.state, input) {
+            (_, ServiceFailed) => {
+                self.state = Error;
+                // Do not assume readiness; a retry must set the proxy again.
+                self.proxy_set = false;
+                vec![StopServing, Emit(Error)]
+            }
+            (Error, Disconnect) => {
+                self.state = Disconnected;
+                self.proxy_set = false;
+                vec![StopServing, ClearProxy, Emit(Disconnected)]
+            }
             // --- start a fresh connection ---
             (Disconnected | Error, Connect) => {
                 self.state = Connecting;
@@ -102,12 +115,11 @@ impl Machine {
             // --- initial dial outcome ---
             (Connecting, DialSucceeded) => {
                 self.state = Connected;
-                let mut a = Vec::new();
+                let mut a = vec![StartServing];
                 if !self.proxy_set {
                     self.proxy_set = true;
                     a.push(SetProxy);
                 }
-                a.push(StartServing);
                 a.push(Emit(Connected));
                 a
             }
@@ -117,7 +129,9 @@ impl Machine {
             }
             (Connecting, Disconnect) => {
                 self.state = Disconnected;
-                vec![Emit(Disconnected)]
+                self.proxy_set = false;
+                // A retry may follow a local failure that retained the kill-switch proxy.
+                vec![ClearProxy, Emit(Disconnected)]
             }
 
             // --- live connection ---
@@ -174,12 +188,11 @@ impl Machine {
             (Reconnecting, DialSucceeded) => {
                 self.state = Connected;
                 self.attempt = 0;
-                let mut a = Vec::new();
+                let mut a = vec![StartServing];
                 if !self.proxy_set {
                     self.proxy_set = true;
                     a.push(SetProxy);
                 }
-                a.push(StartServing);
                 a.push(Emit(Connected));
                 a
             }
@@ -276,6 +289,23 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_during_retry_clears_proxy_retained_after_service_failure() {
+        let mut m = machine(true);
+        m.handle(Input::Connect);
+        m.handle(Input::DialSucceeded);
+        m.handle(Input::TunnelDropped);
+        m.handle(Input::BackoffElapsed);
+        m.handle(Input::DialSucceeded);
+        // Listener bind failed; kill switch intentionally left the OS proxy installed.
+        m.handle(Input::ServiceFailed);
+        m.handle(Input::Connect);
+        assert_eq!(
+            m.handle(Input::Disconnect),
+            vec![ClearProxy, Emit(State::Disconnected)]
+        );
+    }
+
+    #[test]
     fn connect_dials() {
         let mut m = machine(true);
         assert_eq!(
@@ -292,7 +322,7 @@ mod tests {
         let actions = m.handle(Input::DialSucceeded);
         assert_eq!(
             actions,
-            vec![SetProxy, StartServing, Emit(State::Connected)]
+            vec![StartServing, SetProxy, Emit(State::Connected)]
         );
         assert_eq!(m.state, State::Connected);
     }

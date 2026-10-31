@@ -59,6 +59,8 @@ impl LeshiyBridge {
         uri: String,
         listener: Box<dyn StatusListener>,
     ) -> Result<(), BridgeError> {
+        #[cfg(target_os = "android")]
+        let pending_fd = leshiy_tun::sys::PendingTunFd::new(tun_fd);
         let mut guard = self.inner.lock().unwrap();
         if guard.is_some() {
             return Err(BridgeError::AlreadyRunning);
@@ -66,8 +68,6 @@ impl LeshiyBridge {
         // Reject a bad URI up front (no runtime/fd churn on failure).
         crate::runtime::validate_uri(&uri)?;
 
-        #[cfg(target_os = "android")]
-        leshiy_tun::sys::set_tun_fd(tun_fd);
         #[cfg(not(target_os = "android"))]
         let _ = tun_fd; // fd injection is android-only; host builds validate the plumbing.
 
@@ -77,6 +77,8 @@ impl LeshiyBridge {
             .map_err(|e| BridgeError::BadUri {
                 reason: format!("runtime: {e}"),
             })?;
+        #[cfg(target_os = "android")]
+        leshiy_tun::sys::set_tun_fd(pending_fd.into_raw());
         let counters = Arc::new(ByteCounters::new());
         let cancel = Arc::new(Notify::new());
         let reattach = Arc::new(Notify::new());
@@ -210,11 +212,13 @@ impl LeshiyBridge {
     /// The netstack's per-flow state does not survive, so in-flight connections break: call this
     /// only when the route set actually changed, never on an unchanged refresh.
     pub fn reattach_tun(&self, tun_fd: i32) -> Result<(), BridgeError> {
+        #[cfg(target_os = "android")]
+        let pending_fd = leshiy_tun::sys::PendingTunFd::new(tun_fd);
         let guard = self.inner.lock().unwrap();
         let running = guard.as_ref().ok_or(BridgeError::NotRunning)?;
 
         #[cfg(target_os = "android")]
-        leshiy_tun::sys::set_tun_fd(tun_fd);
+        leshiy_tun::sys::set_tun_fd(pending_fd.into_raw());
         #[cfg(not(target_os = "android"))]
         let _ = tun_fd; // fd injection is android-only; host builds validate the plumbing.
 
@@ -228,11 +232,15 @@ impl LeshiyBridge {
     /// [`STOP_GRACE`] even if blocking work (a re-dial's `getaddrinfo`) is still in flight — that
     /// work is left to finish on its own thread rather than holding the caller hostage.
     pub fn stop(&self) {
-        let running = self.inner.lock().unwrap().take();
-        if let Some(running) = running {
+        // Serialize shutdown with start/reattach so clearing the pending fd cannot close
+        // a newer session's interface.
+        let mut guard = self.inner.lock().unwrap();
+        if let Some(running) = guard.take() {
             running.cancel.notify_waiters();
             running.rt.shutdown_timeout(STOP_GRACE);
         }
+        #[cfg(target_os = "android")]
+        leshiy_tun::sys::clear_tun_fd();
     }
 }
 

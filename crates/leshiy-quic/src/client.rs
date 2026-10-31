@@ -57,8 +57,11 @@ impl QuicConn {
             dgram_conn: self.dgram_conn.clone(),
             registry: self.registry.clone(),
             stream_id,
-            inbound,
-            _stream: stream,
+            receive: tokio::sync::Mutex::new(DatagramReceive {
+                inbound,
+                stream,
+                ended: false,
+            }),
         })
     }
 }
@@ -69,9 +72,13 @@ pub struct QuicDatagramFlow {
     dgram_conn: quinn::Connection,
     registry: crate::dgram::DatagramRegistry,
     stream_id: h3::quic::StreamId,
+    receive: tokio::sync::Mutex<DatagramReceive>,
+}
+
+struct DatagramReceive {
     inbound: tokio::sync::mpsc::Receiver<Bytes>,
-    /// Kept alive so the server keeps the association open; closing it tears the association down.
-    _stream: h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    stream: h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    ended: bool,
 }
 
 impl QuicDatagramFlow {
@@ -84,8 +91,30 @@ impl QuicDatagramFlow {
     }
 
     /// Receive the next UDP datagram from the target. `None` once the connection/association ends.
-    pub async fn recv(&mut self) -> Option<Bytes> {
-        self.inbound.recv().await
+    pub async fn recv(&self) -> Option<Bytes> {
+        let mut state = self.receive.lock().await;
+        if state.ended {
+            return None;
+        }
+        let DatagramReceive {
+            inbound, stream, ..
+        } = &mut *state;
+        let result = loop {
+            tokio::select! {
+                value = inbound.recv() => break value,
+                _ = self.dgram_conn.closed() => break None,
+                value = stream.recv_data() => match value {
+                    Ok(Some(_)) => continue,
+                    Ok(None) | Err(_) => break None,
+                },
+            }
+        };
+        if result.is_none() {
+            state.ended = true;
+            state.inbound.close();
+            crate::dgram::deregister(&self.registry, self.stream_id).await;
+        }
+        result
     }
 }
 

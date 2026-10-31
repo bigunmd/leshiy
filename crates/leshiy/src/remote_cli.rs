@@ -79,7 +79,7 @@ fn open_vault(interactive: bool, confirm: bool) -> Result<(Zeroizing<String>, Va
     } else {
         prompt_passphrase(confirm)?
     };
-    let vault = Vault::load(&path, &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let vault = Vault::load_locked(&path, &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok((pass, vault))
 }
 
@@ -193,6 +193,7 @@ fn render_client(uri: &str) {
 /// (possible MITM) or if the connection itself fails.
 async fn connect_pinned(rec: &ServerRecord) -> Result<RusshTransport> {
     let mut transport = RusshTransport::new();
+    transport.set_expected_host_key(rec.host_key_fp.clone());
     let fp = transport
         .connect(
             &SshTarget {
@@ -810,7 +811,7 @@ pub async fn run(cmd: crate::cli::RemoteCmd, interactive: bool) -> Result<()> {
             engine::teardown(&mut transport, &rec, purge)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            vault.remove(&server);
+            vault.remove_id(&rec.id);
             vault
                 .save(&vault_path(), &pass)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;

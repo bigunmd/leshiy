@@ -23,6 +23,7 @@ fn sudoize(cmd: &str) -> String {
 /// `connect()` returns.
 struct Handler {
     captured_fp: Arc<Mutex<Option<String>>>,
+    expected_fp: Option<String>,
 }
 
 // russh 0.61's `Handler` uses native async-trait methods, so this impl must NOT
@@ -42,8 +43,12 @@ impl russh::client::Handler for Handler {
             .sha256()
             .unwrap_or([0u8; 32]);
         let fp = crate::ssh::format_fp_sha256(&digest);
+        let accepted = self
+            .expected_fp
+            .as_ref()
+            .is_none_or(|expected| expected == &fp);
         *self.captured_fp.lock().unwrap() = Some(fp);
-        Ok(true) // TOFU: accept every key; the engine compares against the pinned value
+        Ok(accepted) // No pin is reserved for explicit first-use provisioning.
     }
 }
 
@@ -51,6 +56,7 @@ impl russh::client::Handler for Handler {
 pub struct RusshTransport {
     handle: Option<russh::client::Handle<Handler>>,
     fp: Arc<Mutex<Option<String>>>,
+    expected_fp: Option<String>,
     /// When set, privileged commands run via `sudo -S` with this password fed on
     /// stdin. `None` (default) runs `sudo` as-is — correct for root or a
     /// passwordless-sudo (NOPASSWD) user.
@@ -62,8 +68,14 @@ impl RusshTransport {
         Self {
             handle: None,
             fp: Arc::new(Mutex::new(None)),
+            expected_fp: None,
             sudo_password: None,
         }
+    }
+
+    /// Require the saved host key during key exchange, before any authentication.
+    pub fn set_expected_host_key(&mut self, fingerprint: String) {
+        self.expected_fp = Some(fingerprint);
     }
 
     /// Provide a sudo password so privileged commands escalate non-interactively.
@@ -87,6 +99,7 @@ impl Transport for RusshTransport {
         let shared_fp = Arc::clone(&self.fp);
         let handler = Handler {
             captured_fp: shared_fp,
+            expected_fp: self.expected_fp.clone(),
         };
 
         let mut handle =
@@ -229,6 +242,20 @@ impl Transport for RusshTransport {
 #[cfg(test)]
 mod tests {
     use super::sudoize;
+
+    #[tokio::test]
+    async fn changed_host_key_rejected_at_key_exchange() {
+        use russh::client::Handler as _;
+        let key = russh::keys::PublicKey::from_openssh(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJzox0Yy523PWLsaCB8kyN3R0GIrjEhcAiFevSmoTbpl",
+        )
+        .unwrap();
+        let mut handler = super::Handler {
+            captured_fp: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            expected_fp: Some("SHA256:wrong".into()),
+        };
+        assert!(!handler.check_server_key(&key).await.unwrap());
+    }
 
     #[test]
     fn sudoize_rewrites_leading_sudo_for_stdin_password() {

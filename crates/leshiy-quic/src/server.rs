@@ -306,11 +306,10 @@ async fn tunnel(
 
     const FLUSH: u64 = 64 * 1024;
 
-    // DOWN: target -> client (send_data).
-    let down = {
-        let store = store.clone();
-        async move {
-            let mut acc = 0u64;
+    let mut acc_down = 0;
+    let mut acc_up = 0;
+    let result = {
+        let down = async {
             let mut buf = vec![0u8; 16384];
             loop {
                 let n = er.read(&mut buf).await?;
@@ -323,57 +322,64 @@ async fn tunnel(
                 send.send_data(Bytes::copy_from_slice(&buf[..n]))
                     .await
                     .map_err(|e| QuicError::Conn(e.to_string()))?;
-                acc += n as u64;
-                if acc >= FLUSH {
-                    store.add_usage(&sid, 0, acc);
-                    acc = 0;
+                acc_down += n as u64;
+                if acc_down >= FLUSH {
+                    store.add_usage(&sid, 0, acc_down);
+                    acc_down = 0;
                     if !store.still_allowed(&sid, now_secs()) {
-                        break;
+                        return Err(QuicError::Conn("session ended".into()));
                     }
                 }
             }
-            store.add_usage(&sid, 0, acc);
-            let _ = send.finish().await;
+            send.finish()
+                .await
+                .map_err(|e| QuicError::Conn(e.to_string()))?;
             Ok::<(), QuicError>(())
-        }
-    };
-
-    // UP: client (recv_data) -> target.
-    let up = async move {
-        let mut acc = 0u64;
-        'up: while let Some(mut chunk) = recv
-            .recv_data()
-            .await
-            .map_err(|e| QuicError::Conn(e.to_string()))?
-        {
-            while chunk.has_remaining() {
-                let c = chunk.chunk();
-                let n = c.len();
-                // Rate-gate BEFORE forwarding (matches DOWN direction).
-                if let Some(tb) = &limits.up {
-                    tb.consume(n as u64).await;
-                }
-                ew.write_all(c)
-                    .await
-                    .map_err(|e| QuicError::Io(std::io::Error::other(e.to_string())))?;
-                chunk.advance(n);
-                acc += n as u64;
-                if acc >= FLUSH {
-                    store.add_usage(&sid, acc, 0);
-                    acc = 0;
-                    if !store.still_allowed(&sid, now_secs()) {
-                        break 'up;
+        };
+        let up = async {
+            while let Some(mut chunk) = recv
+                .recv_data()
+                .await
+                .map_err(|e| QuicError::Conn(e.to_string()))?
+            {
+                while chunk.has_remaining() {
+                    let c = chunk.chunk();
+                    let n = c.len();
+                    if let Some(tb) = &limits.up {
+                        tb.consume(n as u64).await;
+                    }
+                    ew.write_all(c).await?;
+                    chunk.advance(n);
+                    acc_up += n as u64;
+                    if acc_up >= FLUSH {
+                        store.add_usage(&sid, acc_up, 0);
+                        acc_up = 0;
+                        if !store.still_allowed(&sid, now_secs()) {
+                            return Err(QuicError::Conn("session ended".into()));
+                        }
                     }
                 }
             }
+            ew.shutdown().await?;
+            Ok::<(), QuicError>(())
+        };
+        let revoked = async {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+            loop {
+                tick.tick().await;
+                if !store.still_allowed(&sid, now_secs()) {
+                    break;
+                }
+            }
+        };
+        // Normal EOF preserves half-close; errors and policy expiry terminate both halves.
+        tokio::select! {
+            r = async { tokio::try_join!(down, up).map(|_| ()) } => r,
+            () = revoked => Ok(()),
         }
-        store.add_usage(&sid, acc, 0);
-        ew.shutdown().await.ok();
-        Ok::<(), QuicError>(())
     };
-
-    let _ = tokio::join!(down, up);
-    Ok(())
+    store.add_usage(&sid, acc_up, acc_down);
+    result
 }
 
 /// Relay a CONNECT-UDP association (RFC 9298): HTTP datagrams on this request stream ↔ a UDP
@@ -393,7 +399,7 @@ async fn tunnel_udp(
 ) -> Result<()> {
     let stream_id = stream.id();
     // Open the UDP egress; on failure reply 502 so the client sees a clean proxy error.
-    let mut udp = match egress.open_udp(target).await {
+    let udp = match egress.open_udp(target).await {
         Ok(u) => u,
         Err(_) => {
             let _ = stream
@@ -409,47 +415,45 @@ async fn tunnel_udp(
         .map_err(|e| QuicError::Conn(e.to_string()))?;
 
     let mut inbound = crate::dgram::register(&registry, stream_id).await;
-    let mut buf = vec![0u8; 65535];
-    // Re-check authorization on a timer (a revoked/over-cap user must stop, like the TCP relay).
-    let mut revoke = tokio::time::interval(std::time::Duration::from_secs(2));
-    revoke.tick().await;
-    loop {
-        tokio::select! {
-            _ = revoke.tick() => {
-                if !store.still_allowed(&sid, now_secs()) { break; }
+    let upload = async {
+        while let Some(payload) = inbound.recv().await {
+            if let Some(tb) = &limits.up {
+                tb.consume(payload.len() as u64).await;
             }
-            // UP: client datagram → target.
-            up = inbound.recv() => match up {
-                Some(payload) => {
-                    if let Some(tb) = &limits.up { tb.consume(payload.len() as u64).await; }
-                    let _ = udp.send(&payload).await;
-                    store.add_usage(&sid, payload.len() as u64, 0);
-                }
-                None => break,
-            },
-            // DOWN: target → client datagram.
-            r = udp.recv(&mut buf) => match r {
-                Ok(n) => {
-                    if let Some(tb) = &limits.down { tb.consume(n as u64).await; }
-                    let dg = crate::dgram::encode(stream_id, Bytes::copy_from_slice(&buf[..n]));
-                    match dgram_conn.send_datagram(dg) {
-                        Ok(()) => store.add_usage(&sid, 0, n as u64),
-                        // A single datagram larger than the QUIC datagram MTU (e.g. a big
-                        // EDNS0/DNSSEC DNS reply) must be dropped like ordinary UDP loss, not
-                        // tear down the whole association — every smaller datagram still flows (H6).
-                        Err(quinn::SendDatagramError::TooLarge) => {}
-                        // Connection-wide failures (lost / disabled / unsupported) do end it.
-                        Err(_) => break,
-                    }
-                }
-                Err(_) => break,
-            },
-            // The client closing the request stream ends the association (UDP has no FIN).
-            done = stream.recv_data() => match done {
-                Ok(Some(_)) => {} // connect-udp carries no stream body; ignore stray data
-                Ok(None) | Err(_) => break,
-            },
+            if let Ok(n) = udp.send(&payload).await {
+                store.add_usage(&sid, n as u64, 0);
+            }
         }
+    };
+    let download = async {
+        let mut buf = vec![0; 65535];
+        while let Ok(n) = udp.recv(&mut buf).await {
+            if let Some(tb) = &limits.down {
+                tb.consume(n as u64).await;
+            }
+            let dg = crate::dgram::encode(stream_id, Bytes::copy_from_slice(&buf[..n]));
+            match dgram_conn.send_datagram(dg) {
+                Ok(()) => store.add_usage(&sid, 0, n as u64),
+                Err(quinn::SendDatagramError::TooLarge) => {}
+                Err(_) => break,
+            }
+        }
+    };
+    let revoked = async {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            tick.tick().await;
+            if !store.still_allowed(&sid, now_secs()) {
+                break;
+            }
+        }
+    };
+    let closed = async { while matches!(stream.recv_data().await, Ok(Some(_))) {} };
+    tokio::select! {
+        () = upload => {},
+        () = download => {},
+        () = revoked => {},
+        () = closed => {},
     }
     crate::dgram::deregister(&registry, stream_id).await;
     Ok(())

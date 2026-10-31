@@ -20,18 +20,18 @@ pub trait EgressWrite: Send {
 
 /// A connected UDP egress association: `send`/`recv` discrete datagrams to one target.
 #[async_trait::async_trait]
-pub trait UdpEgress: Send {
-    async fn send(&mut self, buf: &[u8]) -> std::io::Result<usize>;
-    async fn recv(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
+pub trait UdpEgress: Send + Sync {
+    async fn send(&self, buf: &[u8]) -> std::io::Result<usize>;
+    async fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize>;
 }
 
 /// A connected ICMP **echo** egress: `send`/`recv` one ICMP message at a time to one target.
 /// Datagram-shaped like [`UdpEgress`], but there is no port and each message is an echo
 /// request/reply carrying no IP header (ADR-0030).
 #[async_trait::async_trait]
-pub trait IcmpEgress: Send {
-    async fn send(&mut self, buf: &[u8]) -> std::io::Result<usize>;
-    async fn recv(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
+pub trait IcmpEgress: Send + Sync {
+    async fn send(&self, buf: &[u8]) -> std::io::Result<usize>;
+    async fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize>;
 }
 
 #[async_trait::async_trait]
@@ -218,10 +218,10 @@ struct IcmpEgressSock(tokio::net::UdpSocket);
 
 #[async_trait::async_trait]
 impl IcmpEgress for IcmpEgressSock {
-    async fn send(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    async fn send(&self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.send(buf).await
     }
-    async fn recv(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    async fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.0.recv(buf).await
     }
 }
@@ -230,10 +230,10 @@ struct UdpEgressSock(tokio::net::UdpSocket);
 
 #[async_trait::async_trait]
 impl UdpEgress for UdpEgressSock {
-    async fn send(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    async fn send(&self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.send(buf).await
     }
-    async fn recv(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    async fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.0.recv(buf).await
     }
 }
@@ -319,7 +319,7 @@ mod tests {
             let (n, from) = server.recv_from(&mut b).await.unwrap();
             server.send_to(&b[..n], from).await.unwrap(); // echo
         });
-        let mut eg = DirectEgress::allowing_private()
+        let eg = DirectEgress::allowing_private()
             .open_udp(&saddr.to_string())
             .await
             .unwrap();
@@ -397,7 +397,7 @@ mod tests {
             );
             return;
         }
-        let mut eg = DirectEgress::allowing_private()
+        let eg = DirectEgress::allowing_private()
             .open_icmp("127.0.0.1")
             .await
             .unwrap();
@@ -485,7 +485,7 @@ mod tests {
             let (n, from) = server.recv_from(&mut b).await.unwrap();
             server.send_to(&b[..n], from).await.unwrap(); // echo
         });
-        let mut eg = DirectEgress::allowing_private()
+        let eg = DirectEgress::allowing_private()
             .open_udp(&saddr.to_string()) // "[::1]:PORT"
             .await
             .unwrap();

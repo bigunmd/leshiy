@@ -1,7 +1,7 @@
 //! Async supervisor shell: drives the pure `supervisor::Machine` against a real
 //! `Transport` + `SystemProxy` + the metered SOCKS5 listener, exposing connection
 //! state and live throughput to the UI over `watch` channels.
-use crate::listener::serve_metered;
+use crate::listener::serve_metered_on;
 use crate::settings::TransportPref;
 use crate::stats::{ByteCounters, Rates, Throughput};
 use crate::supervisor::{Action, Input, Machine, State};
@@ -112,6 +112,8 @@ where
         throughput: Throughput::new(),
         listener: None,
         closed_monitor: None,
+        generation: 0,
+        dial: None,
         dial_tx,
         backoff_tx,
         dropped_tx,
@@ -141,9 +143,11 @@ struct Inner<T, P> {
     throughput: Throughput,
     listener: Option<JoinHandle<crate::error::Result<()>>>,
     closed_monitor: Option<JoinHandle<()>>,
-    dial_tx: mpsc::Sender<DialResult>,
-    backoff_tx: mpsc::Sender<()>,
-    dropped_tx: mpsc::Sender<()>,
+    generation: u64,
+    dial: Option<JoinHandle<()>>,
+    dial_tx: mpsc::Sender<(u64, DialResult)>,
+    backoff_tx: mpsc::Sender<u64>,
+    dropped_tx: mpsc::Sender<u64>,
     state_tx: watch::Sender<State>,
     stats_tx: watch::Sender<Rates>,
 }
@@ -158,35 +162,66 @@ impl<T: Transport + 'static, P: SystemProxy + 'static> Inner<T, P> {
         for action in actions {
             match action {
                 Action::Dial => {
+                    if self.dial.is_some() {
+                        continue;
+                    }
+                    self.generation += 1;
+                    let generation = self.generation;
                     let transport = self.transport.clone();
                     let uri = self.current_uri.clone();
                     let pref = self.pref;
                     let tx = self.dial_tx.clone();
-                    tokio::spawn(async move {
+                    self.dial = Some(tokio::spawn(async move {
                         let res = transport.dial(&uri, pref).await.map_err(|_| ());
-                        let _ = tx.send(res).await;
-                    });
+                        let _ = tx.send((generation, res)).await;
+                    }));
                 }
                 Action::SetProxy => {
-                    let _ = self.proxy.set(self.socks_addr);
+                    if self.proxy.set(self.socks_addr).is_err() {
+                        let _ = self.proxy.clear();
+                        self.feed(Input::ServiceFailed);
+                        return;
+                    }
                 }
                 Action::ClearProxy => {
-                    let _ = self.proxy.clear();
+                    if self.proxy.clear().is_err() {
+                        self.feed(Input::ServiceFailed);
+                        return;
+                    }
                 }
                 Action::StartServing => {
                     if let Some(tunnel) = self.current.clone() {
                         self.counters = Arc::new(ByteCounters::new());
                         self.throughput = Throughput::new();
-                        self.listener = Some(tokio::spawn(serve_metered(
-                            tunnel.clone(),
-                            self.socks_addr,
-                            self.counters.clone(),
-                        )));
+                        // Bind synchronously before publishing Connected or setting the proxy.
+                        let listener =
+                            std::net::TcpListener::bind(self.socks_addr).and_then(|listener| {
+                                listener.set_nonblocking(true)?;
+                                tokio::net::TcpListener::from_std(listener)
+                            });
+                        let listener = match listener {
+                            Ok(listener) => listener,
+                            Err(_) => {
+                                self.feed(Input::ServiceFailed);
+                                return;
+                            }
+                        };
+                        self.socks_addr = listener.local_addr().expect("bound listener address");
+                        let counters = self.counters.clone();
+                        let serving = tunnel.clone();
+                        let tx = self.dropped_tx.clone();
+                        let generation = self.generation;
+                        self.listener = Some(tokio::spawn(async move {
+                            let result = serve_metered_on(serving, listener, counters).await;
+                            let _ = tx.send(generation).await;
+                            result
+                        }));
                         let dropped_tx = self.dropped_tx.clone();
+                        let generation = self.generation;
                         let watched = tunnel.clone();
                         self.closed_monitor = Some(tokio::spawn(async move {
                             watched.closed().await;
-                            let _ = dropped_tx.send(()).await;
+                            let _ = dropped_tx.send(generation).await;
                         }));
                     }
                 }
@@ -201,9 +236,10 @@ impl<T: Transport + 'static, P: SystemProxy + 'static> Inner<T, P> {
                 }
                 Action::ScheduleBackoff(d) => {
                     let tx = self.backoff_tx.clone();
+                    let generation = self.generation;
                     tokio::spawn(async move {
                         tokio::time::sleep(d).await;
-                        let _ = tx.send(()).await;
+                        let _ = tx.send(generation).await;
                     });
                 }
                 Action::Emit(state) => {
@@ -216,10 +252,18 @@ impl<T: Transport + 'static, P: SystemProxy + 'static> Inner<T, P> {
     fn on_command(&mut self, cmd: Command) {
         match cmd {
             Command::Connect { uri } => {
-                self.current_uri = uri;
-                self.feed(Input::Connect);
+                if matches!(self.machine.state, State::Disconnected | State::Error) {
+                    self.current_uri = uri;
+                    self.feed(Input::Connect);
+                }
             }
-            Command::Disconnect => self.feed(Input::Disconnect),
+            Command::Disconnect => {
+                self.generation += 1;
+                if let Some(dial) = self.dial.take() {
+                    dial.abort();
+                }
+                self.feed(Input::Disconnect);
+            }
             Command::Connectivity(online) => self.feed(Input::Connectivity(online)),
         }
     }
@@ -251,9 +295,9 @@ impl<T: Transport + 'static, P: SystemProxy + 'static> Inner<T, P> {
 async fn run<T: Transport + 'static, P: SystemProxy + 'static>(
     mut inner: Inner<T, P>,
     mut cmd_rx: mpsc::Receiver<Command>,
-    mut dial_rx: mpsc::Receiver<DialResult>,
-    mut backoff_rx: mpsc::Receiver<()>,
-    mut dropped_rx: mpsc::Receiver<()>,
+    mut dial_rx: mpsc::Receiver<(u64, DialResult)>,
+    mut backoff_rx: mpsc::Receiver<u64>,
+    mut dropped_rx: mpsc::Receiver<u64>,
 ) {
     let mut stats = tokio::time::interval(STATS_PERIOD);
     loop {
@@ -262,10 +306,33 @@ async fn run<T: Transport + 'static, P: SystemProxy + 'static>(
                 Some(c) => inner.on_command(c),
                 None => break,
             },
-            Some(res) = dial_rx.recv() => inner.on_dial_result(res),
-            Some(()) = backoff_rx.recv() => inner.feed(Input::BackoffElapsed),
-            Some(()) = dropped_rx.recv() => inner.feed(Input::TunnelDropped),
+            Some((generation, res)) = dial_rx.recv() => {
+                if generation == inner.generation {
+                    inner.dial = None;
+                    inner.on_dial_result(res);
+                }
+            },
+            Some(generation) = backoff_rx.recv() => {
+                if generation == inner.generation { inner.feed(Input::BackoffElapsed); }
+            },
+            Some(generation) = dropped_rx.recv() => {
+                if generation == inner.generation { inner.feed(Input::TunnelDropped); }
+            },
             _ = stats.tick() => inner.emit_stats(),
+        }
+    }
+    inner.on_command(Command::Disconnect);
+}
+
+impl<T, P> Drop for Inner<T, P> {
+    fn drop(&mut self) {
+        for task in [&mut self.dial, &mut self.closed_monitor] {
+            if let Some(task) = task.take() {
+                task.abort();
+            }
+        }
+        if let Some(task) = self.listener.take() {
+            task.abort();
         }
     }
 }
@@ -318,10 +385,11 @@ mod tests {
             _uri: &str,
             _pref: TransportPref,
         ) -> crate::error::Result<Box<dyn Tunnel>> {
-            self.gate.notified().await;
-            Ok(Box::new(TrackedTunnel {
+            let tunnel = Box::new(TrackedTunnel {
                 dropped: self.dropped.clone(),
-            }))
+            });
+            self.gate.notified().await;
+            Ok(tunnel)
         }
     }
 

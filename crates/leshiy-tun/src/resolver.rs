@@ -61,8 +61,9 @@ impl ResolverState {
 }
 
 /// Apply one resolution snapshot: install newly-resolved CIDRs and remove stale ones via the
-/// controller, then remember the new set. Exclude mutates `bypass` routes; Include mutates
-/// `via_tun` routes. Best-effort — a controller error is logged, not fatal.
+/// controller, remembering only successful changes so failures retry on the next snapshot.
+/// Exclude mutates `bypass` routes; Include mutates `via_tun` routes. Controller errors are
+/// logged, not fatal.
 pub async fn apply_resolution(
     ctrl: &dyn RouteController,
     mode: SplitMode,
@@ -90,6 +91,8 @@ pub async fn apply_resolution(
         };
         if let Err(e) = r {
             tracing::warn!(cidr = %c, "split-tunnel: add resolved route failed: {e}");
+        } else {
+            state.current.insert(c.clone());
         }
     }
     for c in &d.removed {
@@ -99,9 +102,10 @@ pub async fn apply_resolution(
         };
         if let Err(e) = r {
             tracing::warn!(cidr = %c, "split-tunnel: remove resolved route failed: {e}");
+        } else {
+            state.current.remove(c);
         }
     }
-    state.current = resolved;
 }
 
 /// Cap a domain list to [`MAX_DOMAINS`], returning the kept slice and whether it was truncated.
@@ -264,25 +268,64 @@ mod tests {
         bypass_removed: Mutex<Vec<Cidr>>,
         via_tun_added: Mutex<Vec<Cidr>>,
         via_tun_removed: Mutex<Vec<Cidr>>,
+        fail: std::sync::atomic::AtomicBool,
+    }
+
+    impl RecordingController {
+        fn result(&self) -> std::io::Result<()> {
+            if self.fail.load(std::sync::atomic::Ordering::Relaxed) {
+                Err(std::io::Error::other("injected route failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unchanged_snapshot_retries_failed_adds_and_removals() {
+        use std::sync::atomic::Ordering;
+        for mode in [SplitMode::Include, SplitMode::Exclude] {
+            let ctrl = RecordingController::default();
+            let mut state = ResolverState::new();
+            let desired = BTreeSet::from([host("1.1.1.1")]);
+            ctrl.fail.store(true, Ordering::Relaxed);
+            apply_resolution(&ctrl, mode, &mut state, desired.clone()).await;
+            assert!(state.current.is_empty(), "failed add is not applied");
+            ctrl.fail.store(false, Ordering::Relaxed);
+            apply_resolution(&ctrl, mode, &mut state, desired.clone()).await;
+            assert_eq!(state.current, desired);
+            ctrl.fail.store(true, Ordering::Relaxed);
+            apply_resolution(&ctrl, mode, &mut state, BTreeSet::new()).await;
+            assert_eq!(state.current, desired, "failed removal remains applied");
+            ctrl.fail.store(false, Ordering::Relaxed);
+            apply_resolution(&ctrl, mode, &mut state, BTreeSet::new()).await;
+            assert!(state.current.is_empty());
+            let (adds, removes) = match mode {
+                SplitMode::Include => (&ctrl.via_tun_added, &ctrl.via_tun_removed),
+                SplitMode::Exclude => (&ctrl.bypass_added, &ctrl.bypass_removed),
+            };
+            assert_eq!(adds.lock().unwrap().len(), 2);
+            assert_eq!(removes.lock().unwrap().len(), 2);
+        }
     }
 
     #[async_trait]
     impl RouteController for RecordingController {
         async fn add_bypass(&self, c: &Cidr) -> std::io::Result<()> {
             self.bypass_added.lock().unwrap().push(c.clone());
-            Ok(())
+            self.result()
         }
         async fn remove_bypass(&self, c: &Cidr) -> std::io::Result<()> {
             self.bypass_removed.lock().unwrap().push(c.clone());
-            Ok(())
+            self.result()
         }
         async fn add_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
             self.via_tun_added.lock().unwrap().push(c.clone());
-            Ok(())
+            self.result()
         }
         async fn remove_via_tun(&self, c: &Cidr) -> std::io::Result<()> {
             self.via_tun_removed.lock().unwrap().push(c.clone());
-            Ok(())
+            self.result()
         }
     }
 
