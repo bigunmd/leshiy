@@ -16,6 +16,14 @@ const HEAD_START: Duration = Duration::from_millis(200);
 const QUIC_TIMEOUT: Duration = Duration::from_secs(3);
 const REALITY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+struct AbortDial(tokio::task::AbortHandle);
+
+impl Drop for AbortDial {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// The production transport: dials real REALITY/QUIC connections.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RealTransport;
@@ -64,6 +72,8 @@ async fn dial_auto(parsed: &RealityUri) -> Result<Box<dyn Tunnel>> {
         tokio::time::sleep(HEAD_START).await;
         tokio::time::timeout(REALITY_CONNECT_TIMEOUT, connect_reality(&raddr, rcfg)).await
     });
+    // Cancelling the parent dial must not detach its speculative handshake.
+    let _abort_reality = AbortDial(reality.abort_handle());
 
     let short_id = parsed.client.short_id;
     match tokio::time::timeout(QUIC_TIMEOUT, connect_quic_from(&q, short_id)).await {
@@ -104,6 +114,17 @@ async fn connect_quic_from(q: &QuicEndpoint, short_id: [u8; 8]) -> Result<QuicCo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_dial_aborts_speculative_handshake() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        let guard = AbortDial(task.abort_handle());
+        drop(guard);
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("cancelled handshake must terminate");
+        assert!(result.unwrap_err().is_cancelled());
+    }
 
     #[tokio::test]
     async fn quic_without_pin_is_refused() {

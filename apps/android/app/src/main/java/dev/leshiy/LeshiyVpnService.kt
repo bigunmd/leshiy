@@ -151,9 +151,6 @@ class LeshiyVpnService : VpnService() {
     /** Registered default-network watch; see [startNetworkWatch]. Main-confined. */
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
-    /** The default network the tunnel was last dialed on. Confined to the callback thread. */
-    private var lastNetwork: Network? = null
-
     private suspend fun buildAndStart(uri: String) {
         try {
             // Domain rules resolve through the tunnel, so there is nothing to resolve them with
@@ -183,7 +180,7 @@ class LeshiyVpnService : VpnService() {
     /**
      * Hand the interface to the bridge on [bridgeDispatcher], so it is ordered after any stop still
      * winding down. Ownership of the fd passes to native code, which closes it on stop; if the
-     * hand-off never happens or `start` rejects it, the fd is closed here instead.
+     * hand-off never happens, the fd is closed here; native code also owns rejected descriptors.
      */
     private suspend fun startBridge(tun: ParcelFileDescriptor, uri: String) {
         var handedOff = false
@@ -191,12 +188,8 @@ class LeshiyVpnService : VpnService() {
             withContext(bridgeDispatcher) {
                 val fd = tun.detachFd()
                 handedOff = true
-                try {
-                    bridge.start(fd, uri, statusListener)
-                } catch (e: Exception) {
-                    runCatching { ParcelFileDescriptor.adoptFd(fd).close() }
-                    throw e
-                }
+                // Native PendingTunFd closes on rejection too; never close the detached fd twice.
+                bridge.start(fd, uri, statusListener)
             }
         } finally {
             if (!handedOff) runCatching { tun.close() }
@@ -311,13 +304,12 @@ class LeshiyVpnService : VpnService() {
         }
         // Past this point the old interface is superseded and packets are already being routed to
         // `tun`, so the fd MUST reach the engine. If handing it over fails there is nothing left
-        // reading the live interface — every packet would blackhole — so reclaim the fd (detachFd
-        // took it out of ParcelFileDescriptor's ownership) and tear down rather than wedge.
+        // reading the live interface — every packet would blackhole — so tear down rather than
+        // wedge. Native PendingTunFd owns the detached fd even when the hand-over is rejected.
         val fd = tun.detachFd()
         return runCatching { bridge.reattachTun(fd) }
             .onFailure { e ->
                 Log.w(TAG, "reattach after re-establish failed; stopping: $e")
-                runCatching { ParcelFileDescriptor.adoptFd(fd).close() }
                 stopTunnel()
             }
             .isSuccess
@@ -355,20 +347,17 @@ class LeshiyVpnService : VpnService() {
      * the mux would spend its whole idle timeout finding out while every flow hangs. The OS knows
      * immediately; this passes that on.
      *
-     * Callbacks arrive serialised on a ConnectivityThread, so [lastNetwork] is confined to it.
+     * Each watch owns callback-thread-confined recovery state, independent of previous sessions.
      */
     private fun startNetworkWatch() {
         val cm = getSystemService(ConnectivityManager::class.java) ?: return
         val cb = object : ConnectivityManager.NetworkCallback() {
+            private val recovery = NetworkRecovery<Network>()
+
             override fun onAvailable(network: Network) {
                 runCatching { setUnderlyingNetworks(arrayOf(network)) }
-                val previous = lastNetwork
-                lastNetwork = network
-                // The first callback after registering only reports where we already are — the
-                // tunnel was dialed on it. Only a *change* means the socket's source is gone, and
-                // a re-dial costs a handshake and every in-flight flow, so never spend one for
-                // a mere capability update.
-                if (previous != null && previous != network) {
+                // Skip only initial registration and duplicates, not availability after a loss.
+                if (recovery.available(network)) {
                     Log.i(TAG, "default network changed; forcing reconnect")
                     runCatching { bridge.networkChanged() }
                         .onFailure { Log.w(TAG, "networkChanged failed: $it") }
@@ -376,7 +365,7 @@ class LeshiyVpnService : VpnService() {
             }
 
             override fun onLost(network: Network) {
-                if (network == lastNetwork) lastNetwork = null
+                recovery.lost(network)
             }
         }
         runCatching { cm.registerDefaultNetworkCallback(cb) }
@@ -387,7 +376,6 @@ class LeshiyVpnService : VpnService() {
     private fun stopNetworkWatch() {
         val cb = networkCallback ?: return
         networkCallback = null
-        lastNetwork = null
         runCatching {
             getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb)
         }

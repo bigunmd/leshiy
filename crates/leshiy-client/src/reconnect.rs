@@ -96,7 +96,7 @@ impl ReconnectingTunnel {
         seed: Arc<dyn Tunnel>,
         params: ReconnectParams,
         kick: Arc<Notify>,
-    ) -> Arc<dyn Tunnel> {
+    ) -> Arc<Self> {
         let (tx, rx) = watch::channel(Some(seed.clone()));
         let uri = uri.into();
         let task = tokio::spawn(supervise(transport, uri, pref, seed, params, tx, kick));
@@ -105,6 +105,11 @@ impl ReconnectingTunnel {
             hold: params.hold,
             _task: AbortOnDrop(task),
         })
+    }
+
+    /// Whether the supervisor is currently dialing or backing off without a live tunnel.
+    pub fn is_reconnecting(&self) -> bool {
+        self.current.borrow().is_none()
     }
 }
 
@@ -124,8 +129,9 @@ async fn supervise<T: Transport>(
     loop {
         // Either the tunnel worked out it was dead, or the host told us the ground moved under it.
         tokio::select! {
-            () = current.closed() => tracing::warn!("tunnel dropped; reconnecting"),
+            biased;
             () = kick.notified() => tracing::info!("network changed; forcing reconnect"),
+            () = current.closed() => tracing::warn!("tunnel dropped; reconnecting"),
         }
         // Publish "no tunnel" so in-flight `open()`s hold rather than hit a dead tunnel. If the
         // receiver is gone the wrapper was dropped — stop.
@@ -135,7 +141,16 @@ async fn supervise<T: Transport>(
         // Re-dial with capped exponential backoff until it succeeds.
         let mut attempt = 0u32;
         loop {
-            match transport.dial(&uri, pref).await {
+            let result = tokio::select! {
+                // Consume network changes before accepting a result from the old network.
+                biased;
+                () = kick.notified() => {
+                    attempt = 0;
+                    continue;
+                }
+                result = transport.dial(&uri, pref) => result,
+            };
+            match result {
                 Ok(tunnel) => {
                     let tunnel: Arc<dyn Tunnel> = Arc::from(tunnel);
                     current = tunnel.clone();
@@ -149,7 +164,11 @@ async fn supervise<T: Transport>(
                     let delay = backoff_delay(attempt, params.base, params.max);
                     tracing::debug!(attempt, ?delay, "reconnect dial failed; backing off");
                     attempt = attempt.saturating_add(1);
-                    tokio::time::sleep(delay).await;
+                    tokio::select! {
+                        biased;
+                        () = kick.notified() => attempt = 0,
+                        () = tokio::time::sleep(delay) => {}
+                    }
                 }
             }
         }
@@ -546,6 +565,82 @@ mod tests {
                 Err(ClientError::ConnectFailed)
             }
         }
+    }
+
+    struct InterruptedTransport {
+        dials: Arc<AtomicUsize>,
+        started: Arc<Notify>,
+        pending_first: bool,
+    }
+
+    #[async_trait]
+    impl Transport for InterruptedTransport {
+        async fn dial(&self, _uri: &str, _pref: TransportPref) -> Result<Box<dyn Tunnel>> {
+            if self.dials.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.started.notify_one();
+                if self.pending_first {
+                    return std::future::pending().await;
+                }
+                return Err(ClientError::ConnectFailed);
+            }
+            Ok(Box::new(FakeTunnel {
+                drop_signal: Arc::new(Notify::new()),
+                alive: Arc::new(AtomicBool::new(true)),
+            }))
+        }
+    }
+
+    async fn kick_interrupts_reconnect(pending_first: bool) {
+        let dials = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let kick = Arc::new(Notify::new());
+        let (seed, alive, dropped) = seed();
+        let tunnel = ReconnectingTunnel::spawn_with_kick(
+            InterruptedTransport {
+                dials: dials.clone(),
+                started: started.clone(),
+                pending_first,
+            },
+            "leshiy://x",
+            TransportPref::Tcp,
+            seed,
+            ReconnectParams {
+                base: Duration::from_secs(60),
+                max: Duration::from_secs(60),
+                ..fast_params()
+            },
+            kick.clone(),
+        );
+        assert!(!tunnel.is_reconnecting(), "seed starts connected");
+        alive.store(false, Ordering::SeqCst);
+        dropped.notify_one();
+        started.notified().await;
+        assert!(tunnel.is_reconnecting(), "outage must be observable");
+        kick.notify_one();
+        timeout(Duration::from_millis(200), tunnel.open("example.com:443"))
+            .await
+            .expect("network kick must interrupt the old reconnect attempt or backoff")
+            .expect("fresh network dial must succeed");
+        tokio::task::yield_now().await;
+        assert!(
+            !tunnel.is_reconnecting(),
+            "successful dial restores connected status"
+        );
+        assert_eq!(
+            dials.load(Ordering::SeqCst),
+            2,
+            "consumed kick must not reconnect the fresh tunnel"
+        );
+    }
+
+    #[tokio::test]
+    async fn kick_interrupts_reconnect_backoff_without_stale_redial() {
+        kick_interrupts_reconnect(false).await;
+    }
+
+    #[tokio::test]
+    async fn kick_interrupts_in_flight_reconnect_without_stale_redial() {
+        kick_interrupts_reconnect(true).await;
     }
 
     fn fast_params() -> ReconnectParams {

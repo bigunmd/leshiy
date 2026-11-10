@@ -3,7 +3,8 @@
 use crate::error::BridgeError;
 use crate::status::{ConnState, next_on_dial_result};
 use leshiy_client::{
-    ByteCounters, RealTransport, ReconnectParams, ReconnectingTunnel, Transport as _, TransportPref,
+    ByteCounters, RealTransport, ReconnectParams, ReconnectingTunnel, Transport as _,
+    TransportPref, Tunnel as _,
 };
 use leshiy_reality::config::RealityUri;
 use leshiy_tun::{TunConfig, TunEngine};
@@ -73,14 +74,16 @@ pub async fn run_engine(
         ReconnectParams::default(),
         kick,
     );
-    *tunnel_slot.lock().unwrap() = Some(Arc::downgrade(&tunnel));
+    let engine_tunnel: Arc<dyn leshiy_client::Tunnel> = tunnel.clone();
+    *tunnel_slot.lock().unwrap() = Some(Arc::downgrade(&engine_tunnel));
 
     // Sample the tunnel's keepalive RTT (~1 Hz) into the shared cell the status poller reads.
     // Runs until the engine is cancelled; `tunnel` is an `Arc`, so this clone is cheap.
-    {
+    let status_task = {
         let rtt_tunnel = tunnel.clone();
         let rtt_cancel = cancel.clone();
         let rtt_cell = rtt_ms.clone();
+        let live_state_tx = state_tx.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
@@ -92,11 +95,12 @@ pub async fn run_engine(
                             .map(|us| ((us + 500) / 1000).max(1))
                             .unwrap_or(0);
                         rtt_cell.store(ms, Ordering::Relaxed);
+                        publish_live_state(&live_state_tx, rtt_tunnel.is_reconnecting());
                     }
                 }
             }
-        });
-    }
+        })
+    };
     // On Android the VpnService owns routing/DNS; `server_ip` is still excepted from the
     // tunnel to avoid a routing loop. `orig_gateway` is unused by the android backend.
     let cfg = TunConfig {
@@ -107,7 +111,8 @@ pub async fn run_engine(
     // `run_with_reattach`, not `run`: on Android a split-tunnel route change means the service
     // establishes a fresh interface and hands us its fd, and the engine must pick it up without
     // re-dialing (see `LeshiyBridge::reattach_tun`).
-    let result = TunEngine::run_with_reattach(tunnel, cfg, counters, cancel, reattach).await;
+    let result = TunEngine::run_with_reattach(engine_tunnel, cfg, counters, cancel, reattach).await;
+    status_task.abort();
     // The engine ended (device closed / fatal). A clean stop() teardown is reflected by the
     // Kotlin side; publishing Failed here covers unexpected exits so the UI never sticks on
     // Connected after the tunnel is gone.
@@ -115,8 +120,27 @@ pub async fn run_engine(
     result
 }
 
+fn publish_live_state(state_tx: &watch::Sender<ConnState>, reconnecting: bool) {
+    state_tx.send_if_modified(|state| {
+        // Check and update under the same lock so a late tick cannot overwrite a fatal exit.
+        if !matches!(*state, ConnState::Connected | ConnState::Reconnecting) {
+            return false;
+        }
+        let next = if reconnecting {
+            ConnState::Reconnecting
+        } else {
+            ConnState::Connected
+        };
+        if *state == next {
+            return false;
+        }
+        *state = next;
+        true
+    });
+}
+
 /// Run `attempt` until it yields a value, sleeping with capped exponential backoff between
-/// failures (`on_fail` runs after each). A `kick` cuts the current wait short. Never gives up:
+/// failures (`on_fail` runs after each). A `kick` cancels the current dial or backoff. Never gives up:
 /// the caller is torn down from outside (runtime shutdown) when the user stops the tunnel.
 async fn retry_until<T, F, Fut>(
     mut attempt: F,
@@ -130,15 +154,24 @@ where
 {
     let mut failures = 0u32;
     loop {
-        if let Some(value) = attempt().await {
+        let result = tokio::select! {
+            biased;
+            () = kick.notified() => {
+                failures = 0;
+                continue;
+            }
+            result = attempt() => result,
+        };
+        if let Some(value) = result {
             return value;
         }
         on_fail();
         let delay = leshiy_client::backoff_delay(failures, params.base, params.max);
         failures = failures.saturating_add(1);
         tokio::select! {
+            biased;
+            () = kick.notified() => failures = 0,
             () = tokio::time::sleep(delay) => {}
-            () = kick.notified() => {}
         }
     }
 }
@@ -194,9 +227,62 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn network_change_cancels_initial_dial_without_leaving_a_stale_kick() {
+        let kick = Notify::new();
+        let started = Notify::new();
+        let attempts = Cell::new(0);
+        let dial = retry_until(
+            || {
+                attempts.set(attempts.get() + 1);
+                let n = attempts.get();
+                let started = &started;
+                async move {
+                    if n == 1 {
+                        started.notify_one();
+                        return std::future::pending().await;
+                    }
+                    Some(n)
+                }
+            },
+            params(),
+            &kick,
+            || panic!("cancelled dial is not a failed dial"),
+        );
+        let change = async {
+            started.notified().await;
+            kick.notify_one();
+        };
+        let (result, ()) =
+            tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(dial, change) })
+                .await
+                .expect("kick must cancel an in-flight initial dial");
+        assert_eq!(result, 2);
+        assert!(
+            tokio::time::timeout(Duration::ZERO, kick.notified())
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn live_status_tracks_reconnect_without_overwriting_terminal_state() {
+        use crate::status::ConnState;
+        let (tx, rx) = tokio::sync::watch::channel(ConnState::Connected);
+        super::publish_live_state(&tx, true);
+        assert_eq!(*rx.borrow(), ConnState::Reconnecting);
+        super::publish_live_state(&tx, false);
+        assert_eq!(*rx.borrow(), ConnState::Connected);
+        for terminal in [ConnState::Failed, ConnState::Disconnected] {
+            tx.send(terminal).unwrap();
+            super::publish_live_state(&tx, true);
+            super::publish_live_state(&tx, false);
+            assert_eq!(*rx.borrow(), terminal);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_network_change_retries_at_once() {
         let kick = Notify::new();
-        kick.notify_one(); // the host saw the default network change mid-backoff
         let attempts = Cell::new(0);
         let started = Instant::now();
         retry_until(
@@ -210,9 +296,10 @@ mod tests {
                 ..params()
             },
             &kick,
-            || {},
+            || kick.notify_one(), // the host reports a network change as backoff starts
         )
         .await;
+        assert_eq!(attempts.get(), 2);
         assert_eq!(started.elapsed(), Duration::ZERO);
     }
 }

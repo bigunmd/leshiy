@@ -53,6 +53,7 @@ impl LeshiyBridge {
 
     /// Start the tunnel over `tun_fd` (from `VpnService.establish().detachFd()`), dialing `uri`.
     /// Pushes `Status` to `listener` ~once per second until [`stop`](Self::stop).
+    /// On Android, takes ownership of `tun_fd` even on error; the caller must not close it again.
     pub fn start(
         &self,
         tun_fd: i32,
@@ -211,6 +212,7 @@ impl LeshiyBridge {
     ///
     /// The netstack's per-flow state does not survive, so in-flight connections break: call this
     /// only when the route set actually changed, never on an unchanged refresh.
+    /// On Android, takes ownership of `tun_fd` even on error; the caller must not close it again.
     pub fn reattach_tun(&self, tun_fd: i32) -> Result<(), BridgeError> {
         #[cfg(target_os = "android")]
         let pending_fd = leshiy_tun::sys::PendingTunFd::new(tun_fd);
